@@ -32,6 +32,9 @@ preserves data order while `geom_line` sorts by x, `ggsave("fig.html", p)`.
   Numeric colour uses **robust 2–98 percentile limits by default** (skewed
   data like lidar intensity stays readable); control with
   `scale_colour_continuous(trans="sqrt"|"log10", limits=(lo,hi)|"full")`.
+  For lidar/heatmap-style data add `scale_colour_viridis_c()` —
+  `option="viridis"|"magma"|"turbo"` (turbo ≈ the nuScenes look), exact
+  matplotlib stops, perceptually ordered and CVD-safe unlike jet/hsv.
 - **Context-safe in SolveIt**: displaying a figure red-eyes its cell
   (`skipped=1`) so viewer HTML never eats LLM context. Opt out per figure
   with `ggplot(..., hide=False)` or globally with `autohide(False)`.
@@ -45,7 +48,8 @@ preserves data order while `geom_line` sorts by x, `ggsave("fig.html", p)`.
 | `geom_point(size=, alpha=)` | 2D size in px, 3D in scene units |
 | `geom_line(linewidth=)` / `geom_path()` | line sorts by x; path keeps data order |
 | `labs(title=, x=, y=, z=, colour=)` | labels |
-| `scale_colour_continuous(trans=, limits=)` | numeric colour: `sqrt`/`log10`/`linear`; limits tuple or `"full"` |
+| `scale_colour_continuous(trans=, limits=, palette=)` | numeric colour: `sqrt`/`log10`/`linear`; limits tuple or `"full"` |
+| `scale_colour_viridis_c(option=)` | viridis / magma / turbo colormaps for numeric colour |
 | `theme_dark()` / `theme_light()` | dark is default |
 | `ggsave(filename, p)` / `p.save(path)` | standalone HTML file |
 | `read_bin(path, stride=5)` | point-cloud `.bin` → DataFrame; `remote=True` streams via CRAFT |
