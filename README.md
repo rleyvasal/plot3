@@ -25,10 +25,16 @@ preserves data order while `geom_line` sorts by x, `ggsave("fig.html", p)`.
 - **Smooth**: WebGL marks; 100k+ point scatters at 60 fps, first frame instant.
 - **2D interactivity**: drag to pan, Ctrl/⌘+scroll (or trackpad pinch) to zoom,
   double-click to reset, hover for values. `aes(z=...)` switches to a 3D orbit
-  viewer with axes box.
+  viewer with axes box. **Click a legend entry to hide/show that category.**
 - **Validated colors**: fixed-order categorical palette and single-hue
   sequential ramp, CVD-validated for both the dark (`#0b1020`) and light
   themes. More than 8 categories is an error, not an eleventh hue.
+  Numeric colour uses **robust 2–98 percentile limits by default** (skewed
+  data like lidar intensity stays readable); control with
+  `scale_colour_continuous(trans="sqrt"|"log10", limits=(lo,hi)|"full")`.
+- **Context-safe in SolveIt**: displaying a figure red-eyes its cell
+  (`skipped=1`) so viewer HTML never eats LLM context. Opt out per figure
+  with `ggplot(..., hide=False)` or globally with `autohide(False)`.
 
 ## API (v1)
 
@@ -39,6 +45,7 @@ preserves data order while `geom_line` sorts by x, `ggsave("fig.html", p)`.
 | `geom_point(size=, alpha=)` | 2D size in px, 3D in scene units |
 | `geom_line(linewidth=)` / `geom_path()` | line sorts by x; path keeps data order |
 | `labs(title=, x=, y=, z=, colour=)` | labels |
+| `scale_colour_continuous(trans=, limits=)` | numeric colour: `sqrt`/`log10`/`linear`; limits tuple or `"full"` |
 | `theme_dark()` / `theme_light()` | dark is default |
 | `ggsave(filename, p)` / `p.save(path)` | standalone HTML file |
 | `read_bin(path, stride=5)` | point-cloud `.bin` → DataFrame; `remote=True` streams via CRAFT |

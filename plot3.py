@@ -47,7 +47,7 @@ try:
 except Exception:  # pragma: no cover - outside IPython
     get_ipython = None
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "ggplot",
@@ -56,10 +56,13 @@ __all__ = [
     "geom_line",
     "geom_path",
     "labs",
+    "scale_colour_continuous",
+    "scale_color_continuous",
     "theme_dark",
     "theme_light",
     "ggsave",
     "read_bin",
+    "autohide",
 ]
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -313,6 +316,26 @@ class labs(dict):
                 self[k] = v
 
 
+class scale_colour_continuous:
+    """Numeric colour scale control.
+
+    trans:  "linear" | "sqrt" | "log10"
+    limits: (lo, hi) tuple, or "full" for the data min/max.
+            Default (no scale added) is robust 2nd-98th percentile limits —
+            skewed data (lidar intensity!) stays readable; values outside
+            the limits clamp to the ramp ends.
+    """
+
+    def __init__(self, trans="linear", limits=None):
+        if trans not in ("linear", "sqrt", "log10"):
+            raise ValueError("trans must be linear, sqrt or log10")
+        self.trans = trans
+        self.limits = limits
+
+
+scale_color_continuous = scale_colour_continuous
+
+
 class _Theme:
     def __init__(self, name: str):
         self.name = name
@@ -330,7 +353,7 @@ class ggplot:
     """ggplot(df, aes(...)) + geom_*() + labs() + theme_*()."""
 
     def __init__(self, data: pd.DataFrame, mapping: aes | None = None, *,
-                 height="480px", quantize=True, compress=True):
+                 height="480px", quantize=True, compress=True, hide=None):
         if not isinstance(data, pd.DataFrame):
             data = pd.DataFrame(data)
         self.data = data
@@ -338,9 +361,11 @@ class ggplot:
         self.layers: list[_Geom] = []
         self.labs: dict = {}
         self.theme_name = "dark"
+        self.cscale: scale_colour_continuous | None = None
         self.height = height if isinstance(height, str) else f"{int(height)}px"
         self.quantize = bool(quantize)
         self.compress = bool(compress)
+        self.hide = hide  # None -> module default (autohide())
 
     def __add__(self, other):
         g = copy.copy(self)
@@ -352,6 +377,8 @@ class ggplot:
             g.labs.update(other)
         elif isinstance(other, _Theme):
             g.theme_name = other.name
+        elif isinstance(other, scale_colour_continuous):
+            g.cscale = other
         elif isinstance(other, aes):
             m = aes()
             m.update(self.mapping)
@@ -364,7 +391,15 @@ class ggplot:
     # rendering --------------------------------------------------------------
 
     def _repr_html_(self) -> str:
-        return self._iframe()
+        html = self._iframe()
+        # SolveIt: big viewer HTML must not enter LLM context (~800K chars
+        # window) — red-eye the displaying cell unless opted out.
+        if self.hide if self.hide is not None else _AUTOHIDE:
+            try:
+                _hide_caller_from_ai()
+            except Exception:
+                pass
+        return html
 
     def html(self) -> str:
         """The full standalone document (what the iframe srcdoc carries)."""
@@ -386,6 +421,15 @@ class ggplot:
             f'border-radius:6px;background:{_THEMES[self.theme_name]["surface"]}" '
             f'title="{_htmlesc.escape(str(title))}"></iframe>'
         )
+
+
+_AUTOHIDE = True
+
+
+def autohide(on: bool = True) -> None:
+    """Default hide-from-AI behavior for displayed figures (SolveIt red eye)."""
+    global _AUTOHIDE
+    _AUTOHIDE = bool(on)
 
 
 def ggsave(filename, plot: ggplot | None = None, **_kw) -> str:
@@ -422,6 +466,7 @@ def _build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     axes = ["x", "y", "z"] if is3d else ["x", "y"]
     scales: dict[str, _Scale] = {}
     color_scale = None  # ("num", lo, hi) | ("cat", cats)
+    num_color_vals: list[np.ndarray] = []
 
     # Pass 1 — per-layer values + global scale domains
     layer_vals = []
@@ -471,6 +516,7 @@ def _build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                     color_scale = ["num", math.inf, -math.inf]
                 color_scale[1] = min(color_scale[1], float(np.nanmin(cv)))
                 color_scale[2] = max(color_scale[2], float(np.nanmax(cv)))
+                num_color_vals.append(np.asarray(cv, dtype=np.float64))
                 vals["color"] = ("num", cv, None)
         if "group" in m:
             _, gv, gcats = _col_values(sub[m["group"]])
@@ -478,9 +524,31 @@ def _build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         layer_vals.append(vals)
 
     for a in axes:
-        if scales[a].kind == "cat":
-            pass
         scales[a].finish()
+
+    # Numeric colour limits: robust 2-98 percentile by default so skewed data
+    # (lidar intensity) actually varies; override via scale_colour_continuous.
+    num_color = None
+    if color_scale is not None and color_scale[0] == "num":
+        allv = np.concatenate(num_color_vals)
+        cs = g.cscale or scale_colour_continuous()
+        if cs.limits == "full":
+            lo_c, hi_c = color_scale[1], color_scale[2]
+        elif isinstance(cs.limits, (tuple, list)):
+            lo_c, hi_c = float(cs.limits[0]), float(cs.limits[1])
+        else:
+            lo_c = float(np.nanpercentile(allv, 2))
+            hi_c = float(np.nanpercentile(allv, 98))
+        if hi_c <= lo_c:
+            lo_c, hi_c = color_scale[1], color_scale[2]
+        if hi_c <= lo_c:
+            hi_c = lo_c + 1.0
+        tf = {
+            "linear": lambda a: a,
+            "sqrt": lambda a: np.sqrt(np.maximum(a, 0.0)),
+            "log10": lambda a: np.log10(np.maximum(a, 1e-12)),
+        }[cs.trans]
+        num_color = (lo_c, hi_c, cs.trans, tf)
 
     # Pass 2 — encode payloads per layer (quantized against the shared scales)
     payloads: list[tuple[str, str]] = []
@@ -528,8 +596,11 @@ def _build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 payloads.append((pid, _pack_u16(codes, g.compress)))
                 spec_l["color"] = {"id": pid, "dtype": "u16", "kind": "cat"}
             else:
-                lo, hi = color_scale[1], color_scale[2]
-                enc = _encode_norm(cv[order], lo, hi, quantize=True,
+                lo_c, hi_c, _trans, tf = num_color
+                cvt = tf(np.clip(cv[order], lo_c, hi_c))
+                lo_t = float(tf(np.asarray(lo_c)))
+                hi_t = float(tf(np.asarray(hi_c)))
+                enc = _encode_norm(cvt, lo_t, hi_t, quantize=True,
                                    compress=g.compress)
                 payloads.append((pid, enc["b64"]))
                 spec_l["color"] = {"id": pid, "dtype": "u16", "kind": "num"}
@@ -549,7 +620,10 @@ def _build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             if geom.size is not None:
                 spec_l["size"] = float(geom.size)
             elif is3d:
-                spec_l["size"] = 0.012  # cube units
+                # cube units; density-scaled so dense scans stay crisp
+                spec_l["size"] = round(
+                    min(0.02, max(0.0012,
+                                  0.02 * (500.0 / max(1, n)) ** (1.0 / 3.0))), 5)
             else:
                 spec_l["size"] = 6.0 if n <= 2000 else (4.0 if n <= 20000 else 2.5)
             if spec_l["alpha"] is None:
@@ -569,8 +643,8 @@ def _build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             legend = [{"label": c, "color": theme["cat"][i]}
                       for i, c in enumerate(cats)]
         else:
-            cspec = {"kind": "num", "lo": color_scale[1], "hi": color_scale[2],
-                     "ramp": theme["seq"]}
+            cspec = {"kind": "num", "lo": num_color[0], "hi": num_color[1],
+                     "trans": num_color[2], "ramp": theme["seq"]}
 
     base_map = dict(g.mapping)
     spec = {
@@ -631,6 +705,7 @@ html,body{margin:0;height:100%;overflow:hidden;
   border-radius:6px;font-size:11px;line-height:1.7}
 #legend .sw{display:inline-block;width:9px;height:9px;border-radius:5px;
   margin-right:6px;vertical-align:-1px}
+#legend .lg-e{cursor:pointer;user-select:none}
 #tip{position:absolute;display:none;z-index:5;pointer-events:none;
   padding:4px 8px;border-radius:5px;font-size:11px;white-space:nowrap}
 #hint{position:absolute;left:50%;bottom:46px;transform:translateX(-50%);
@@ -729,15 +804,35 @@ const figEl = document.getElementById('fig');
 const titleEl = document.getElementById('title');
 if (S.labs.title) titleEl.textContent = S.labs.title;
 const legEl = document.getElementById('legend');
+// legend click-filtering: category index -> three.js objects
+const hiddenCats = new Set();
+const catObjs = new Map();
+function regCat(ci, obj) {
+  if (!catObjs.has(ci)) catObjs.set(ci, []);
+  catObjs.get(ci).push(obj);
+}
+let redraw = () => {};   // 2D assigns its draw(); 3D renders continuously
+window.__plot3 = { hiddenCats, catObjs };
 if (S.legend) {
   legEl.style.display = 'block';
   legEl.style.background = T.surface + 'e6';
   legEl.style.border = '1px solid ' + T.grid;
   legEl.style.color = T.ink2;
   legEl.innerHTML = (S.labs.color ? '<b style="color:'+T.ink+'">' +
-      S.labs.color + '</b><br>' : '') +
-    S.legend.map(e => '<span class="sw" style="background:' + e.color +
-      '"></span>' + e.label).join('<br>');
+      S.labs.color + '</b>' : '') +
+    S.legend.map((e, i) => '<div class="lg-e" data-ci="' + i +
+      '"><span class="sw" style="background:' + e.color + '"></span>' +
+      e.label + '</div>').join('');
+  legEl.addEventListener('click', ev => {
+    const row = ev.target.closest('.lg-e');
+    if (!row) return;
+    const ci = +row.dataset.ci;
+    if (hiddenCats.has(ci)) hiddenCats.delete(ci); else hiddenCats.add(ci);
+    row.style.opacity = hiddenCats.has(ci) ? 0.35 : 1;
+    for (const o of (catObjs.get(ci) || [])) o.visible = !hiddenCats.has(ci);
+    tip.style.display = 'none';
+    redraw();
+  });
 } else if (S.color.kind === 'num') {
   legEl.style.display = 'block';
   legEl.style.background = T.surface + 'e6';
@@ -746,8 +841,8 @@ if (S.legend) {
   legEl.innerHTML = '<b style="color:'+T.ink+'">' + (S.labs.color||'') +
     '</b><div id="ramp" style="background:linear-gradient(90deg,' +
     S.color.ramp.join(',') + ')"></div>' +
-    '<span style="float:left">' + fmt(S.color.lo) + '</span>' +
-    '<span style="float:right">' + fmt(S.color.hi) + '</span>';
+    '<span style="float:left">' + (+S.color.lo.toPrecision(3)) + '</span>' +
+    '<span style="float:right">' + (+S.color.hi.toPrecision(3)) + '</span>';
 }
 
 function fmt(v) {
@@ -755,6 +850,15 @@ function fmt(v) {
   const a = Math.abs(v);
   if (a >= 1e6 || a < 1e-4) return v.toPrecision(3);
   return String(+v.toFixed(6));
+}
+// numeric colour: normalized ramp position -> data value (inverse transform)
+function cval(t) {
+  const tr = S.color.trans || 'linear';
+  const f = tr === 'sqrt' ? Math.sqrt
+    : tr === 'log10' ? (v => Math.log10(Math.max(v, 1e-12))) : (v => v);
+  const inv = tr === 'sqrt' ? (v => v * v)
+    : tr === 'log10' ? (v => Math.pow(10, v)) : (v => v);
+  return inv(f(S.color.lo) + t * (f(S.color.hi) - f(S.color.lo)));
 }
 function fmtAxis(ax, v) {                     // v in data units
   const sc = S.scales[ax];
@@ -835,17 +939,40 @@ if (!S.is3d) {
   for (const L of S.layers) {
     const n = L.n;
     const cols = layerColors(L, hex2rgb(T.cat[0]));
+    const isCat = L.color && L.color.kind === 'cat';
     if (L.kind === 'point') {
-      const pos = new Float32Array(n * 3);
-      for (let i = 0; i < n; i++) {
-        pos[i*3] = L.x.data[i]; pos[i*3+1] = L.y.data[i]; pos[i*3+2] = 0;
+      if (isCat) {
+        // one Points object per category -> legend click-filtering
+        const k = S.color.cats.length;
+        const buckets = Array.from({ length: k }, () => []);
+        for (let i = 0; i < n; i++) buckets[L.color.data[i] % k].push(i);
+        buckets.forEach((idx, ci) => {
+          if (!idx.length) return;
+          const pos = new Float32Array(idx.length * 3);
+          for (let j = 0; j < idx.length; j++) {
+            const i = idx[j];
+            pos[j*3] = L.x.data[i]; pos[j*3+1] = L.y.data[i]; pos[j*3+2] = 0;
+          }
+          const g = new THREE.BufferGeometry();
+          g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+          const pt = new THREE.Points(g, new THREE.PointsMaterial({
+            color: S.color.palette[ci], size: L.size, sizeAttenuation: false,
+            transparent: true, opacity: L.alpha }));
+          scene.add(pt);
+          regCat(ci, pt);
+        });
+      } else {
+        const pos = new Float32Array(n * 3);
+        for (let i = 0; i < n; i++) {
+          pos[i*3] = L.x.data[i]; pos[i*3+1] = L.y.data[i]; pos[i*3+2] = 0;
+        }
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        g.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+        scene.add(new THREE.Points(g, new THREE.PointsMaterial({
+          size: L.size, sizeAttenuation: false, vertexColors: true,
+          transparent: true, opacity: L.alpha })));
       }
-      const g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-      g.setAttribute('color', new THREE.BufferAttribute(cols, 3));
-      scene.add(new THREE.Points(g, new THREE.PointsMaterial({
-        size: L.size, sizeAttenuation: false, vertexColors: true,
-        transparent: true, opacity: L.alpha })));
     } else {
       for (const [s0, cnt] of L.groups) {
         if (cnt < 2) continue;
@@ -861,7 +988,9 @@ if (!S.is3d) {
           linewidth: L.linewidth, worldUnits: false,
           transparent: true, opacity: L.alpha });
         lineMats.push(lm);
-        scene.add(new Line2(lg, lm));
+        const ln = new Line2(lg, lm);
+        scene.add(ln);
+        if (isCat) regCat(L.color.data[s0] % S.color.cats.length, ln);
       }
     }
   }
@@ -874,13 +1003,16 @@ if (!S.is3d) {
     const px = v => M.l + (v - x0) / (x1 - x0) * W;
     const py = v => M.t + H - (v - y0) / (y1 - y0) * H;
     let s = '';
-    for (const [t, lab] of ticksFor('x', x0, x1)) {
+    // cap tick count by panel size so labels never collide
+    const xt = thin(ticksFor('x', x0, x1), Math.max(3, Math.floor(W / 80)));
+    const yt = thin(ticksFor('y', y0, y1), Math.max(3, Math.floor(H / 40)));
+    for (const [t, lab] of xt) {
       const X = px(t);
       if (X < M.l - 1 || X > M.l + W + 1) continue;
       s += `<line x1="${X}" y1="${M.t}" x2="${X}" y2="${M.t+H}" stroke="${T.grid}"/>`;
       s += `<text x="${X}" y="${M.t+H+14}" fill="${T.muted}" text-anchor="middle">${lab}</text>`;
     }
-    for (const [t, lab] of ticksFor('y', y0, y1)) {
+    for (const [t, lab] of yt) {
       const Y = py(t);
       if (Y < M.t - 1 || Y > M.t + H + 1) continue;
       s += `<line x1="${M.l}" y1="${Y}" x2="${M.l+W}" y2="${Y}" stroke="${T.grid}"/>`;
@@ -913,6 +1045,7 @@ if (!S.is3d) {
       drawAxes();
     });
   }
+  redraw = draw;
 
   // pan / zoom / hover
   const el = renderer.domElement;
@@ -991,7 +1124,10 @@ if (!S.is3d) {
     const mx = e.clientX - r.left, my = e.clientY - r.top;
     let best = null, bestD = 12 * 12;
     for (const L of S.layers) {
+      const catL = L.color && L.color.kind === 'cat';
       for (let i = 0; i < L.n; i++) {
+        if (catL && hiddenCats.has(L.color.data[i] % S.color.cats.length))
+          continue;
         const sx = (L.x.data[i] - cam.left) / (cam.right - cam.left) * W;
         const sy = (cam.top - L.y.data[i]) / (cam.top - cam.bottom) * H;
         const d = (sx-mx)*(sx-mx) + (sy-my)*(sy-my);
@@ -1006,8 +1142,7 @@ if (!S.is3d) {
     if (L.color && L.color.kind === 'cat')
       head = '<b>' + S.color.cats[L.color.data[i] % S.color.cats.length] + '</b><br>';
     else if (L.color && L.color.kind === 'num')
-      head = '<b>' + fmt(S.color.lo + L.color.data[i] / 65535 *
-        (S.color.hi - S.color.lo)) + '</b><br>';
+      head = '<b>' + fmt(cval(L.color.data[i] / 65535)) + '</b><br>';
     tip.innerHTML = head
       + fmtSpan('x', xv, (cam.right - cam.left) * spanOf('x')) + ', '
       + fmtSpan('y', yv, (cam.top - cam.bottom) * spanOf('y'));
@@ -1034,6 +1169,7 @@ if (!S.is3d) {
   for (const L of S.layers) {
     const n = L.n;
     const cols = layerColors(L, hex2rgb(T.cat[0]));
+    const isCat = L.color && L.color.kind === 'cat';
     const pos = new Float32Array(n * 3);
     for (let i = 0; i < n; i++) {
       pos[i*3]   = L.x.data[i] * ext[0];
@@ -1041,12 +1177,33 @@ if (!S.is3d) {
       pos[i*3+2] = L.z.data[i] * ext[2];
     }
     if (L.kind === 'point') {
-      const g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-      g.setAttribute('color', new THREE.BufferAttribute(cols, 3));
-      scene.add(new THREE.Points(g, new THREE.PointsMaterial({
-        size: L.size, sizeAttenuation: true, vertexColors: true,
-        transparent: true, opacity: L.alpha })));
+      if (isCat) {
+        const k = S.color.cats.length;
+        const buckets = Array.from({ length: k }, () => []);
+        for (let i = 0; i < n; i++) buckets[L.color.data[i] % k].push(i);
+        buckets.forEach((idx, ci) => {
+          if (!idx.length) return;
+          const sub = new Float32Array(idx.length * 3);
+          for (let j = 0; j < idx.length; j++) {
+            const i = idx[j];
+            sub[j*3] = pos[i*3]; sub[j*3+1] = pos[i*3+1]; sub[j*3+2] = pos[i*3+2];
+          }
+          const g = new THREE.BufferGeometry();
+          g.setAttribute('position', new THREE.BufferAttribute(sub, 3));
+          const pt = new THREE.Points(g, new THREE.PointsMaterial({
+            color: S.color.palette[ci], size: L.size, sizeAttenuation: true,
+            transparent: true, opacity: L.alpha }));
+          scene.add(pt);
+          regCat(ci, pt);
+        });
+      } else {
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        g.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+        scene.add(new THREE.Points(g, new THREE.PointsMaterial({
+          size: L.size, sizeAttenuation: true, vertexColors: true,
+          transparent: true, opacity: L.alpha })));
+      }
     } else {
       for (const [s0, cnt] of L.groups) {
         if (cnt < 2) continue;
@@ -1057,7 +1214,9 @@ if (!S.is3d) {
           linewidth: L.linewidth, worldUnits: false,
           transparent: true, opacity: L.alpha });
         lineMats.push(lm);
-        scene.add(new Line2(lg, lm));
+        const ln = new Line2(lg, lm);
+        scene.add(ln);
+        if (isCat) regCat(L.color.data[s0] % S.color.cats.length, ln);
       }
     }
   }
@@ -1434,7 +1593,8 @@ def _run_plot3_from_magic(line: str = ""):
         if max_points and len(df) > max_points:
             df = df.iloc[:: (len(df) + max_points - 1) // max_points]
 
-    fig = ggplot(df, aes(**m), height=height)
+    # hide=False: the magic manages the red eye itself (with its own msg id)
+    fig = ggplot(df, aes(**m), height=height, hide=False)
     for part in kind.split("+"):
         part = part.strip()
         if part == "point":
