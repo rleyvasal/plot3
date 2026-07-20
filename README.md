@@ -76,11 +76,42 @@ preserves data order while `geom_line` sorts by x, `ggsave("fig.html", p)`.
 | `ggsave(filename, p)` / `p.save(path)` | standalone HTML file |
 | `read_bin(path, stride=5)` | point-cloud `.bin` → DataFrame; `remote=True` streams via CRAFT |
 
+## Package layout
+
+```text
+plot3/
+  __init__.py      # public API
+  geoms.py         # aes, geoms, labs, colour scales, themes
+  ggplot.py        # ggplot, ggsave, autohide
+  build.py         # stats expand + layer/spec encoding
+  viewer.py        # three.js HTML template
+  encode.py        # quantize / gzip payloads
+  scales.py        # positional scales & ticks
+  themes.py        # palettes / theme tokens
+  io.py            # read_bin (+ optional CRAFT SSH)
+  jupyter.py       # %plot3 magic, SolveIt hide-from-AI
+load.py            # CRAFT %run entry (optional)
+```
+
+Public imports stay the same: `from plot3 import ggplot, aes, geom_point, ...`.
+
 ## SolveIt / CRAFT
+
+Prefer install + extension load:
 
 ```text
 %local
-%run /path/to/plot3/plot3.py
+# once per environment: pip install -e /path/to/plot3
+%load_ext plot3
+%plot3 df x=time y=temp color=sensor kind=line
+```
+
+Or without pip, run the package entrypoint (replaces the old monolith
+`%run .../plot3.py`):
+
+```text
+%local
+%run /path/to/plot3/load.py
 %plot3 df x=time y=temp color=sensor kind=line
 ```
 
@@ -95,7 +126,7 @@ locally (plain Jupyter works). The cell is red-eyed out of LLM context
  + geom_point(size=0.006))
 ```
 
-## v2 (deferred)
+## Roadmap
 
-Bars/histograms, facets, 3D hover picking, `scale_*` overrides, diverging
+Facets, box/violin/density, 3D hover picking, more `scale_*` overrides, diverging
 scales, express-style wrappers.
