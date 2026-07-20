@@ -389,6 +389,77 @@ if (!S.is3d) {
           size: L.outlierSize || 3, sizeAttenuation: false, vertexColors: true,
           transparent: true, opacity: L.alpha || 0.9 })));
       }
+    } else if (L.kind === 'area' || L.kind === 'poly') {
+      // Filled ribbons (density) or closed polygons (violin).
+      const y0 = (L.y0 != null) ? L.y0 : 0;
+      for (const [s0, cnt] of (L.groups || [[0, n]])) {
+        if (cnt < 2) continue;
+        const r = cols[s0*3], gch = cols[s0*3+1], b = cols[s0*3+2];
+        if (L.kind === 'area') {
+          // Triangle strip under the curve down to baseline y0.
+          const pos = new Float32Array((cnt - 1) * 6 * 3);
+          const col = new Float32Array((cnt - 1) * 6 * 3);
+          let p = 0, c = 0;
+          for (let i = 0; i < cnt - 1; i++) {
+            const i0 = s0 + i, i1 = s0 + i + 1;
+            const x0 = L.x.data[i0], yA = L.y.data[i0];
+            const x1 = L.x.data[i1], yB = L.y.data[i1];
+            const tri = [x0,y0,0, x1,y0,0, x1,yB,0, x0,y0,0, x1,yB,0, x0,yA,0];
+            for (let k = 0; k < 18; k++) pos[p++] = tri[k];
+            for (let k = 0; k < 6; k++) { col[c++]=r; col[c++]=gch; col[c++]=b; }
+          }
+          const g = new THREE.BufferGeometry();
+          g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+          g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+          const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+            vertexColors: true, transparent: true, opacity: L.alpha || 0.35,
+            side: THREE.DoubleSide, depthWrite: false }));
+          scene.add(mesh);
+          if (isCat) regCat(L.color.data[s0] % S.color.cats.length, mesh);
+        } else {
+          // Fan triangulation from the first vertex of the closed polygon.
+          const triCount = Math.max(0, cnt - 2);
+          const pos = new Float32Array(triCount * 9);
+          const col = new Float32Array(triCount * 9);
+          let p = 0, c = 0;
+          const x0 = L.x.data[s0], yA = L.y.data[s0];
+          for (let i = 1; i < cnt - 1; i++) {
+            const i1 = s0 + i, i2 = s0 + i + 1;
+            const tri = [
+              x0, yA, 0,
+              L.x.data[i1], L.y.data[i1], 0,
+              L.x.data[i2], L.y.data[i2], 0,
+            ];
+            for (let k = 0; k < 9; k++) pos[p++] = tri[k];
+            for (let k = 0; k < 3; k++) { col[c++]=r; col[c++]=gch; col[c++]=b; }
+          }
+          const g = new THREE.BufferGeometry();
+          g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+          g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+          const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+            vertexColors: true, transparent: true, opacity: L.alpha || 0.45,
+            side: THREE.DoubleSide, depthWrite: false }));
+          scene.add(mesh);
+          if (isCat) regCat(L.color.data[s0] % S.color.cats.length, mesh);
+        }
+        // Outline stroke
+        const flat = new Float32Array(cnt * 3);
+        for (let i = 0; i < cnt; i++) {
+          flat[i*3] = L.x.data[s0+i];
+          flat[i*3+1] = L.y.data[s0+i];
+          flat[i*3+2] = 0;
+        }
+        const lg = new LineGeometry();
+        lg.setPositions(Array.from(flat));
+        const lm = new LineMaterial({
+          color: new THREE.Color(r, gch, b).getHex(),
+          linewidth: L.linewidth || 1.5, worldUnits: false,
+          transparent: true, opacity: Math.min(1, (L.alpha || 0.9) + 0.3) });
+        lineMats.push(lm);
+        const ln = new Line2(lg, lm);
+        scene.add(ln);
+        if (isCat) regCat(L.color.data[s0] % S.color.cats.length, ln);
+      }
     } else {
       for (const [s0, cnt] of L.groups) {
         if (cnt < 2) continue;

@@ -41,8 +41,41 @@ def _boxplot_stats(values: np.ndarray, coef: float = 1.5):
     return ymin, float(q1), float(med), float(q3), ymax, outliers
 
 
+def _kde_1d(
+    values: np.ndarray,
+    *,
+    n: int = 512,
+    adjust: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Gaussian KDE on a regular grid (Scott bandwidth × adjust)."""
+    x = np.asarray(values, dtype=np.float64)
+    x = x[np.isfinite(x)]
+    n = max(8, int(n))
+    if x.size == 0:
+        return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64)
+    if x.size == 1:
+        center = float(x[0])
+        grid = np.linspace(center - 1.0, center + 1.0, n)
+        dens = np.exp(-0.5 * ((grid - center) / 0.2) ** 2)
+        dens /= dens.sum() * (grid[1] - grid[0])
+        return grid, dens
+    std = float(np.std(x, ddof=1)) or 1e-6
+    bw = max(1e-9, float(adjust) * 1.06 * std * (x.size ** (-0.2)))
+    lo = float(x.min()) - 3.0 * bw
+    hi = float(x.max()) + 3.0 * bw
+    if hi <= lo:
+        hi = lo + 1.0
+    grid = np.linspace(lo, hi, n)
+    # (n_grid, n_obs)
+    u = (grid[:, None] - x[None, :]) / bw
+    dens = np.exp(-0.5 * u * u).sum(axis=1) / (
+        x.size * bw * math.sqrt(2.0 * math.pi)
+    )
+    return grid, dens
+
+
 def expand_stat_geom(geom: _Geom, base_mapping: aes, data: pd.DataFrame) -> _Geom:
-    """Turn bar/histogram/boxplot stats into concrete drawable layers."""
+    """Turn statistical geoms into concrete drawable layers."""
     mapping = dict(base_mapping)
     mapping.update(geom.mapping)
     if geom.kind == "bar":
@@ -160,6 +193,125 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data: pd.DataFrame) -> _Geo
         out._outlier_frame = pd.DataFrame(outlier_rows)
         out._y_name = ycol
         return out
+    if geom.kind == "density":
+        if "x" not in mapping:
+            raise ValueError("geom_density() requires aes(x=)")
+        xcol = mapping["x"]
+        if xcol not in data.columns:
+            raise KeyError(f"column(s) not in DataFrame: {[xcol]}")
+        colour_col = mapping.get("color")
+        n_grid = int(getattr(geom, "n", 512))
+        adjust = float(getattr(geom, "adjust", 1.0))
+        fill = bool(getattr(geom, "fill", True))
+        pieces: list[pd.DataFrame] = []
+        if colour_col and colour_col in data.columns:
+            groups = data.groupby(colour_col, dropna=False, observed=True, sort=False)
+            for key, piece in groups:
+                grid, dens = _kde_1d(
+                    pd.to_numeric(piece[xcol], errors="coerce").to_numpy(),
+                    n=n_grid,
+                    adjust=adjust,
+                )
+                if grid.size == 0:
+                    continue
+                frame = pd.DataFrame({"x": grid, "y": dens, colour_col: key})
+                pieces.append(frame)
+        else:
+            grid, dens = _kde_1d(
+                pd.to_numeric(data[xcol], errors="coerce").to_numpy(),
+                n=n_grid,
+                adjust=adjust,
+            )
+            pieces.append(pd.DataFrame({"x": grid, "y": dens}))
+        frame = (
+            pd.concat(pieces, ignore_index=True)
+            if pieces
+            else pd.DataFrame(columns=["x", "y"])
+        )
+        map_kwargs = {"x": "x", "y": "y"}
+        if colour_col and colour_col in frame.columns:
+            map_kwargs["colour"] = colour_col
+        out = _Geom(
+            aes(**map_kwargs),
+            color=geom.const_color,
+            alpha=geom.alpha,
+        )
+        out.kind = "area" if fill else "line"
+        out.sort_x = True
+        out.linewidth = float(getattr(geom, "linewidth", 1.5))
+        out.data_override = frame
+        out.const_color = geom.const_color
+        out.alpha = geom.alpha if geom.alpha is not None else (0.35 if fill else 0.95)
+        out._baseline_zero = True
+        return out
+    if geom.kind == "violin":
+        if "x" not in mapping or "y" not in mapping:
+            raise ValueError("geom_violin() requires aes(x=, y=)")
+        xcol, ycol = mapping["x"], mapping["y"]
+        missing = [c for c in (xcol, ycol) if c not in data.columns]
+        if missing:
+            raise KeyError(f"column(s) not in DataFrame: {missing}")
+        colour_col = mapping.get("color")
+        n_grid = int(getattr(geom, "n", 128))
+        adjust = float(getattr(geom, "adjust", 1.0))
+        width = float(getattr(geom, "width", 0.9))
+        # Stable category order of appearance.
+        if isinstance(data[xcol].dtype, pd.CategoricalDtype):
+            levels = [str(c) for c in data[xcol].cat.categories]
+        else:
+            levels = list(dict.fromkeys(data[xcol].astype(str).tolist()))
+        level_index = {level: i for i, level in enumerate(levels)}
+        rows: list[dict] = []
+        grouping_cols = [xcol]
+        if colour_col and colour_col != xcol and colour_col in data.columns:
+            grouping_cols.append(colour_col)
+        for key, piece in data.groupby(
+            grouping_cols, dropna=False, observed=True, sort=False
+        ):
+            key_tuple = key if isinstance(key, tuple) else (key,)
+            x_key = key_tuple[0]
+            x_pos = float(level_index.get(str(x_key), 0))
+            grid_y, dens = _kde_1d(
+                pd.to_numeric(piece[ycol], errors="coerce").to_numpy(),
+                n=n_grid,
+                adjust=adjust,
+            )
+            if grid_y.size == 0:
+                continue
+            peak = float(np.nanmax(dens)) or 1.0
+            half = (dens / peak) * (width * 0.5)
+            # Closed polygon: left side bottom→top, right side top→bottom.
+            group_id = str(key_tuple)
+            for yv, hw in zip(grid_y, half):
+                row = {"x": x_pos - float(hw), "y": float(yv), "group": group_id}
+                if colour_col and colour_col != xcol:
+                    row[colour_col] = key_tuple[1]
+                elif colour_col == xcol:
+                    row[colour_col] = x_key
+                rows.append(row)
+            for yv, hw in zip(grid_y[::-1], half[::-1]):
+                row = {"x": x_pos + float(hw), "y": float(yv), "group": group_id}
+                if colour_col and colour_col != xcol:
+                    row[colour_col] = key_tuple[1]
+                elif colour_col == xcol:
+                    row[colour_col] = x_key
+                rows.append(row)
+        frame = pd.DataFrame(rows)
+        if frame.empty:
+            frame = pd.DataFrame(columns=["x", "y", "group"])
+        # Force categorical x scale labels via a helper frame for domains:
+        # encode x as numeric positions; stash category labels on the geom.
+        map_kwargs = {"x": "x", "y": "y", "group": "group"}
+        if colour_col and colour_col in frame.columns:
+            map_kwargs["colour"] = colour_col
+        out = _Geom(aes(**map_kwargs), color=geom.const_color, alpha=geom.alpha)
+        out.kind = "poly"
+        out.linewidth = float(getattr(geom, "linewidth", 1.0))
+        out.data_override = frame
+        out.const_color = geom.const_color
+        out.alpha = geom.alpha if geom.alpha is not None else 0.45
+        out._violin_levels = levels
+        return out
     return geom
 
 
@@ -181,15 +333,17 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         m = dict(g.mapping)
         m.update(geom.mapping)
         if "x" not in m or "y" not in m:
-            raise ValueError("aes(x=, y=) are required (bar/histogram supply y)")
+            raise ValueError("aes(x=, y=) are required (bar/histogram/density supply y)")
         resolved.append((geom, m))
 
     is3d = any("z" in m for _, m in resolved)
     if is3d and not all("z" in m for _, m in resolved):
         raise ValueError("mix of 2D and 3D layers: every layer needs aes(z=)")
-    if is3d and any(geom.kind in {"col", "box"} for geom, _ in resolved):
+    if is3d and any(
+        geom.kind in {"col", "box", "area", "poly"} for geom, _ in resolved
+    ):
         raise ValueError(
-            "geom_col/geom_bar/geom_histogram/geom_boxplot are 2D only"
+            "geom_col/bar/histogram/boxplot/density/violin are 2D only"
         )
 
     axes = ["x", "y", "z"] if is3d else ["x", "y"]
@@ -315,9 +469,17 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         for a in axes:
             kind, v, cats = col_values(sub[m[a]])
             vals[a] = _absorb_position(a, kind, v, cats)
-        # Bars include the baseline at y=0 in the domain.
-        if geom.kind == "col" and "y" in scales and scales["y"].kind == "num":
+        # Bars / densities include the baseline at y=0 in the domain.
+        if (
+            geom.kind in {"col", "area"}
+            or getattr(geom, "_baseline_zero", False)
+        ) and "y" in scales and scales["y"].kind == "num":
             scales["y"].widen(np.asarray([0.0], dtype=np.float64))
+        # Violin: numeric x positions with categorical tick labels.
+        if getattr(geom, "_violin_levels", None) is not None:
+            levels = list(geom._violin_levels)
+            scales["x"] = Scale("cat")
+            scales["x"].cats = levels
         if "color" in m:
             kind, cv, ccats = col_values(sub[m["color"]])
             if kind == "cat" or (kind == "num" and ccats):
@@ -381,14 +543,15 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             group_vec = vals["group"][0]
         elif vals.get("color") and vals["color"][0] == "cat":
             group_vec = vals["color"][1]
-        if geom.kind == "line":
+        if geom.kind in {"line", "area"}:
             keys = []
             if group_vec is not None:
                 keys.append(group_vec)
-            if geom.sort_x:
+            if geom.kind == "area" or getattr(geom, "sort_x", False):
                 keys.append(vals["x"])
             if keys:
                 order = np.lexsort(tuple(reversed(keys)))
+        # poly keeps authoring order (closed violin contours).
 
         spec_l = {
             "kind": geom.kind,
@@ -496,17 +659,29 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 payloads.append((pid, enc["b64"]))
                 spec_l["color"] = {"id": pid, "dtype": "u16", "kind": "num"}
 
-        if geom.kind == "line":
+        if geom.kind in {"line", "area", "poly"}:
             if group_vec is not None:
                 gv = group_vec[order]
                 cut = np.flatnonzero(np.diff(gv)) + 1
                 starts = np.concatenate([[0], cut])
                 counts = np.diff(np.concatenate([starts, [n]]))
-                spec_l["groups"] = [[int(s), int(c)]
-                                    for s, c in zip(starts, counts)]
+                spec_l["groups"] = [
+                    [int(s), int(c)] for s, c in zip(starts, counts)
+                ]
             else:
                 spec_l["groups"] = [[0, int(n)]]
             spec_l["linewidth"] = float(getattr(geom, "linewidth", 2.0))
+            if geom.kind in {"area", "poly"} and spec_l["alpha"] is None:
+                spec_l["alpha"] = 0.4 if geom.kind == "area" else 0.45
+            if geom.kind == "area":
+                scy = scales["y"]
+                if scy.kind == "num":
+                    y_span = max(scy.hi - scy.lo, 1e-12)
+                    spec_l["y0"] = float(
+                        np.clip((0.0 - scy.lo) / y_span, 0.0, 1.0)
+                    )
+                else:
+                    spec_l["y0"] = 0.0
         elif geom.kind in {"col", "box"}:
             # Bar/box width in normalized [0,1] x-space for the renderer.
             scx = scales["x"]
@@ -596,7 +771,40 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     return spec, payloads
 
 
+def _panel_grid(n: int, ncol: int | None, nrow: int | None) -> tuple[int, int]:
+    if ncol is not None and nrow is not None:
+        if ncol * nrow < n:
+            nrow = int(math.ceil(n / ncol))
+        return int(ncol), int(nrow)
+    if ncol is not None:
+        return int(ncol), int(math.ceil(n / ncol))
+    if nrow is not None:
+        return int(math.ceil(n / nrow)), int(nrow)
+    ncol = int(math.ceil(math.sqrt(n)))
+    return ncol, int(math.ceil(n / ncol))
+
+
+def _clone_ggplot_with_data(g: ggplot, data: pd.DataFrame) -> ggplot:
+    import copy
+
+    from plot3.ggplot import ggplot as Ggplot
+
+    out = copy.copy(g)
+    out.data = data
+    out.layers = list(g.layers)
+    out.labs = dict(g.labs)
+    out.facet = None  # panels are leaf plots
+    out.mapping = g.mapping
+    out.cscale = g.cscale
+    # keep theme/height/quantize
+    return out
+
+
 def build_doc(g: ggplot) -> str:
+    facet = getattr(g, "facet", None)
+    if facet is not None:
+        return _build_doc_faceted(g, facet)
+
     spec, payloads = build_spec(g)
     blocks = "\n".join(
         f'<script type="text/plain" id="{pid}">{b64}</script>'
@@ -613,4 +821,93 @@ def build_doc(g: ggplot) -> str:
           f"portable HTML{' (3D)' if spec['is3d'] else ''}")
     if kb > 1500:
         print("plot3: warning — figure may exceed sslive's ~1.8 MB in-slide cap")
+    return doc
+
+
+def _build_doc_faceted(g: ggplot, facet) -> str:
+    """Render facet_wrap as a CSS grid of independent panel documents."""
+    import html as _htmlesc
+
+    if g.data is None:
+        raise ValueError("ggplot has no data")
+    col = facet.variable
+    if col not in g.data.columns:
+        raise KeyError(f"facet column not in DataFrame: {col!r}")
+
+    if isinstance(g.data[col].dtype, pd.CategoricalDtype):
+        levels = [c for c in g.data[col].cat.categories if (g.data[col] == c).any()]
+        # also include NaN panel if present
+        if g.data[col].isna().any():
+            levels = list(levels) + [pd.NA]
+    else:
+        levels = list(dict.fromkeys(g.data[col].tolist()))
+
+    if not levels:
+        raise ValueError("facet_wrap() found no panel levels")
+
+    ncol, nrow = _panel_grid(len(levels), facet.ncol, facet.nrow)
+    theme = THEMES[g.theme_name]
+    cells: list[str] = []
+    total_kb = 0
+    for level in levels:
+        if pd.isna(level):
+            mask = g.data[col].isna()
+            label = "NA"
+        else:
+            mask = g.data[col] == level
+            label = str(level)
+        panel_data = g.data.loc[mask].copy()
+        panel = _clone_ggplot_with_data(g, panel_data)
+        # Surface facet level in the panel title.
+        base_title = panel.labs.get("title", "")
+        panel.labs = dict(panel.labs)
+        panel.labs["title"] = (
+            f"{base_title} — {label}" if base_title else label
+        )
+        if facet.scales == "fixed":
+            # v1: each panel is an independent figure (free domains). Shared
+            # scale encoding across iframes needs a follow-up.
+            pass
+        try:
+            panel_html = build_doc(panel)
+        except Exception as exc:
+            panel_html = (
+                "<!doctype html><html><body style='font:12px system-ui;"
+                f"color:#888;padding:12px'>panel { _htmlesc.escape(label) }: "
+                f"{_htmlesc.escape(str(exc))}</body></html>"
+            )
+        total_kb += len(panel_html) // 1024
+        cells.append(
+            "<div class='panel'>"
+            f"<div class='plab'>{_htmlesc.escape(label)}</div>"
+            f"<iframe srcdoc=\"{_htmlesc.escape(panel_html, quote=True)}\" "
+            "title=\"panel\"></iframe></div>"
+        )
+
+    title = _htmlesc.escape(str(g.labs.get("title", "")))
+    doc = f"""<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html,body{{margin:0;height:100%;background:{theme["surface"]};color:{theme["ink"]};
+  font:12px system-ui,-apple-system,"Segoe UI",sans-serif}}
+#wrap{{box-sizing:border-box;height:100%;padding:8px;display:flex;flex-direction:column}}
+#ftitle{{font-size:14px;font-weight:600;margin:0 4px 8px}}
+#grid{{flex:1;min-height:0;display:grid;gap:8px;
+  grid-template-columns:repeat({ncol},minmax(0,1fr));
+  grid-template-rows:repeat({nrow},minmax(0,1fr))}}
+.panel{{min-height:0;min-width:0;display:flex;flex-direction:column;
+  border:1px solid {theme["axis"]};border-radius:6px;overflow:hidden;
+  background:{theme["surface"]}}}
+.plab{{padding:4px 8px;font-size:11px;color:{theme["ink2"]};
+  border-bottom:1px solid {theme["grid"]}}}
+.panel iframe{{flex:1;width:100%;border:0;background:{theme["surface"]}}}
+</style></head><body><div id="wrap">
+<div id="ftitle">{title}</div>
+<div id="grid">{"".join(cells)}</div>
+</div></body></html>"""
+    print(
+        f"plot3: facet_wrap {len(levels)} panel(s) in {nrow}x{ncol} "
+        f"~{total_kb:,} KB portable HTML"
+    )
+    if total_kb > 1500:
+        print("plot3: warning — faceted figure may exceed sslive's ~1.8 MB cap")
     return doc

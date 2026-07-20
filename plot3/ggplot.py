@@ -10,6 +10,7 @@ import pandas as pd
 from plot3.geoms import (
     _Geom,
     aes,
+    facet_wrap,
     labs,
     scale_colour_continuous,
     _Theme,
@@ -41,11 +42,11 @@ class ggplot:
         self.labs: dict = {}
         self.theme_name = "dark"
         self.cscale: scale_colour_continuous | None = None
+        self.facet: facet_wrap | None = None
         self.height = height if isinstance(height, str) else f"{int(height)}px"
         self.quantize = bool(quantize)
         self.compress = bool(compress)
         self.hide = hide  # None -> module default (autohide())
-
     @staticmethod
     def _as_pandas(data) -> pd.DataFrame:
         if isinstance(data, pd.DataFrame):
@@ -64,6 +65,7 @@ class ggplot:
         g = copy.copy(self)
         g.layers = list(self.layers)
         g.labs = dict(self.labs)
+        g.facet = self.facet
         g.data = self._as_pandas(data)
         return g
 
@@ -71,6 +73,7 @@ class ggplot:
         g = copy.copy(self)
         g.layers = list(self.layers)
         g.labs = dict(self.labs)
+        g.facet = self.facet
         if isinstance(other, _Geom):
             g.layers.append(other)
         elif isinstance(other, labs):
@@ -79,6 +82,8 @@ class ggplot:
             g.theme_name = other.name
         elif isinstance(other, scale_colour_continuous):
             g.cscale = other
+        elif isinstance(other, facet_wrap):
+            g.facet = other
         elif isinstance(other, aes):
             m = aes()
             m.update(self.mapping)

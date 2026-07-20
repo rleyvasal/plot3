@@ -130,6 +130,104 @@ class geom_boxplot(_Geom):
         self.coef = float(coef)
 
 
+class geom_density(_Geom):
+    """Kernel density estimate of a continuous variable (ggplot2 ``geom_density``).
+
+    Requires ``aes(x=)``. Optional ``colour``/``color`` draws one curve per
+    group. Set ``fill=True`` (default) to shade under the curve. 2D only.
+    """
+
+    kind = "density"
+
+    def __init__(
+        self,
+        mapping=None,
+        *,
+        n=512,
+        adjust=1.0,
+        fill=True,
+        linewidth=1.5,
+        **kw,
+    ):
+        super().__init__(mapping, **kw)
+        self.n = int(n)
+        self.adjust = float(adjust)
+        self.fill = bool(fill)
+        self.linewidth = float(linewidth)
+
+
+class geom_violin(_Geom):
+    """Violin plot of ``y`` by ``x`` (ggplot2 ``geom_violin``).
+
+    Requires ``aes(x=, y=)``. Density is mirrored about each ``x`` category.
+    2D only.
+    """
+
+    kind = "violin"
+
+    def __init__(
+        self,
+        mapping=None,
+        *,
+        n=128,
+        adjust=1.0,
+        width=0.9,
+        linewidth=1.0,
+        **kw,
+    ):
+        super().__init__(mapping, **kw)
+        self.n = int(n)
+        self.adjust = float(adjust)
+        self.width = float(width)
+        self.linewidth = float(linewidth)
+
+
+class facet_wrap:
+    """Wrap panels by a discrete column (ggplot2 ``facet_wrap``).
+
+    Parameters
+    ----------
+    facets:
+        Column name, or a formula-like string ``"~col"`` / ``". ~ col"``.
+    ncol, nrow:
+        Panel grid size. If both omitted, ``ncol`` is chosen near ``sqrt(n)``.
+    scales:
+        ``"fixed"`` (shared domains across panels) or ``"free"`` (per-panel).
+    """
+
+    def __init__(
+        self,
+        facets: str,
+        *,
+        ncol: int | None = None,
+        nrow: int | None = None,
+        scales: str = "fixed",
+    ):
+        if not isinstance(facets, str) or not facets.strip():
+            raise TypeError("facet_wrap() facets must be a column name string")
+        name = facets.strip()
+        if "~" in name:
+            # Accept "~cyl", ". ~ cyl", "cyl ~ ."
+            parts = [p.strip() for p in name.split("~")]
+            candidates = [p for p in parts if p and p != "."]
+            if len(candidates) != 1:
+                raise ValueError(
+                    "facet_wrap() currently accepts a single facet column "
+                    f"(got {facets!r})"
+                )
+            name = candidates[0]
+        if scales not in {"fixed", "free"}:
+            raise ValueError("scales must be 'fixed' or 'free'")
+        if ncol is not None and ncol < 1:
+            raise ValueError("ncol must be positive")
+        if nrow is not None and nrow < 1:
+            raise ValueError("nrow must be positive")
+        self.variable = name
+        self.ncol = ncol
+        self.nrow = nrow
+        self.scales = scales
+
+
 class labs(dict):
     def __init__(self, title=None, x=None, y=None, z=None, color=None,
                  colour=None):
