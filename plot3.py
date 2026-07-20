@@ -26,6 +26,10 @@ ggplot2 conventions honored: ``+`` layering, ``colour``/``color`` both accepted,
 ``geom_line(linewidth=)``, ``geom_path`` preserves data order while ``geom_line``
 sorts by x, ``ggsave()``. Categorical hues come from a fixed-order validated
 palette (never cycled; >8 categories is an error, not an 11th hue).
+
+Data may also arrive through Python's ``>>`` operator.  ``ggplot(aes(...))``
+creates a deferred figure, layers can be added normally, and ``data >> figure``
+binds the data without mutating the reusable figure template.
 """
 
 from __future__ import annotations
@@ -55,6 +59,9 @@ __all__ = [
     "geom_point",
     "geom_line",
     "geom_path",
+    "geom_col",
+    "geom_bar",
+    "geom_histogram",
     "labs",
     "scale_colour_continuous",
     "scale_color_continuous",
@@ -322,6 +329,51 @@ class geom_line(geom_path):
     sort_x = True  # ggplot2 geom_line: connect in order of x
 
 
+class geom_col(_Geom):
+    """Bars with heights from ``y`` (ggplot2 ``geom_col``).
+
+    Requires ``aes(x=, y=)``. ``x`` may be categorical or numeric. Optional
+    ``width`` is the bar width as a fraction of the median x-spacing (default
+    0.9). 2D only.
+    """
+
+    kind = "col"
+
+    def __init__(self, mapping=None, *, width=0.9, **kw):
+        super().__init__(mapping, **kw)
+        self.width = float(width)
+        self.data_override = None  # optional layer-local frame (stats)
+
+
+class geom_bar(_Geom):
+    """Count bars for a discrete ``x`` (ggplot2 ``geom_bar``).
+
+    Only ``aes(x=)`` is required; counts become ``y``. Expanded to
+    ``geom_col`` at build time. 2D only.
+    """
+
+    kind = "bar"
+
+    def __init__(self, mapping=None, *, width=0.9, **kw):
+        super().__init__(mapping, **kw)
+        self.width = float(width)
+
+
+class geom_histogram(_Geom):
+    """Histogram of a continuous ``x`` (ggplot2 ``geom_histogram``).
+
+    Only ``aes(x=)`` is required. Bins are computed in Python and drawn as
+    ``geom_col``. 2D only.
+    """
+
+    kind = "histogram"
+
+    def __init__(self, mapping=None, *, bins=30, width=1.0, **kw):
+        super().__init__(mapping, **kw)
+        self.bins = int(bins)
+        self.width = float(width)
+
+
 class labs(dict):
     def __init__(self, title=None, x=None, y=None, z=None, color=None,
                  colour=None):
@@ -381,13 +433,16 @@ def theme_light() -> _Theme:
 
 
 class ggplot:
-    """ggplot(df, aes(...)) + geom_*() + labs() + theme_*()."""
+    """A plot3 figure, optionally deferred until data arrives via ``>>``."""
 
-    def __init__(self, data: pd.DataFrame, mapping: aes | None = None, *,
+    def __init__(self, data=None, mapping: aes | None = None, *,
                  height="480px", quantize=True, compress=True, hide=None):
-        if not isinstance(data, pd.DataFrame):
-            data = pd.DataFrame(data)
-        self.data = data
+        # ``ggplot(aes(...))`` is the R-shaped, pipeable form.  ``aes`` is a
+        # dict subclass, so detect it before treating arbitrary mappings as
+        # dataframe constructor input.
+        if isinstance(data, aes) and mapping is None:
+            data, mapping = None, data
+        self.data = self._as_pandas(data) if data is not None else None
         self.mapping = mapping or aes()
         self.layers: list[_Geom] = []
         self.labs: dict = {}
@@ -397,6 +452,27 @@ class ggplot:
         self.quantize = bool(quantize)
         self.compress = bool(compress)
         self.hide = hide  # None -> module default (autohide())
+
+    @staticmethod
+    def _as_pandas(data) -> pd.DataFrame:
+        if isinstance(data, pd.DataFrame):
+            return data
+        to_pandas = getattr(data, "to_pandas", None)
+        if callable(to_pandas):
+            data = to_pandas()
+            if isinstance(data, pd.DataFrame):
+                return data
+        return pd.DataFrame(data)
+
+    def __rrshift__(self, data):
+        """Bind data to a deferred ``ggplot(aes(...))`` template."""
+        if self.data is not None:
+            raise TypeError("cannot pipe data into a ggplot that already has data")
+        g = copy.copy(self)
+        g.layers = list(self.layers)
+        g.labs = dict(self.labs)
+        g.data = self._as_pandas(data)
+        return g
 
     def __add__(self, other):
         g = copy.copy(self)
@@ -477,22 +553,83 @@ def ggsave(filename, plot: ggplot | None = None, **_kw) -> str:
 # ═════════════════════════════════════════════════════════════════════════════
 
 
+def _expand_stat_geom(geom: _Geom, base_mapping: aes, data: pd.DataFrame) -> _Geom:
+    """Turn bar/histogram stats into concrete ``geom_col`` layers."""
+    mapping = dict(base_mapping)
+    mapping.update(geom.mapping)
+    if geom.kind == "bar":
+        if "x" not in mapping:
+            raise ValueError("geom_bar() requires aes(x=)")
+        xcol = mapping["x"]
+        if xcol not in data.columns:
+            raise KeyError(f"column(s) not in DataFrame: {[xcol]}")
+        counts = (
+            data.groupby(xcol, dropna=False, observed=True, sort=False)
+            .size()
+            .rename("y")
+            .reset_index()
+        )
+        out = geom_col(aes(x=xcol, y="y"), width=getattr(geom, "width", 0.9),
+                       color=geom.const_color, colour=None, alpha=geom.alpha)
+        out.data_override = counts
+        out.const_color = geom.const_color
+        out.alpha = geom.alpha
+        return out
+    if geom.kind == "histogram":
+        if "x" not in mapping:
+            raise ValueError("geom_histogram() requires aes(x=)")
+        xcol = mapping["x"]
+        if xcol not in data.columns:
+            raise KeyError(f"column(s) not in DataFrame: {[xcol]}")
+        values = pd.to_numeric(data[xcol], errors="coerce").dropna().to_numpy(
+            dtype=np.float64
+        )
+        if values.size == 0:
+            frame = pd.DataFrame({"x": np.array([], dtype=float),
+                                  "y": np.array([], dtype=float)})
+            width = 1.0
+        else:
+            bins = max(1, int(getattr(geom, "bins", 30)))
+            counts, edges = np.histogram(values, bins=bins)
+            centers = 0.5 * (edges[:-1] + edges[1:])
+            width = float(np.median(np.diff(edges))) if len(edges) > 1 else 1.0
+            frame = pd.DataFrame({"x": centers, "y": counts.astype(np.float64)})
+        out = geom_col(aes(x="x", y="y"), width=getattr(geom, "width", 1.0),
+                       color=geom.const_color, alpha=geom.alpha)
+        out.data_override = frame
+        out.const_color = geom.const_color
+        out.alpha = geom.alpha
+        out._bar_width_data = width  # absolute data units
+        return out
+    return geom
+
+
 def _build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
+    if g.data is None:
+        raise ValueError(
+            "ggplot has no data; use ggplot(df, aes(...)) or "
+            "pipe data with `data >> ggplot(aes(...))`"
+        )
     if not g.layers:
         raise ValueError("add a geom: ggplot(df, aes(...)) + geom_point()")
 
     theme = _THEMES[g.theme_name]
-    resolved = []  # per layer: (geom, mapping, sub-df columns as Series)
-    for geom in g.layers:
+    expanded = [
+        _expand_stat_geom(geom, g.mapping, g.data) for geom in g.layers
+    ]
+    resolved = []  # per layer: (geom, mapping)
+    for geom in expanded:
         m = dict(g.mapping)
         m.update(geom.mapping)
         if "x" not in m or "y" not in m:
-            raise ValueError("aes(x=, y=) are required")
+            raise ValueError("aes(x=, y=) are required (bar/histogram supply y)")
         resolved.append((geom, m))
 
     is3d = any("z" in m for _, m in resolved)
     if is3d and not all("z" in m for _, m in resolved):
         raise ValueError("mix of 2D and 3D layers: every layer needs aes(z=)")
+    if is3d and any(geom.kind == "col" for geom, _ in resolved):
+        raise ValueError("geom_col/geom_bar/geom_histogram are 2D only")
 
     axes = ["x", "y", "z"] if is3d else ["x", "y"]
     scales: dict[str, _Scale] = {}
@@ -502,12 +639,16 @@ def _build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     # Pass 1 — per-layer values + global scale domains
     layer_vals = []
     for geom, m in resolved:
-        cols = [m[a] for a in axes] + ([m["color"]] if "color" in m else []) \
-            + ([m["group"]] if "group" in m else [])
-        missing = [c for c in cols if c not in g.data.columns]
+        frame = getattr(geom, "data_override", None)
+        if frame is None:
+            frame = g.data
+        cols = [m[a] for a in axes if a in m] + (
+            [m["color"]] if "color" in m else []
+        ) + ([m["group"]] if "group" in m else [])
+        missing = [c for c in cols if c not in frame.columns]
         if missing:
             raise KeyError(f"column(s) not in DataFrame: {missing}")
-        sub = g.data[list(dict.fromkeys(cols))].dropna()
+        sub = frame[list(dict.fromkeys(cols))].dropna()
         vals = {}
         for a in axes:
             kind, v, cats = _col_values(sub[m[a]])
@@ -529,6 +670,9 @@ def _build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             else:
                 sc.widen(v)
             vals[a] = v
+        # Bars include the baseline at y=0 in the domain.
+        if geom.kind == "col" and "y" in scales and scales["y"].kind == "num":
+            scales["y"].widen(np.asarray([0.0], dtype=np.float64))
         if "color" in m:
             kind, cv, ccats = _col_values(sub[m["color"]])
             if kind == "cat" or (kind == "num" and ccats):
@@ -647,6 +791,35 @@ def _build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             else:
                 spec_l["groups"] = [[0, int(n)]]
             spec_l["linewidth"] = float(getattr(geom, "linewidth", 2.0))
+        elif geom.kind == "col":
+            # Bar width in normalized [0,1] x-space for the renderer.
+            scx = scales["x"]
+            span = max(scx.hi - scx.lo, 1e-12)
+            if hasattr(geom, "_bar_width_data"):
+                data_w = float(geom._bar_width_data) * float(
+                    getattr(geom, "width", 1.0)
+                )
+            elif scx.kind == "cat":
+                data_w = float(getattr(geom, "width", 0.9))
+            else:
+                xs = np.asarray(vals["x"][order], dtype=np.float64)
+                if len(xs) >= 2:
+                    gaps = np.diff(np.sort(np.unique(xs)))
+                    step = float(np.median(gaps)) if len(gaps) else 1.0
+                else:
+                    step = span * 0.08
+                data_w = step * float(getattr(geom, "width", 0.9))
+            spec_l["width"] = float(np.clip(data_w / span, 1e-4, 1.0))
+            scy = scales["y"]
+            if scy.kind == "num":
+                y_span = max(scy.hi - scy.lo, 1e-12)
+                spec_l["y0"] = float(
+                    np.clip((0.0 - scy.lo) / y_span, 0.0, 1.0)
+                )
+            else:
+                spec_l["y0"] = 0.0
+            if spec_l["alpha"] is None:
+                spec_l["alpha"] = 0.9
         else:
             if geom.size is not None:
                 spec_l["size"] = float(geom.size)
@@ -1006,6 +1179,29 @@ if (!S.is3d) {
           size: L.size, sizeAttenuation: false, vertexColors: true,
           transparent: true, opacity: L.alpha })));
       }
+    } else if (L.kind === 'col') {
+      // Axis-aligned bars from baseline y0 to y=height (normalized coords).
+      const hw = (L.width || 0.08) * 0.5;
+      const y0 = (L.y0 != null) ? L.y0 : 0;
+      const pos = new Float32Array(n * 6 * 3);
+      const col = new Float32Array(n * 6 * 3);
+      let p = 0, c = 0;
+      for (let i = 0; i < n; i++) {
+        const x = L.x.data[i], y = L.y.data[i];
+        const x0 = x - hw, x1 = x + hw;
+        // two triangles: (x0,y0)-(x1,y0)-(x1,y) and (x0,y0)-(x1,y)-(x0,y)
+        const tri = [x0,y0,0, x1,y0,0, x1,y,0, x0,y0,0, x1,y,0, x0,y,0];
+        for (let k = 0; k < 18; k++) pos[p++] = tri[k];
+        for (let k = 0; k < 6; k++) {
+          col[c++] = cols[i*3]; col[c++] = cols[i*3+1]; col[c++] = cols[i*3+2];
+        }
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      scene.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+        vertexColors: true, transparent: true, opacity: L.alpha,
+        side: THREE.DoubleSide, depthWrite: false })));
     } else {
       for (const [s0, cnt] of L.groups) {
         if (cnt < 2) continue;

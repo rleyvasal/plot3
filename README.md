@@ -4,13 +4,32 @@ Grammar-of-graphics plotting on **three.js** — 2D and 3D figures from pandas
 DataFrames that stay small, stay smooth, and survive
 [sslive](https://github.com/rleyvasal/sslive) slide export.
 
+Works **locally** (VS Code, terminal, JupyterLab) or under CRAFT / SolveIt.
+
+## Install (local / VS Code)
+
+```bash
+cd /path/to/plot3
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev,jupyter]"
+```
+
+In VS Code: **Python: Select Interpreter** → this `.venv`. No CRAFT required.
+
 ```python
-from plot3 import ggplot, aes, geom_point, geom_line, labs, theme_light
+from plot3 import ggplot, aes, geom_point, geom_line, geom_col, geom_histogram, labs, theme_light
 
 (ggplot(df, aes(x="time", y="temp", colour="sensor"))
  + geom_point(size=4)
  + geom_line(linewidth=2)
  + labs(title="Sensor temps", y="degC"))
+```
+
+The mapping-first form is pipeable from tidy3, pandas, or Polars. Layers bind
+before ``>>``, so the expression needs no extra parentheses:
+
+```python
+plot = tidy(df) >> ggplot(aes(x="time", y="temp")) + geom_point()
 ```
 
 Follows [ggplot2](https://github.com/tidyverse/ggplot2) conventions: `+`
@@ -43,10 +62,13 @@ preserves data order while `geom_line` sorts by x, `ggsave("fig.html", p)`.
 
 | Piece | Notes |
 |---|---|
-| `ggplot(df, aes(...))` | figure; `quantize=False` for deep-zoom float32 payloads |
+| `ggplot(df, aes(...))` / `data >> ggplot(aes(...))` | figure; `quantize=False` for deep-zoom float32 payloads |
 | `aes(x, y, z, colour, group)` | `z` → 3D; colour numeric → ramp, categorical → palette + legend |
 | `geom_point(size=, alpha=)` | 2D size in px, 3D in scene units |
 | `geom_line(linewidth=)` / `geom_path()` | line sorts by x; path keeps data order |
+| `geom_col(width=)` | bars from `y` heights (ggplot2 `geom_col`) |
+| `geom_bar(width=)` | count bars for discrete `x` |
+| `geom_histogram(bins=, width=)` | continuous `x` histogram → bars |
 | `labs(title=, x=, y=, z=, colour=)` | labels |
 | `scale_colour_continuous(trans=, limits=, palette=)` | numeric colour: `sqrt`/`log10`/`linear`; limits tuple or `"full"` |
 | `scale_colour_viridis_c(option=)` | viridis / magma / turbo colormaps for numeric colour |
