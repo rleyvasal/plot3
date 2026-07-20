@@ -89,9 +89,16 @@ const PAL = (S.color.palette || []).map(hex2rgb);
 
 // ── payload decode for every layer ──────────────────────────────────────────
 const axesList = S.is3d ? ['x','y','z'] : ['x','y'];
+const extraChans = ['ymin','lower','middle','upper','ymax','ox','oy'];
 for (const L of S.layers) {
-  for (const a of axesList) L[a].data = toNorm(await decode(L[a].id, L[a].dtype));
+  for (const a of axesList) {
+    if (L[a] && L[a].id) L[a].data = toNorm(await decode(L[a].id, L[a].dtype));
+  }
+  for (const a of extraChans) {
+    if (L[a] && L[a].id) L[a].data = toNorm(await decode(L[a].id, L[a].dtype));
+  }
   if (L.color) L.color.data = await decode(L.color.id, 'u16');
+  if (L.ocolor) L.ocolor.data = await decode(L.ocolor.id, 'u16');
 }
 
 // per-layer vertex colors (normalized cube space is built per-branch)
@@ -307,6 +314,81 @@ if (!S.is3d) {
       scene.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({
         vertexColors: true, transparent: true, opacity: L.alpha,
         side: THREE.DoubleSide, depthWrite: false })));
+    } else if (L.kind === 'box') {
+      // Tukey boxplot: body [lower,upper], median, whiskers [ymin,ymax], outliers.
+      const hw = (L.width || 0.08) * 0.5;
+      const cap = hw * 0.55;
+      const pos = new Float32Array(n * 6 * 3);
+      const col = new Float32Array(n * 6 * 3);
+      // 6 segments × 2 endpoints × 3 = 36 floats per box
+      const linePos = new Float32Array(n * 36);
+      const lineCol = new Float32Array(n * 36);
+      let p = 0, c = 0, lp = 0, lc = 0;
+      function pushSeg(x0,y0,x1,y1,r,g,b) {
+        linePos[lp++]=x0; linePos[lp++]=y0; linePos[lp++]=0;
+        linePos[lp++]=x1; linePos[lp++]=y1; linePos[lp++]=0;
+        for (let k=0;k<2;k++){ lineCol[lc++]=r; lineCol[lc++]=g; lineCol[lc++]=b; }
+      }
+      for (let i = 0; i < n; i++) {
+        const x = L.x.data[i];
+        const ymin = L.ymin.data[i], lower = L.lower.data[i];
+        const middle = L.middle.data[i], upper = L.upper.data[i];
+        const ymax = L.ymax.data[i];
+        const r = cols[i*3], gch = cols[i*3+1], b = cols[i*3+2];
+        const x0 = x - hw, x1 = x + hw;
+        // box body
+        const tri = [x0,lower,0, x1,lower,0, x1,upper,0, x0,lower,0, x1,upper,0, x0,upper,0];
+        for (let k = 0; k < 18; k++) pos[p++] = tri[k];
+        for (let k = 0; k < 6; k++) { col[c++]=r; col[c++]=gch; col[c++]=b; }
+        // whisker stem + caps + median
+        pushSeg(x, ymin, x, lower, r, gch, b);
+        pushSeg(x, upper, x, ymax, r, gch, b);
+        pushSeg(x - cap, ymin, x + cap, ymin, r, gch, b);
+        pushSeg(x - cap, ymax, x + cap, ymax, r, gch, b);
+        pushSeg(x0, middle, x1, middle, r, gch, b);
+        // side borders of the box (outline)
+        pushSeg(x0, lower, x0, upper, r, gch, b);
+      }
+      const bg = new THREE.BufferGeometry();
+      bg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      bg.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      scene.add(new THREE.Mesh(bg, new THREE.MeshBasicMaterial({
+        vertexColors: true, transparent: true, opacity: Math.min(1, (L.alpha||0.9)*0.35),
+        side: THREE.DoubleSide, depthWrite: false })));
+      const lg = new THREE.BufferGeometry();
+      lg.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
+      lg.setAttribute('color', new THREE.BufferAttribute(lineCol, 3));
+      scene.add(new THREE.LineSegments(lg, new THREE.LineBasicMaterial({
+        vertexColors: true, transparent: true, opacity: L.alpha || 0.95 })));
+      // outliers
+      const nOut = L.nOut || 0;
+      if (nOut > 0 && L.ox && L.oy) {
+        const opos = new Float32Array(nOut * 3);
+        const ocol = new Float32Array(nOut * 3);
+        for (let i = 0; i < nOut; i++) {
+          opos[i*3] = L.ox.data[i]; opos[i*3+1] = L.oy.data[i]; opos[i*3+2] = 0;
+          if (L.ocolor) {
+            if (L.ocolor.kind === 'cat') {
+              const p = PAL[L.ocolor.data[i] % PAL.length];
+              ocol[i*3]=p[0]; ocol[i*3+1]=p[1]; ocol[i*3+2]=p[2];
+            } else {
+              const p = rampAt(L.ocolor.data[i] / 65535);
+              ocol[i*3]=p[0]; ocol[i*3+1]=p[1]; ocol[i*3+2]=p[2];
+            }
+          } else if (L.constColor) {
+            const p = hex2rgb(L.constColor);
+            ocol[i*3]=p[0]; ocol[i*3+1]=p[1]; ocol[i*3+2]=p[2];
+          } else {
+            ocol[i*3]=cols[0]; ocol[i*3+1]=cols[1]; ocol[i*3+2]=cols[2];
+          }
+        }
+        const og = new THREE.BufferGeometry();
+        og.setAttribute('position', new THREE.BufferAttribute(opos, 3));
+        og.setAttribute('color', new THREE.BufferAttribute(ocol, 3));
+        scene.add(new THREE.Points(og, new THREE.PointsMaterial({
+          size: L.outlierSize || 3, sizeAttenuation: false, vertexColors: true,
+          transparent: true, opacity: L.alpha || 0.9 })));
+      }
     } else {
       for (const [s0, cnt] of L.groups) {
         if (cnt < 2) continue;

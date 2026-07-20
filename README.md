@@ -69,6 +69,7 @@ preserves data order while `geom_line` sorts by x, `ggsave("fig.html", p)`.
 | `geom_col(width=)` | bars from `y` heights (ggplot2 `geom_col`) |
 | `geom_bar(width=)` | count bars for discrete `x` |
 | `geom_histogram(bins=, width=)` | continuous `x` histogram → bars |
+| `geom_boxplot(width=, coef=, outlier_size=)` | Tukey box-and-whisker of `y` by `x` |
 | `labs(title=, x=, y=, z=, colour=)` | labels |
 | `scale_colour_continuous(trans=, limits=, palette=)` | numeric colour: `sqrt`/`log10`/`linear`; limits tuple or `"full"` |
 | `scale_colour_viridis_c(option=)` | viridis / magma / turbo colormaps for numeric colour |
@@ -128,5 +129,5 @@ locally (plain Jupyter works). The cell is red-eyed out of LLM context
 
 ## Roadmap
 
-Facets, box/violin/density, 3D hover picking, more `scale_*` overrides, diverging
+Facets, violin/density, 3D hover picking, more `scale_*` overrides, diverging
 scales, express-style wrappers.

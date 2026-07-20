@@ -95,6 +95,41 @@ class geom_histogram(_Geom):
         self.width = float(width)
 
 
+class geom_boxplot(_Geom):
+    """Box-and-whisker summary of ``y`` by ``x`` (ggplot2 ``geom_boxplot``).
+
+    Requires ``aes(x=, y=)``. ``x`` is usually categorical; ``y`` is numeric.
+    Whiskers use the Tukey rule (``coef`` × IQR, default 1.5). Outliers are
+    drawn as points. 2D only.
+
+    Parameters
+    ----------
+    width:
+        Box width as a fraction of category spacing (default 0.75).
+    outlier_size:
+        Outlier point size in pixels (default 3).
+    coef:
+        Whisker fence multiplier on IQR (default 1.5). Set ``0`` to extend
+        whiskers to the data min/max with no outliers.
+    """
+
+    kind = "boxplot"
+
+    def __init__(
+        self,
+        mapping=None,
+        *,
+        width=0.75,
+        outlier_size=3.0,
+        coef=1.5,
+        **kw,
+    ):
+        super().__init__(mapping, **kw)
+        self.width = float(width)
+        self.outlier_size = float(outlier_size)
+        self.coef = float(coef)
+
+
 class labs(dict):
     def __init__(self, title=None, x=None, y=None, z=None, color=None,
                  colour=None):

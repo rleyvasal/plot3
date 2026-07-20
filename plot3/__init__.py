@@ -6,6 +6,7 @@ from plot3.__version__ import __version__
 from plot3.geoms import (
     aes,
     geom_bar,
+    geom_boxplot,
     geom_col,
     geom_histogram,
     geom_line,
@@ -32,6 +33,7 @@ __all__ = [
     "geom_col",
     "geom_bar",
     "geom_histogram",
+    "geom_boxplot",
     "labs",
     "scale_colour_continuous",
     "scale_color_continuous",
