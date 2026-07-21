@@ -14,12 +14,14 @@ from plot3 import (
     geom_point,
     geom_point3d,
     geom_surface,
+    geom_isosurface,
     ggplot,
     labs,
     scale_colour_viridis_c,
+    stat_density_3d,
 )
 from plot3.build import build_spec
-from plot3.stats3d import regular_grid_mesh
+from plot3.stats3d import density_grid_3d, isosurface_levels, regular_grid_mesh
 
 
 def _cloud(n=200, seed=0):
@@ -178,3 +180,41 @@ def test_geom_surface_wireframe_flag():
     fig = ggplot(df, aes(x="x", y="y", z="height")) + geom_surface(wireframe=True)
     spec, _ = build_spec(fig)
     assert spec["layers"][0]["wireframe"] is True
+
+
+def test_density_grid_and_isosurface_levels():
+    rng = np.random.default_rng(0)
+    # Tight cluster so density peaks clearly.
+    pts = rng.normal(scale=0.3, size=(400, 3))
+    dens, xs, ys, zs = density_grid_3d(pts, n=16)
+    assert dens.shape == (16, 16, 16)
+    assert dens.max() == pytest.approx(1.0, rel=1e-6)
+    verts, faces, used = isosurface_levels(pts, [0.2, 0.5], n=16)
+    assert len(used) >= 1
+    assert len(verts) > 0
+    assert faces.shape[1] == 3
+    assert faces.max() < len(verts)
+
+
+def test_geom_isosurface_builds():
+    rng = np.random.default_rng(1)
+    df = pd.DataFrame(
+        {
+            "x": rng.normal(size=300),
+            "y": rng.normal(size=300),
+            "z": rng.normal(size=300),
+        }
+    )
+    fig = (
+        ggplot(df, aes(x="x", y="y", z="z"))
+        + stat_density_3d(n=16)
+        + geom_isosurface(levels=[0.3, 0.6], n=16)
+        + coord_3d()
+    )
+    spec, payloads = build_spec(fig)
+    assert spec["is3d"] is True
+    layer = spec["layers"][0]
+    assert layer["kind"] == "isosurface"
+    assert layer["indices"]["count"] > 0
+    assert any("idx" in pid for pid, _ in payloads)
+    assert len(fig._repr_html_()) > 500

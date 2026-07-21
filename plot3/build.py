@@ -8,12 +8,20 @@ import math
 import numpy as np
 import pandas as pd
 
+import copy
+
 from plot3.encode import encode_norm, pack_u16, pack_u32
 from plot3.geoms import _Geom, aes, geom_col, scale_colour_continuous
 from plot3.scales import Scale, col_values
-from plot3.stats3d import regular_grid_mesh
+from plot3.stats3d import isosurface_levels, regular_grid_mesh
 from plot3.themes import _CONT_PALETTES, _THEMES as THEMES
 from plot3.viewer import _DOC_TEMPLATE as DOC_TEMPLATE
+
+
+def copy_geom_with_density_n(geom: _Geom, n: int) -> _Geom:
+    out = copy.copy(geom)
+    out._density_n = int(n)
+    return out
 
 
 def _boxplot_stats(values: np.ndarray, coef: float = 1.5):
@@ -338,6 +346,48 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data: pd.DataFrame) -> _Geo
         out._nx = nx
         out._ny = ny
         return out
+    if geom.kind == "isosurface":
+        if "x" not in mapping or "y" not in mapping or "z" not in mapping:
+            raise ValueError("geom_isosurface() requires aes(x=, y=, z=)")
+        xcol, ycol, zcol = mapping["x"], mapping["y"], mapping["z"]
+        for col in (xcol, ycol, zcol):
+            if col not in data.columns:
+                raise KeyError(f"column(s) not in DataFrame: {[col]}")
+        pts = (
+            data.loc[:, [xcol, ycol, zcol]]
+            .apply(pd.to_numeric, errors="coerce")
+            .dropna()
+            .to_numpy(dtype=np.float64)
+        )
+        n_bins = int(getattr(geom, "n", 32))
+        # Optional stat_density_3d on the figure is applied in build_spec.
+        n_bins = int(getattr(geom, "_density_n", n_bins))
+        levels = getattr(geom, "levels", (0.25, 0.5, 0.75))
+        vertices, indices, used = isosurface_levels(
+            pts, levels, n=n_bins, absolute=False
+        )
+        if vertices.empty:
+            vertices = pd.DataFrame(
+                columns=["x", "y", "z", "level", "colour"]
+            )
+            indices = np.zeros((0, 3), dtype=np.int32)
+        colour_by = getattr(geom, "colour_by", "level")
+        map_kwargs: dict = {"x": "x", "y": "y", "z": "z"}
+        if colour_by == "level" and "colour" in vertices.columns:
+            map_kwargs["colour"] = "colour"
+        out = _Geom(
+            aes(**map_kwargs),
+            color=geom.const_color,
+            alpha=geom.alpha,
+        )
+        out.kind = "isosurface"
+        out.data_override = vertices
+        out.const_color = geom.const_color
+        out.alpha = geom.alpha if geom.alpha is not None else 0.55
+        out.wireframe = bool(getattr(geom, "wireframe", False))
+        out._indices = indices
+        out._iso_levels = used
+        return out
     return geom
 
 
@@ -345,7 +395,7 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data: pd.DataFrame) -> _Geo
 _2D_ONLY_KINDS = frozenset(
     {"col", "box", "area", "poly", "bar", "histogram", "boxplot", "density", "violin"}
 )
-_3D_POINT_KINDS = frozenset({"point", "line", "surface"})
+_3D_POINT_KINDS = frozenset({"point", "line", "surface", "isosurface"})
 
 
 def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
@@ -359,13 +409,14 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
 
     data = g.data
     coord = getattr(g, "coord", None)
-    has_surface = any(
-        getattr(layer, "kind", None) == "surface" for layer in g.layers
+    mesh_kinds = {"surface", "isosurface"}
+    has_mesh = any(
+        getattr(layer, "kind", None) in mesh_kinds for layer in g.layers
     )
     if (
         coord is not None
         and getattr(coord, "max_points", None)
-        and not has_surface
+        and not has_mesh
     ):
         n_rows = len(data)
         cap = int(coord.max_points)
@@ -374,8 +425,15 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             data = data.iloc[::step].copy()
 
     theme = THEMES[g.theme_name]
+    # Apply optional stat_density_3d options onto isosurface layers.
+    density_stat = getattr(g, "stat_density_3d", None)
+    layers_in = []
+    for geom in g.layers:
+        if getattr(geom, "kind", None) == "isosurface" and density_stat is not None:
+            geom = copy_geom_with_density_n(geom, density_stat.n)
+        layers_in.append(geom)
     expanded = [
-        expand_stat_geom(geom, g.mapping, data) for geom in g.layers
+        expand_stat_geom(geom, g.mapping, data) for geom in layers_in
     ]
     resolved = []  # per layer: (geom, mapping)
     for geom in expanded:
@@ -628,12 +686,12 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             payloads.append((pid, enc["b64"]))
             spec_l[name] = {"id": pid, "dtype": enc["dtype"]}
 
-        if geom.kind == "surface":
+        if geom.kind in {"surface", "isosurface"}:
             for a in axes:
                 _encode_channel(a, vals[a][order], a)
             indices = getattr(geom, "_indices", None)
             if indices is None:
-                raise ValueError("geom_surface() missing triangle indices")
+                raise ValueError(f"{geom.kind} missing triangle indices")
             flat = np.ascontiguousarray(indices.reshape(-1), dtype=np.uint32)
             pid = f"p{li}idx"
             payloads.append((pid, pack_u32(flat, g.compress)))
@@ -647,7 +705,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 spec_l["nx"] = int(geom._nx)
                 spec_l["ny"] = int(geom._ny)
             if spec_l["alpha"] is None:
-                spec_l["alpha"] = 0.95
+                spec_l["alpha"] = 0.95 if geom.kind == "surface" else 0.55
         elif geom.kind == "box":
             for name in ("x", "ymin", "lower", "middle", "upper", "ymax"):
                 _encode_channel(name, vals[name][order], "x" if name == "x" else "y")
@@ -688,7 +746,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                         }
             else:
                 spec_l["nOut"] = 0
-        elif geom.kind != "surface":
+        elif geom.kind not in {"surface", "isosurface"}:
             for a in axes:
                 _encode_channel(a, vals[a][order], a)
 

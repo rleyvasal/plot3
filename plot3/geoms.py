@@ -137,6 +137,67 @@ class geom_surface(_Geom):
         self.wireframe = bool(wireframe)
 
 
+class stat_density_3d:
+    """3D density-grid options for :class:`geom_isosurface`.
+
+    Not drawable alone. Add before ``geom_isosurface`` to set the histogram
+    resolution (and keep a ggplot2-shaped call site)::
+
+        ggplot(df, aes(x, y, z)) + stat_density_3d(n=24) + geom_isosurface(levels=[0.3, 0.7])
+    """
+
+    kind = "density_3d_stat"
+
+    def __init__(self, *, n: int = 32):
+        self.n = int(max(8, min(64, n)))
+
+
+class geom_isosurface(_Geom):
+    """Isosurface of a 3D density estimate from point samples.
+
+    Requires ``aes(x=, y=, z=)`` on scatter-like data. v1 **embeds** density
+    estimation (histogram grid + light smoothing) then extracts surfaces at
+    the given levels. Levels are fractions of peak density in ``[0, 1]``.
+
+    Parameters
+    ----------
+    levels:
+        One or more relative thresholds (default ``[0.25, 0.5, 0.75]``).
+    n:
+        Density grid bins per axis (8–64). Overridden by a preceding
+        :class:`stat_density_3d` if present on the figure.
+    colour_by:
+        ``"level"`` colours mesh vertices by isolevel index (default).
+    wireframe, alpha:
+        Same idea as :class:`geom_surface`.
+    """
+
+    kind = "isosurface"
+
+    def __init__(
+        self,
+        mapping=None,
+        *,
+        levels: list[float] | tuple[float, ...] | None = None,
+        n: int = 32,
+        colour_by: str = "level",
+        wireframe: bool = False,
+        alpha: float = 0.55,
+        **kw,
+    ):
+        super().__init__(mapping, alpha=alpha, **kw)
+        if levels is None:
+            levels = (0.25, 0.5, 0.75)
+        self.levels = tuple(float(x) for x in levels)
+        if not self.levels:
+            raise ValueError("geom_isosurface() needs at least one level")
+        self.n = int(max(8, min(64, n)))
+        if colour_by not in {"level", "none"}:
+            raise ValueError("colour_by must be 'level' or 'none'")
+        self.colour_by = colour_by
+        self.wireframe = bool(wireframe)
+
+
 class geom_path(_Geom):
     kind = "line"
     sort_x = False  # ggplot2 geom_path: connect in data order

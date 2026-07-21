@@ -14,6 +14,7 @@ from plot3.geoms import (
     facet_wrap,
     labs,
     scale_colour_continuous,
+    stat_density_3d,
     _Theme,
 )
 from plot3.themes import _THEMES
@@ -45,6 +46,7 @@ class ggplot:
         self.cscale: scale_colour_continuous | None = None
         self.facet: facet_wrap | None = None
         self.coord: coord_3d | None = None
+        self.stat_density_3d: stat_density_3d | None = None
         self.height = height if isinstance(height, str) else f"{int(height)}px"
         self.quantize = bool(quantize)
         self.compress = bool(compress)
@@ -70,6 +72,7 @@ class ggplot:
         g.labs = dict(self.labs)
         g.facet = self.facet
         g.coord = self.coord
+        g.stat_density_3d = self.stat_density_3d
         g.data = self._as_pandas(data)
         return g
 
@@ -79,6 +82,7 @@ class ggplot:
         g.labs = dict(self.labs)
         g.facet = self.facet
         g.coord = self.coord
+        g.stat_density_3d = self.stat_density_3d
         if isinstance(other, _Geom):
             g.layers.append(other)
         elif isinstance(other, labs):
@@ -91,6 +95,8 @@ class ggplot:
             g.facet = other
         elif isinstance(other, coord_3d):
             g.coord = other
+        elif isinstance(other, stat_density_3d):
+            g.stat_density_3d = other
         elif isinstance(other, aes):
             m = aes()
             m.update(self.mapping)

@@ -704,7 +704,7 @@ if (!S.is3d) {
           size: L.size, sizeAttenuation: sizeAtten, vertexColors: true,
           transparent: true, opacity: L.alpha })));
       }
-    } else if (L.kind === 'surface') {
+    } else if (L.kind === 'surface' || L.kind === 'isosurface') {
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
       g.setAttribute('color', new THREE.BufferAttribute(cols, 3));
@@ -712,16 +712,17 @@ if (!S.is3d) {
         g.setIndex(new THREE.BufferAttribute(L.indices.data, 1));
       }
       g.computeVertexNormals();
+      const baseAlpha = L.alpha != null ? L.alpha : (L.kind === 'isosurface' ? 0.55 : 0.95);
       if (L.wireframe) {
         const rgb = L.constColor ? hex2rgb(L.constColor) : hex2rgb(T.ink2 || '#c3c2b7');
         const wf = new THREE.WireframeGeometry(g);
         scene.add(new THREE.LineSegments(wf, new THREE.LineBasicMaterial({
           color: new THREE.Color(rgb[0], rgb[1], rgb[2]),
-          transparent: true, opacity: L.alpha || 0.9 })));
+          transparent: true, opacity: baseAlpha })));
       } else {
         scene.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({
-          vertexColors: true, transparent: true, opacity: L.alpha || 0.95,
-          side: THREE.DoubleSide })));
+          vertexColors: true, transparent: true, opacity: baseAlpha,
+          side: THREE.DoubleSide, depthWrite: L.kind !== 'isosurface' })));
       }
     } else {
       for (const [s0, cnt] of (L.groups || [[0, n]])) {

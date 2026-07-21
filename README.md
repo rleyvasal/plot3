@@ -67,6 +67,8 @@ preserves data order while `geom_line` sorts by x, `ggsave("fig.html", p)`.
 | `geom_point(size=, alpha=)` | 2D: size in **px**; 3D: size in **scene units** |
 | `geom_point3d(size=, alpha=)` | Explicit 3D points (same engine as `geom_point`) |
 | `geom_surface(wireframe=, alpha=)` | 3D mesh from a complete regular `x`×`y` grid (`z` height) |
+| `geom_isosurface(levels=, n=, …)` | Density isosurfaces from 3D points (levels relative to peak) |
+| `stat_density_3d(n=)` | Optional density-grid settings for `geom_isosurface` |
 | `coord_3d(aspect=, size_mode=, max_points=)` | 3D aspect (`data`/`equal`), point size mode, optional subsample |
 | `geom_line(linewidth=)` / `geom_path()` | line sorts by x; path keeps data order; work in 3D too |
 | `geom_col(width=)` | bars from `y` heights (ggplot2 `geom_col`) |
@@ -209,6 +211,25 @@ grid = pd.DataFrame({
 # + geom_surface(wireframe=True)
 ```
 
+### Density isosurfaces
+
+From raw 3D points (density is estimated on a grid; levels are fractions of peak):
+
+```python
+(
+    ggplot(df, aes(x="x", y="y", z="z"))
+    + geom_isosurface(levels=[0.2, 0.5, 0.8], n=28, alpha=0.5)
+    + coord_3d()
+)
+
+# Explicit density resolution (ggplot2-shaped):
+(
+    ggplot(df, aes(x="x", y="y", z="z"))
+    + stat_density_3d(n=24)
+    + geom_isosurface(levels=[0.35, 0.7])
+)
+```
+
 | | 2D | 3D |
 |--|----|----|
 | Switch | no `z` | `aes(z=...)` on **all** layers |
@@ -218,6 +239,6 @@ grid = pd.DataFrame({
 
 ## Roadmap
 
-Density isosurfaces (`geom_isosurface`), shared fixed facet scales, 3D hover
-picking, more `scale_*` overrides, diverging
+Shared fixed facet scales, 3D hover picking, smoother marching-cubes
+isosurfaces, more `scale_*` overrides, diverging
 scales, express-style wrappers.
