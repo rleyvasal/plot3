@@ -57,6 +57,7 @@ async function decode(id, dtype) {
       await new Response(new Blob([a]).stream().pipeThrough(ds)).arrayBuffer());
   }
   if (dtype === 'f32') return new Float32Array(a.buffer);
+  if (dtype === 'u32') return new Uint32Array(a.buffer);
   let u;
   if (S.gz) {                       // undo byte planes + delta
     const m = a.length >> 1;
@@ -99,6 +100,9 @@ for (const L of S.layers) {
   }
   if (L.color) L.color.data = await decode(L.color.id, 'u16');
   if (L.ocolor) L.ocolor.data = await decode(L.ocolor.id, 'u16');
+  if (L.indices && L.indices.id) {
+    L.indices.data = await decode(L.indices.id, 'u32');
+  }
 }
 
 // per-layer vertex colors (normalized cube space is built per-branch)
@@ -656,6 +660,11 @@ if (!S.is3d) {
     : axesList.map((a, i) => spans[i] / maxSpan);
   const sizeAtten = coord.sizeMode !== 'screen';
   const toCube = (a, i, v) => v * ext[i];
+  // Soft lighting for surface meshes (added once).
+  scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
+  dirLight.position.set(1.2, 0.8, 1.5);
+  scene.add(dirLight);
 
   for (const L of S.layers) {
     const n = L.n;
@@ -695,8 +704,27 @@ if (!S.is3d) {
           size: L.size, sizeAttenuation: sizeAtten, vertexColors: true,
           transparent: true, opacity: L.alpha })));
       }
+    } else if (L.kind === 'surface') {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      g.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+      if (L.indices && L.indices.data) {
+        g.setIndex(new THREE.BufferAttribute(L.indices.data, 1));
+      }
+      g.computeVertexNormals();
+      if (L.wireframe) {
+        const rgb = L.constColor ? hex2rgb(L.constColor) : hex2rgb(T.ink2 || '#c3c2b7');
+        const wf = new THREE.WireframeGeometry(g);
+        scene.add(new THREE.LineSegments(wf, new THREE.LineBasicMaterial({
+          color: new THREE.Color(rgb[0], rgb[1], rgb[2]),
+          transparent: true, opacity: L.alpha || 0.9 })));
+      } else {
+        scene.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({
+          vertexColors: true, transparent: true, opacity: L.alpha || 0.95,
+          side: THREE.DoubleSide })));
+      }
     } else {
-      for (const [s0, cnt] of L.groups) {
+      for (const [s0, cnt] of (L.groups || [[0, n]])) {
         if (cnt < 2) continue;
         const lg = new LineGeometry();
         lg.setPositions(Array.from(pos.subarray(s0*3, (s0+cnt)*3)));

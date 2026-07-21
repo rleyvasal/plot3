@@ -50,3 +50,11 @@ def encode_codes(codes: np.ndarray, compress: bool) -> dict:
     q = np.ascontiguousarray(codes, dtype="<u2")
     return {"dtype": "u16", "b64": pack_u16(q, compress), "raw": True}
 
+
+def pack_u32(values: np.ndarray, compress: bool) -> str:
+    """uint32 array -> base64 (optional gzip; no delta)."""
+    raw = np.ascontiguousarray(values, dtype="<u4").tobytes()
+    if compress:
+        raw = _gzip.compress(raw, 6)
+    return base64.b64encode(raw).decode("ascii")
+

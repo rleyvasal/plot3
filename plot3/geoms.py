@@ -5,13 +5,32 @@ from __future__ import annotations
 from plot3.themes import _CONT_PALETTES
 
 class aes(dict):
-    """Aesthetic mapping: aes(x=, y=, z=, colour=/color=, group=)."""
+    """Aesthetic mapping: aes(x=, y=, z=, colour=/color=, fill=, group=).
 
-    def __init__(self, x=None, y=None, z=None, color=None, colour=None,
-                 group=None):
+    ``fill`` is accepted as an alias of ``colour`` when colour is omitted
+    (useful for surfaces).
+    """
+
+    def __init__(
+        self,
+        x=None,
+        y=None,
+        z=None,
+        color=None,
+        colour=None,
+        fill=None,
+        group=None,
+    ):
         super().__init__()
+        colour_value = (
+            color
+            if color is not None
+            else colour
+            if colour is not None
+            else fill
+        )
         for k, v in (("x", x), ("y", y), ("z", z),
-                     ("color", color if color is not None else colour),
+                     ("color", colour_value),
                      ("group", group)):
             if v is not None:
                 self[k] = v
@@ -94,6 +113,28 @@ class coord_3d:
             "sizeMode": self.size_mode,
             "maxPoints": self.max_points,
         }
+
+
+class geom_surface(_Geom):
+    """3D surface from a regular x–y grid (height in ``z``).
+
+    Requires ``aes(x=, y=, z=)`` on a **complete rectangular grid** in long
+    form (one row per cell). Optional ``colour``/``fill`` colours vertices.
+    Forces 3D mode.
+
+    Parameters
+    ----------
+    wireframe:
+        If True, draw only mesh edges.
+    alpha:
+        Face opacity (default 0.95).
+    """
+
+    kind = "surface"
+
+    def __init__(self, mapping=None, *, wireframe: bool = False, alpha=0.95, **kw):
+        super().__init__(mapping, alpha=alpha, **kw)
+        self.wireframe = bool(wireframe)
 
 
 class geom_path(_Geom):

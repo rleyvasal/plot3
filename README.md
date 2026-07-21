@@ -66,6 +66,7 @@ preserves data order while `geom_line` sorts by x, `ggsave("fig.html", p)`.
 | `aes(x, y, z, colour, group)` | `z` on every layer → 3D orbit view |
 | `geom_point(size=, alpha=)` | 2D: size in **px**; 3D: size in **scene units** |
 | `geom_point3d(size=, alpha=)` | Explicit 3D points (same engine as `geom_point`) |
+| `geom_surface(wireframe=, alpha=)` | 3D mesh from a complete regular `x`×`y` grid (`z` height) |
 | `coord_3d(aspect=, size_mode=, max_points=)` | 3D aspect (`data`/`equal`), point size mode, optional subsample |
 | `geom_line(linewidth=)` / `geom_path()` | line sorts by x; path keeps data order; work in 3D too |
 | `geom_col(width=)` | bars from `y` heights (ggplot2 `geom_col`) |
@@ -182,6 +183,32 @@ cloud = read_bin(
 `read_bin` defaults to columns `x, y, z, intensity` (stride 5 float32). Use
 `remote=True` only after CRAFT `%gpu` so `SSH_HOST` / `remote_run_` exist.
 
+### Surfaces from a grid
+
+Long-form rectangular grid (every `x`×`y` cell present once):
+
+```python
+import numpy as np
+import pandas as pd
+from plot3 import ggplot, aes, geom_surface, coord_3d, scale_colour_viridis_c
+
+xs, ys = np.linspace(-2, 2, 40), np.linspace(-2, 2, 40)
+xx, yy = np.meshgrid(xs, ys)
+grid = pd.DataFrame({
+    "x": xx.ravel(),
+    "y": yy.ravel(),
+    "height": np.sin(xx).ravel() * np.cos(yy).ravel(),
+})
+(
+    ggplot(grid, aes(x="x", y="y", z="height", fill="height"))
+    + geom_surface(alpha=0.95)
+    + scale_colour_viridis_c()
+    + coord_3d(aspect="data")
+)
+# wireframe only:
+# + geom_surface(wireframe=True)
+```
+
 | | 2D | 3D |
 |--|----|----|
 | Switch | no `z` | `aes(z=...)` on **all** layers |
@@ -191,6 +218,6 @@ cloud = read_bin(
 
 ## Roadmap
 
-`geom_surface`, density isosurfaces (`geom_isosurface`), shared fixed facet
-scales, 3D hover picking, more `scale_*` overrides, diverging
+Density isosurfaces (`geom_isosurface`), shared fixed facet scales, 3D hover
+picking, more `scale_*` overrides, diverging
 scales, express-style wrappers.

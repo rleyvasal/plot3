@@ -13,11 +13,13 @@ from plot3 import (
     geom_col,
     geom_point,
     geom_point3d,
+    geom_surface,
     ggplot,
     labs,
     scale_colour_viridis_c,
 )
 from plot3.build import build_spec
+from plot3.stats3d import regular_grid_mesh
 
 
 def _cloud(n=200, seed=0):
@@ -124,3 +126,55 @@ def test_3d_html_builds():
         + coord_3d()
     )._repr_html_()
     assert len(html) > 500
+
+
+def _grid(nx=12, ny=10):
+    xs = np.linspace(-2, 2, nx)
+    ys = np.linspace(-1.5, 1.5, ny)
+    xx, yy = np.meshgrid(xs, ys)
+    zz = np.sin(xx) * np.cos(yy)
+    return pd.DataFrame(
+        {"x": xx.ravel(), "y": yy.ravel(), "height": zz.ravel()}
+    )
+
+
+def test_regular_grid_mesh_counts():
+    df = _grid(5, 4)
+    verts, indices, nx, ny = regular_grid_mesh(df, "x", "y", "height")
+    assert nx == 5 and ny == 4
+    assert len(verts) == 20
+    assert indices.shape == ((5 - 1) * (4 - 1) * 2, 3)
+
+
+def test_geom_surface_builds_mesh_layer():
+    df = _grid(12, 10)
+    fig = (
+        ggplot(df, aes(x="x", y="y", z="height", fill="height"))
+        + geom_surface()
+        + coord_3d()
+        + scale_colour_viridis_c(option="viridis")
+        + labs(title="surface")
+    )
+    spec, payloads = build_spec(fig)
+    assert spec["is3d"] is True
+    layer = spec["layers"][0]
+    assert layer["kind"] == "surface"
+    assert layer["n"] == 12 * 10
+    assert layer["indices"]["count"] == (12 - 1) * (10 - 1) * 2 * 3
+    assert any(pid.endswith("idx") or "idx" in pid for pid, _ in payloads)
+    html = fig._repr_html_()
+    assert len(html) > 500
+
+
+def test_geom_surface_rejects_incomplete_grid():
+    df = _grid(6, 5).iloc[:-3]
+    fig = ggplot(df, aes(x="x", y="y", z="height")) + geom_surface()
+    with pytest.raises(ValueError, match="complete regular"):
+        build_spec(fig)
+
+
+def test_geom_surface_wireframe_flag():
+    df = _grid(6, 6)
+    fig = ggplot(df, aes(x="x", y="y", z="height")) + geom_surface(wireframe=True)
+    spec, _ = build_spec(fig)
+    assert spec["layers"][0]["wireframe"] is True

@@ -8,9 +8,10 @@ import math
 import numpy as np
 import pandas as pd
 
-from plot3.encode import encode_norm, pack_u16
+from plot3.encode import encode_norm, pack_u16, pack_u32
 from plot3.geoms import _Geom, aes, geom_col, scale_colour_continuous
 from plot3.scales import Scale, col_values
+from plot3.stats3d import regular_grid_mesh
 from plot3.themes import _CONT_PALETTES, _THEMES as THEMES
 from plot3.viewer import _DOC_TEMPLATE as DOC_TEMPLATE
 
@@ -312,6 +313,31 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data: pd.DataFrame) -> _Geo
         out.alpha = geom.alpha if geom.alpha is not None else 0.45
         out._violin_levels = levels
         return out
+    if geom.kind == "surface":
+        if "x" not in mapping or "y" not in mapping or "z" not in mapping:
+            raise ValueError("geom_surface() requires aes(x=, y=, z=)")
+        xcol, ycol, zcol = mapping["x"], mapping["y"], mapping["z"]
+        ccol = mapping.get("color")
+        vertices, indices, nx, ny = regular_grid_mesh(
+            data, xcol, ycol, zcol, ccol=ccol
+        )
+        map_kwargs: dict = {"x": "x", "y": "y", "z": "z"}
+        if ccol and "colour" in vertices.columns:
+            map_kwargs["colour"] = "colour"
+        out = _Geom(
+            aes(**map_kwargs),
+            color=geom.const_color,
+            alpha=geom.alpha,
+        )
+        out.kind = "surface"
+        out.data_override = vertices
+        out.const_color = geom.const_color
+        out.alpha = geom.alpha if geom.alpha is not None else 0.95
+        out.wireframe = bool(getattr(geom, "wireframe", False))
+        out._indices = indices
+        out._nx = nx
+        out._ny = ny
+        return out
     return geom
 
 
@@ -319,7 +345,7 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data: pd.DataFrame) -> _Geo
 _2D_ONLY_KINDS = frozenset(
     {"col", "box", "area", "poly", "bar", "histogram", "boxplot", "density", "violin"}
 )
-_3D_POINT_KINDS = frozenset({"point", "line"})
+_3D_POINT_KINDS = frozenset({"point", "line", "surface"})
 
 
 def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
@@ -333,7 +359,14 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
 
     data = g.data
     coord = getattr(g, "coord", None)
-    if coord is not None and getattr(coord, "max_points", None):
+    has_surface = any(
+        getattr(layer, "kind", None) == "surface" for layer in g.layers
+    )
+    if (
+        coord is not None
+        and getattr(coord, "max_points", None)
+        and not has_surface
+    ):
         n_rows = len(data)
         cap = int(coord.max_points)
         if n_rows > cap:
@@ -350,6 +383,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         m.update(geom.mapping)
         if "x" not in m or "y" not in m:
             raise ValueError("aes(x=, y=) are required (bar/histogram/density supply y)")
+        if geom.kind == "surface" and "z" not in m:
+            raise ValueError("geom_surface() requires aes(z=)")
         resolved.append((geom, m))
 
     is3d = any("z" in m for _, m in resolved)
@@ -361,7 +396,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         )
         raise ValueError(
             f"geom kind(s) {bad} are 2D-only; use geom_point / geom_point3d "
-            "(or geom_line/path) with aes(z=...) for 3D"
+            "(or geom_line/path/surface) with aes(z=...) for 3D"
         )
     if is3d and getattr(g, "facet", None) is not None:
         raise ValueError("facet_wrap() is not supported with 3D figures yet")
@@ -593,7 +628,27 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             payloads.append((pid, enc["b64"]))
             spec_l[name] = {"id": pid, "dtype": enc["dtype"]}
 
-        if geom.kind == "box":
+        if geom.kind == "surface":
+            for a in axes:
+                _encode_channel(a, vals[a][order], a)
+            indices = getattr(geom, "_indices", None)
+            if indices is None:
+                raise ValueError("geom_surface() missing triangle indices")
+            flat = np.ascontiguousarray(indices.reshape(-1), dtype=np.uint32)
+            pid = f"p{li}idx"
+            payloads.append((pid, pack_u32(flat, g.compress)))
+            spec_l["indices"] = {
+                "id": pid,
+                "dtype": "u32",
+                "count": int(flat.size),
+            }
+            spec_l["wireframe"] = bool(getattr(geom, "wireframe", False))
+            if getattr(geom, "_nx", None) is not None:
+                spec_l["nx"] = int(geom._nx)
+                spec_l["ny"] = int(geom._ny)
+            if spec_l["alpha"] is None:
+                spec_l["alpha"] = 0.95
+        elif geom.kind == "box":
             for name in ("x", "ymin", "lower", "middle", "upper", "ymax"):
                 _encode_channel(name, vals[name][order], "x" if name == "x" else "y")
             # Keep y as middle for shared hover helpers.
@@ -633,11 +688,11 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                         }
             else:
                 spec_l["nOut"] = 0
-        else:
+        elif geom.kind != "surface":
             for a in axes:
                 _encode_channel(a, vals[a][order], a)
 
-        if vals.get("color") and geom.kind != "box":
+        if vals.get("color") and geom.kind not in {"box"}:
             ckind, cv, _ = vals["color"]
             pid = f"p{li}c"
             if ckind == "cat":
