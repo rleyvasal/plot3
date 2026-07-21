@@ -30,11 +30,70 @@ class _Geom:
 
 
 class geom_point(_Geom):
+    """Scatter points.
+
+    In **2D**, ``size`` is pixels. In **3D** (when ``aes(z=...)`` is set),
+    ``size`` is scene units with distance attenuation — lidar clouds typically
+    use ``0.001``–``0.02``. Prefer :class:`geom_point3d` for explicit 3D intent.
+    """
+
     kind = "point"
 
     def __init__(self, mapping=None, *, size=None, **kw):
         super().__init__(mapping, **kw)
         self.size = size
+
+
+class geom_point3d(geom_point):
+    """3D scatter / point-cloud marks (same ``kind`` as :class:`geom_point`).
+
+    Use with ``aes(x=, y=, z=)``. Size is in **scene units** under the default
+    :class:`coord_3d` (``size_mode="scene"``).
+    """
+
+    def __init__(self, mapping=None, *, size=0.01, **kw):
+        super().__init__(mapping, size=size, **kw)
+
+
+class coord_3d:
+    """3D coordinate system options for orbit-view figures.
+
+    Parameters
+    ----------
+    aspect:
+        ``"data"`` preserves relative axis spans (default). ``"equal"`` forces
+        a unit cube (equal scale on x/y/z).
+    size_mode:
+        ``"scene"`` — point size attenuates with distance (lidar).
+        ``"screen"`` — constant pixel size.
+    max_points:
+        If set, deterministically stride-subsample rows when building so huge
+        clouds stay interactive in HTML.
+    """
+
+    def __init__(
+        self,
+        *,
+        aspect: str = "data",
+        size_mode: str = "scene",
+        max_points: int | None = None,
+    ):
+        if aspect not in {"data", "equal"}:
+            raise ValueError("aspect must be 'data' or 'equal'")
+        if size_mode not in {"scene", "screen"}:
+            raise ValueError("size_mode must be 'scene' or 'screen'")
+        if max_points is not None and int(max_points) < 1:
+            raise ValueError("max_points must be positive")
+        self.aspect = aspect
+        self.size_mode = size_mode
+        self.max_points = None if max_points is None else int(max_points)
+
+    def to_spec(self) -> dict:
+        return {
+            "aspect": self.aspect,
+            "sizeMode": self.size_mode,
+            "maxPoints": self.max_points,
+        }
 
 
 class geom_path(_Geom):

@@ -5,6 +5,7 @@ from __future__ import annotations
 from plot3.__version__ import __version__
 from plot3.geoms import (
     aes,
+    coord_3d,
     facet_wrap,
     geom_bar,
     geom_boxplot,
@@ -14,6 +15,7 @@ from plot3.geoms import (
     geom_line,
     geom_path,
     geom_point,
+    geom_point3d,
     geom_violin,
     labs,
     scale_color_continuous,
@@ -31,6 +33,7 @@ __all__ = [
     "ggplot",
     "aes",
     "geom_point",
+    "geom_point3d",
     "geom_line",
     "geom_path",
     "geom_col",
@@ -40,6 +43,7 @@ __all__ = [
     "geom_density",
     "geom_violin",
     "facet_wrap",
+    "coord_3d",
     "labs",
     "scale_colour_continuous",
     "scale_color_continuous",

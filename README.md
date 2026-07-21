@@ -63,9 +63,11 @@ preserves data order while `geom_line` sorts by x, `ggsave("fig.html", p)`.
 | Piece | Notes |
 |---|---|
 | `ggplot(df, aes(...))` / `data >> ggplot(aes(...))` | figure; `quantize=False` for deep-zoom float32 payloads |
-| `aes(x, y, z, colour, group)` | `z` → 3D; colour numeric → ramp, categorical → palette + legend |
-| `geom_point(size=, alpha=)` | 2D size in px, 3D in scene units |
-| `geom_line(linewidth=)` / `geom_path()` | line sorts by x; path keeps data order |
+| `aes(x, y, z, colour, group)` | `z` on every layer → 3D orbit view |
+| `geom_point(size=, alpha=)` | 2D: size in **px**; 3D: size in **scene units** |
+| `geom_point3d(size=, alpha=)` | Explicit 3D points (same engine as `geom_point`) |
+| `coord_3d(aspect=, size_mode=, max_points=)` | 3D aspect (`data`/`equal`), point size mode, optional subsample |
+| `geom_line(linewidth=)` / `geom_path()` | line sorts by x; path keeps data order; work in 3D too |
 | `geom_col(width=)` | bars from `y` heights (ggplot2 `geom_col`) |
 | `geom_bar(width=)` | count bars for discrete `x` |
 | `geom_histogram(bins=, width=)` | continuous `x` histogram → bars |
@@ -137,7 +139,58 @@ ggplot(df, aes(x="cyl", y="mpg")) + geom_violin()
 ggplot(df, aes(x="wt", y="mpg")) + geom_point() + facet_wrap("cyl", ncol=2)
 ```
 
+## 3D and point clouds
+
+3D mode is the same grammar: map **`z`**, add a 3D-capable geom. There is no
+separate `ggplot3d` class.
+
+```python
+from plot3 import (
+    ggplot, aes, geom_point, geom_point3d, coord_3d,
+    scale_colour_viridis_c, read_bin, labs,
+)
+
+# Core form (always supported)
+ggplot(df, aes(x="x", y="y", z="z", colour="intensity")) + geom_point(size=0.008)
+
+# Explicit 3D + coordinate options (recommended for lidar)
+(
+    ggplot(df, aes(x="x", y="y", z="z", colour="intensity"))
+    + geom_point3d(size=0.008)
+    + coord_3d(aspect="data", size_mode="scene", max_points=300_000)
+    + scale_colour_viridis_c(option="turbo")
+    + labs(title="LIDAR", colour="intensity")
+)
+```
+
+### nuScenes / CRAFT lidar
+
+```python
+cloud = read_bin(
+    "/home/gpudev/nuscenes_data/samples/LIDAR_TOP/"
+    "n015-2018-07-24-11-22-45+0800__LIDAR_TOP__1532402927647951.pcd.bin",
+    remote=True,   # stream + thin on the GPU host under CRAFT
+)
+(
+    ggplot(cloud, aes(x="x", y="y", z="z", colour="intensity"))
+    + geom_point3d(size=0.001)
+    + scale_colour_viridis_c(option="turbo")
+    + coord_3d()
+)
+```
+
+`read_bin` defaults to columns `x, y, z, intensity` (stride 5 float32). Use
+`remote=True` only after CRAFT `%gpu` so `SSH_HOST` / `remote_run_` exist.
+
+| | 2D | 3D |
+|--|----|----|
+| Switch | no `z` | `aes(z=...)` on **all** layers |
+| Point `size` | pixels | scene units (`size_mode="scene"`) |
+| Interaction | pan / zoom | orbit |
+| Not allowed | — | `facet_wrap`, bar/box/density/violin/… |
+
 ## Roadmap
 
-Shared fixed facet scales, 3D hover picking, more `scale_*` overrides, diverging
+`geom_surface`, density isosurfaces (`geom_isosurface`), shared fixed facet
+scales, 3D hover picking, more `scale_*` overrides, diverging
 scales, express-style wrappers.

@@ -315,6 +315,13 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data: pd.DataFrame) -> _Geo
     return geom
 
 
+# Geoms that cannot enter a 3D figure (stat expansions use these kinds too).
+_2D_ONLY_KINDS = frozenset(
+    {"col", "box", "area", "poly", "bar", "histogram", "boxplot", "density", "violin"}
+)
+_3D_POINT_KINDS = frozenset({"point", "line"})
+
+
 def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if g.data is None:
         raise ValueError(
@@ -324,9 +331,18 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if not g.layers:
         raise ValueError("add a geom: ggplot(df, aes(...)) + geom_point()")
 
+    data = g.data
+    coord = getattr(g, "coord", None)
+    if coord is not None and getattr(coord, "max_points", None):
+        n_rows = len(data)
+        cap = int(coord.max_points)
+        if n_rows > cap:
+            step = max(1, (n_rows + cap - 1) // cap)
+            data = data.iloc[::step].copy()
+
     theme = THEMES[g.theme_name]
     expanded = [
-        expand_stat_geom(geom, g.mapping, g.data) for geom in g.layers
+        expand_stat_geom(geom, g.mapping, data) for geom in g.layers
     ]
     resolved = []  # per layer: (geom, mapping)
     for geom in expanded:
@@ -339,12 +355,16 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     is3d = any("z" in m for _, m in resolved)
     if is3d and not all("z" in m for _, m in resolved):
         raise ValueError("mix of 2D and 3D layers: every layer needs aes(z=)")
-    if is3d and any(
-        geom.kind in {"col", "box", "area", "poly"} for geom, _ in resolved
-    ):
-        raise ValueError(
-            "geom_col/bar/histogram/boxplot/density/violin are 2D only"
+    if is3d and any(geom.kind in _2D_ONLY_KINDS for geom, _ in resolved):
+        bad = sorted(
+            {geom.kind for geom, _ in resolved if geom.kind in _2D_ONLY_KINDS}
         )
+        raise ValueError(
+            f"geom kind(s) {bad} are 2D-only; use geom_point / geom_point3d "
+            "(or geom_line/path) with aes(z=...) for 3D"
+        )
+    if is3d and getattr(g, "facet", None) is not None:
+        raise ValueError("facet_wrap() is not supported with 3D figures yet")
 
     axes = ["x", "y", "z"] if is3d else ["x", "y"]
     scales: dict[str, Scale] = {}
@@ -378,7 +398,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     for geom, m in resolved:
         frame = getattr(geom, "data_override", None)
         if frame is None:
-            frame = g.data
+            frame = data
         if geom.kind == "box":
             # Stats frame: x + ymin/lower/middle/upper/ymax (+ optional colour).
             xcol = m["x"]
@@ -722,11 +742,12 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             if getattr(geom, "size", None) is not None:
                 spec_l["size"] = float(geom.size)
             elif is3d:
-                # cube units; density-scaled so dense scans stay crisp
+                # scene units; density-scaled so dense scans stay crisp
                 spec_l["size"] = round(
                     min(0.02, max(0.0012,
                                   0.02 * (500.0 / max(1, n)) ** (1.0 / 3.0))), 5)
             else:
+                # pixels
                 spec_l["size"] = 6.0 if n <= 2000 else (4.0 if n <= 20000 else 2.5)
             if spec_l["alpha"] is None:
                 spec_l["alpha"] = 0.85 if n <= 50000 else 0.6
@@ -751,6 +772,19 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                      "trans": num_color[2], "ramp": ramp}
 
     base_map = dict(g.mapping)
+    if is3d:
+        coord_spec = (
+            coord.to_spec()
+            if coord is not None
+            else {"aspect": "data", "sizeMode": "scene", "maxPoints": None}
+        )
+    else:
+        coord_spec = None
+        if coord is not None:
+            raise ValueError(
+                "coord_3d() requires a 3D figure (map aes(z=...) on layers)"
+            )
+
     spec = {
         "v": 1,
         "is3d": is3d,
@@ -767,6 +801,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         "legend": legend,
         "layers": layer_specs,
         "gz": 1 if g.compress else 0,
+        "coord": coord_spec,
     }
     return spec, payloads
 

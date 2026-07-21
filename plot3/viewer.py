@@ -647,10 +647,14 @@ if (!S.is3d) {
   host.style.left = '0'; host.style.top = '0';
   const cam = new THREE.PerspectiveCamera(55, 1, 0.01, 100);
   cam.up.set(0, 0, 1);
-  // proportional cube: preserve data aspect across axes
+  const coord = S.coord || { aspect: 'data', sizeMode: 'scene' };
+  // proportional cube: preserve data aspect, or equal axes
   const spans = axesList.map(a => spanOf(a));
-  const maxSpan = Math.max(...spans);
-  const ext = axesList.map((a, i) => spans[i] / maxSpan);
+  const maxSpan = Math.max(...spans, 1e-12);
+  const ext = (coord.aspect === 'equal')
+    ? axesList.map(() => 1)
+    : axesList.map((a, i) => spans[i] / maxSpan);
+  const sizeAtten = coord.sizeMode !== 'screen';
   const toCube = (a, i, v) => v * ext[i];
 
   for (const L of S.layers) {
@@ -678,7 +682,7 @@ if (!S.is3d) {
           const g = new THREE.BufferGeometry();
           g.setAttribute('position', new THREE.BufferAttribute(sub, 3));
           const pt = new THREE.Points(g, new THREE.PointsMaterial({
-            color: S.color.palette[ci], size: L.size, sizeAttenuation: true,
+            color: S.color.palette[ci], size: L.size, sizeAttenuation: sizeAtten,
             transparent: true, opacity: L.alpha }));
           scene.add(pt);
           regCat(ci, pt);
@@ -688,7 +692,7 @@ if (!S.is3d) {
         g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
         g.setAttribute('color', new THREE.BufferAttribute(cols, 3));
         scene.add(new THREE.Points(g, new THREE.PointsMaterial({
-          size: L.size, sizeAttenuation: true, vertexColors: true,
+          size: L.size, sizeAttenuation: sizeAtten, vertexColors: true,
           transparent: true, opacity: L.alpha })));
       }
     } else {
