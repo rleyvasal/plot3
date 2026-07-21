@@ -31,16 +31,42 @@ ROOT = Path(__file__).resolve().parents[1]
 R_CASES = ROOT / "tests" / "r_oracle_cases.R"
 
 
+def _find_rscript() -> str | None:
+    found = shutil.which("Rscript")
+    if found:
+        return found
+    # Common install locations when the shell PATH is minimal (GUI / CI).
+    for candidate in (
+        "/opt/homebrew/bin/Rscript",
+        "/usr/local/bin/Rscript",
+        "/usr/bin/Rscript",
+    ):
+        if Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def _r_command() -> list[str] | None:
     manifest = os.environ.get("PLOT3_R_ORACLE_MANIFEST")
     pixi = shutil.which("pixi")
     if manifest and pixi:
         return [pixi, "run", "--manifest-path", manifest, "Rscript"]
-    rscript = shutil.which("Rscript")
+    rscript = _find_rscript()
     return [rscript] if rscript else None
 
 
 R_COMMAND = _r_command()
+
+
+def _as_float_list(value: Any) -> list[float]:
+    """Normalize jsonlite scalars/arrays (auto_unbox turns length-1 into a number)."""
+    if value is None:
+        return []
+    if isinstance(value, (int, float, np.floating, np.integer)):
+        return [float(value)]
+    if isinstance(value, str):
+        return [float(value)]
+    return [float(v) for v in value]
 
 
 @lru_cache(maxsize=32)
@@ -108,9 +134,11 @@ def test_r_boxplot_stats_on_shared_vectors():
     values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 10.0]
     script = f"""
     s <- boxplot.stats(c({", ".join(str(v) for v in values)}), coef=1.5)
+    outs <- as.numeric(s$out)
+    if (length(outs) == 0) outs <- list() else outs <- as.list(outs)
     cat(jsonlite::toJSON(list(
       ymin=s$stats[[1]], lower=s$stats[[2]], middle=s$stats[[3]],
-      upper=s$stats[[4]], ymax=s$stats[[5]], outliers=as.numeric(s$out)
+      upper=s$stats[[4]], ymax=s$stats[[5]], outliers=outs
     ), auto_unbox=TRUE), "\\n")
     """
     proc = subprocess.run(
@@ -122,6 +150,7 @@ def test_r_boxplot_stats_on_shared_vectors():
     if proc.returncode != 0:
         pytest.fail(proc.stderr or proc.stdout)
     r = json.loads(proc.stdout.strip().splitlines()[-1])
+    r_outliers = _as_float_list(r.get("outliers"))
     py = tukey_boxplot_stats(np.array(values, dtype=float))
     got = _boxplot_stats(np.array(values, dtype=float), coef=1.5)
     assert got is not None
@@ -129,7 +158,8 @@ def test_r_boxplot_stats_on_shared_vectors():
     assert nearly_equal(got[2], r["middle"], atol=1e-6)  # median
     assert nearly_equal(got[1], r["lower"], atol=0.05)  # hinges
     assert nearly_equal(got[3], r["upper"], atol=0.05)
-    assert len(got[5]) >= 1 and len(r["outliers"]) >= 1
+    assert len(got[5]) >= 1 and len(r_outliers) >= 1
+    assert nearly_equal(sorted(got[5]), sorted(r_outliers), atol=1e-9)
 
 
 def test_r_hist_breaks_positive():

@@ -247,11 +247,14 @@ def run_plot3_from_magic(line: str = ""):
     if theme != "dark":
         fig = fig + theme_light()
 
-    from IPython.display import HTML, display
-
-    display(HTML(fig._repr_html_()))
+    # Prefer fig display path (opens system browser under VS Code; iframe in SolveIt).
     if hide:
+        # show() also respects fig.hide / autohide; magic already resolved msg id.
+        fig.hide = False
+        fig.show()
         hide_caller_from_ai(mid)
+    else:
+        fig.show()
     return None
 
 

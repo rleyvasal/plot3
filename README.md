@@ -16,6 +16,67 @@ pip install -e ".[dev,jupyter]"
 
 In VS Code: **Python: Select Interpreter** → this `.venv`. No CRAFT required.
 
+## SolveIt / CRAFT
+
+Preferred (with gpudev addons):
+
+```text
+%local
+%run /path/to/gpudev/CRAFT.py                 # if using %gpu
+%run /path/to/gpudev/addons/tidy3.py          # optional pipes
+%run /path/to/gpudev/addons/plot3.py
+```
+
+Direct load from a clone:
+
+```text
+%run /path/to/plot3/load.py
+```
+
+In **SolveIt**, figures use an **inline iframe** (WebGL). Displayed cells are
+marked `skipped=1` (red eye) so viewer HTML does not enter the LLM context
+(`ggplot(..., hide=False)` or `autohide(False)` to opt out).
+
+Under **`%gpu`**, plot3 is seeded to the remote kernel automatically so
+`ggplot(...)` cells work there; `%plot3` stays host-local. After
+`%restart_kernel`: `seed_plot3_remote(force=True)`.
+
+```python
+tidy(df) >> filter(col("x") > 0) >> ggplot(aes(x="x", y="y")) + geom_point()
+# or
+%plot3 df x=x y=y color=group
+```
+
+### VS Code notebooks (blank plot?)
+
+plot3 figures need a real browser for WebGL + the three.js CDN. **SolveIt**
+and opening the HTML file work; the **VS Code notebook output webview** often
+shows an empty panel (CSP blocks the viewer).
+
+plot3 detects VS Code and **opens the figure in your system browser** instead
+(writes `./.plot3_preview/latest.html`). Force either mode:
+
+```bash
+export PLOT3_DISPLAY=browser   # always open browser
+export PLOT3_DISPLAY=iframe    # force inline (SolveIt)
+export PLOT3_NO_BROWSER=1      # write file only, do not auto-open
+```
+
+Or explicitly:
+
+```python
+fig.show(browser=True)                 # open system browser
+fig.save("fig.html")                   # then open the file yourself
+```
+
+### Galleries (browser HTML)
+
+```bash
+python examples/showcase_2d.py           # ggplot2-style 2D gallery + index
+python examples/showcase_3d.py           # lidar, galaxy, peaks, helix, …
+# details: examples/README.md
+```
+
 ## Testing (local)
 
 ```bash

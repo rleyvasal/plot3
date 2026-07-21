@@ -4,6 +4,10 @@ Usage::
 
     %run /path/to/plot3/load.py
 
+Or via the gpudev addon (preferred under SolveIt)::
+
+    %run /path/to/gpudev/addons/plot3.py
+
 Prefer a normal install when possible::
 
     pip install -e /path/to/plot3
@@ -19,6 +23,10 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+# Drop stale modules so re-%run picks up git pulls.
+for _m in [m for m in list(sys.modules) if m == "plot3" or m.startswith("plot3.")]:
+    del sys.modules[_m]
 
 from plot3.jupyter import register_plot3  # noqa: E402
 

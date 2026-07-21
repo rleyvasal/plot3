@@ -28,7 +28,7 @@ from plot3.geoms import (
     theme_dark,
     theme_light,
 )
-from plot3.ggplot import autohide, ggsave, ggplot
+from plot3.ggplot import autohide, ggsave, ggplot  # show via ggplot.show
 from plot3.io import read_bin
 from plot3.jupyter import load_ipython_extension, register_plot3
 

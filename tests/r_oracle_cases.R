@@ -30,13 +30,21 @@ cars <- data.frame(
 # Tukey box stats via base boxplot.stats (same fences as ggplot2 default coef=1.5)
 box_stats_one <- function(x, coef = 1.5) {
   s <- boxplot.stats(x, coef = coef)
+  # Keep outliers as a JSON array even when length is 0 or 1 (auto_unbox
+  # would otherwise turn a single outlier into a bare number).
+  outs <- as.numeric(s$out)
+  if (length(outs) == 0) {
+    outs <- list()
+  } else {
+    outs <- as.list(outs)
+  }
   list(
     ymin = s$stats[[1]],
     lower = s$stats[[2]],
     middle = s$stats[[3]],
     upper = s$stats[[4]],
     ymax = s$stats[[5]],
-    outliers = as.numeric(s$out)
+    outliers = outs
   )
 }
 
