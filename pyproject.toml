@@ -30,3 +30,6 @@ include = ["plot3*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+filterwarnings = [
+  "ignore::DeprecationWarning",
+]

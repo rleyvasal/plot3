@@ -16,6 +16,22 @@ pip install -e ".[dev,jupyter]"
 
 In VS Code: **Python: Select Interpreter** → this `.venv`. No CRAFT required.
 
+## Testing (local)
+
+```bash
+# unit + semantic suite (R optional; skips oracle if Rscript missing)
+pytest -q
+
+# HTML smoke artifacts under tests/local/output/
+python tests/local/smoke_local.py
+
+# one-shot: pytest + smoke (+ R oracle when available)
+bash tests/local/run_all.sh
+```
+
+See [`tests/local/README.md`](tests/local/README.md) for the full layout and
+R oracle notes (ggplot2/base-R stats parity for boxplots, density, histogram).
+
 ```python
 from plot3 import ggplot, aes, geom_point, geom_line, geom_col, geom_histogram, labs, theme_light
 
