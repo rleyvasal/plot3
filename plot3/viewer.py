@@ -808,6 +808,80 @@ if (!S.is3d) {
   controls.target.copy(ctr);
   controls.enableDamping = true;
 
+  // ── 3D hover: nearest point (screen-space) for point layers ────────────
+  const tip3 = document.getElementById('tip');
+  tip3.style.background = T.surface;
+  tip3.style.border = '1px solid ' + T.axis;
+  tip3.style.color = T.ink;
+  const pickLayers = S.layers
+    .map((L, li) => ({ L, li }))
+    .filter(({ L }) => L.kind === 'point' && L.n > 0);
+  let hover3Tick = 0;
+  function hover3d(e) {
+    const now = performance.now();
+    if (now - hover3Tick < 40) return;
+    hover3Tick = now;
+    if (!pickLayers.length) { tip3.style.display = 'none'; return; }
+    const rect = renderer.domElement.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const w = Math.max(rect.width, 1), h = Math.max(rect.height, 1);
+    // Project each point; find nearest in screen px (cap search for big clouds).
+    let best = null, bestD = 14 * 14;
+    const maxScan = 80000;
+    for (const { L } of pickLayers) {
+      const n = L.n;
+      const step = n > maxScan ? Math.ceil(n / maxScan) : 1;
+      for (let i = 0; i < n; i += step) {
+        if (L.color && L.color.kind === 'cat' &&
+            hiddenCats.has(L.color.data[i] % S.color.cats.length)) continue;
+        const v = new THREE.Vector3(
+          L.x.data[i] * ext[0],
+          L.y.data[i] * ext[1],
+          L.z.data[i] * ext[2]
+        );
+        v.project(cam);
+        if (v.z < -1 || v.z > 1) continue;
+        const sx = (v.x * 0.5 + 0.5) * w;
+        const sy = (-v.y * 0.5 + 0.5) * h;
+        const d = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
+        if (d < bestD) { bestD = d; best = [L, i, sx, sy]; }
+      }
+    }
+    if (!best) { tip3.style.display = 'none'; return; }
+    const [L, i, sx, sy] = best;
+    const xv = dataLo('x') + L.x.data[i] * spanOf('x');
+    const yv = dataLo('y') + L.y.data[i] * spanOf('y');
+    const zv = dataLo('z') + L.z.data[i] * spanOf('z');
+    let head = '';
+    if (L.color && L.color.kind === 'cat')
+      head = '<b>' + S.color.cats[L.color.data[i] % S.color.cats.length] + '</b><br>';
+    else if (L.color && L.color.kind === 'num')
+      head = '<b>' + fmt(cval(L.color.data[i] / 65535)) + '</b><br>';
+    tip3.innerHTML = head
+      + fmt(xv) + ', ' + fmt(yv) + ', ' + fmt(zv);
+    tip3.style.left = Math.min(w - 8, sx + 12) + 'px';
+    tip3.style.top = Math.max(8, sy - 10) + 'px';
+    tip3.style.display = 'block';
+  }
+  function fmt(v) {
+    if (!Number.isFinite(v)) return String(v);
+    const a = Math.abs(v);
+    if (a >= 1e6 || (a > 0 && a < 1e-3)) return v.toExponential(2);
+    return (Math.round(v * 1e4) / 1e4).toString();
+  }
+  // colour value for continuous ramp (same helper as 2D tip when present)
+  function cval(t) {
+    if (S.color && S.color.kind === 'num') {
+      const lo = S.color.lo, hi = S.color.hi;
+      return lo + t * (hi - lo);
+    }
+    return t;
+  }
+  renderer.domElement.addEventListener('pointermove', hover3d);
+  renderer.domElement.addEventListener('pointerleave', () => {
+    tip3.style.display = 'none';
+  });
+
   function layout() {
     const w = Math.max(figEl.clientWidth, 1), h = Math.max(figEl.clientHeight, 1);
     renderer.setSize(w, h);

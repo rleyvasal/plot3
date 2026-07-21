@@ -621,13 +621,25 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     for a in axes:
         scales[a].finish()
 
+    # Optional forced domains (facet_wrap scales="fixed").
+    force = getattr(g, "_force_scales", None) or {}
+    for ax, (lo, hi) in force.items():
+        if ax in scales and scales[ax].kind == "num":
+            scales[ax].lo = float(lo)
+            scales[ax].hi = float(hi)
+            if scales[ax].hi <= scales[ax].lo:
+                scales[ax].hi = scales[ax].lo + 1.0
+
     # Numeric colour limits: robust 2-98 percentile by default so skewed data
     # (lidar intensity) actually varies; override via scale_colour_continuous.
     num_color = None
     if color_scale is not None and color_scale[0] == "num":
-        allv = np.concatenate(num_color_vals)
+        allv = np.concatenate(num_color_vals) if num_color_vals else np.array([0.0, 1.0])
         cs = g.cscale or scale_colour_continuous()
-        if cs.limits == "full":
+        if "color" in force:
+            lo_c, hi_c = force["color"]
+            lo_c, hi_c = float(lo_c), float(hi_c)
+        elif cs.limits == "full":
             lo_c, hi_c = color_scale[1], color_scale[2]
         elif isinstance(cs.limits, (tuple, list)):
             lo_c, hi_c = float(cs.limits[0]), float(cs.limits[1])
@@ -944,6 +956,9 @@ def _clone_ggplot_with_data(g: ggplot, data: pd.DataFrame) -> ggplot:
     out.facet = None  # panels are leaf plots
     out.mapping = g.mapping
     out.cscale = g.cscale
+    out.stat_density_3d = getattr(g, "stat_density_3d", None)
+    out.coord = getattr(g, "coord", None)
+    out._force_scales = None
     # keep theme/height/quantize
     return out
 
@@ -972,6 +987,31 @@ def build_doc(g: ggplot) -> str:
     return doc
 
 
+def _global_numeric_domains(g: ggplot) -> dict[str, tuple[float, float]]:
+    """Axis/colour domains from the full faceted dataset (for scales='fixed')."""
+    if g.data is None:
+        return {}
+    mapping = dict(g.mapping)
+    cols: dict[str, str] = {}
+    for ax in ("x", "y", "z"):
+        if ax in mapping:
+            cols[ax] = mapping[ax]
+    if "color" in mapping:
+        cols["color"] = mapping["color"]
+    domains: dict[str, tuple[float, float]] = {}
+    for ax, col in cols.items():
+        if col not in g.data.columns:
+            continue
+        series = pd.to_numeric(g.data[col], errors="coerce").dropna()
+        if series.empty:
+            continue
+        lo, hi = float(series.min()), float(series.max())
+        if hi <= lo:
+            hi = lo + 1.0
+        domains[ax] = (lo, hi)
+    return domains
+
+
 def _build_doc_faceted(g: ggplot, facet) -> str:
     """Render facet_wrap as a CSS grid of independent panel documents."""
     import html as _htmlesc
@@ -995,6 +1035,9 @@ def _build_doc_faceted(g: ggplot, facet) -> str:
 
     ncol, nrow = _panel_grid(len(levels), facet.ncol, facet.nrow)
     theme = THEMES[g.theme_name]
+    force_scales = (
+        _global_numeric_domains(g) if facet.scales == "fixed" else {}
+    )
     cells: list[str] = []
     total_kb = 0
     for level in levels:
@@ -1012,10 +1055,8 @@ def _build_doc_faceted(g: ggplot, facet) -> str:
         panel.labs["title"] = (
             f"{base_title} — {label}" if base_title else label
         )
-        if facet.scales == "fixed":
-            # v1: each panel is an independent figure (free domains). Shared
-            # scale encoding across iframes needs a follow-up.
-            pass
+        if force_scales:
+            panel._force_scales = force_scales
         try:
             panel_html = build_doc(panel)
         except Exception as exc:

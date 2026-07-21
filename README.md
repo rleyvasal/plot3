@@ -239,6 +239,6 @@ From raw 3D points (density is estimated on a grid; levels are fractions of peak
 
 ## Roadmap
 
-Shared fixed facet scales, 3D hover picking, smoother marching-cubes
-isosurfaces, more `scale_*` overrides, diverging
+Smoother marching-cubes isosurfaces (beyond smoothed voxel faces), more
+`scale_*` overrides, diverging palettes, and richer 3D picking (meshes).
 scales, express-style wrappers.

@@ -130,26 +130,28 @@ def density_grid_3d(
     xs = 0.5 * (edges[0][:-1] + edges[0][1:])
     ys = 0.5 * (edges[1][:-1] + edges[1][1:])
     zs = 0.5 * (edges[2][:-1] + edges[2][1:])
-    # Light smoothing so isolevels are less blocky.
-    dens = _smooth3(dens)
+    # Extra smoothing so isolevels are less blocky.
+    dens = _smooth3(dens, passes=2)
     peak = float(dens.max())
     if peak > 0:
         dens /= peak
     return dens, xs, ys, zs
 
 
-def _smooth3(vol: np.ndarray) -> np.ndarray:
-    """One-pass 6-neighbor average (reflect edges)."""
-    p = np.pad(vol, 1, mode="edge")
-    out = (
-        p[1:-1, 1:-1, 1:-1] * 0.4
-        + p[:-2, 1:-1, 1:-1] * 0.1
-        + p[2:, 1:-1, 1:-1] * 0.1
-        + p[1:-1, :-2, 1:-1] * 0.1
-        + p[1:-1, 2:, 1:-1] * 0.1
-        + p[1:-1, 1:-1, :-2] * 0.1
-        + p[1:-1, 1:-1, 2:] * 0.1
-    )
+def _smooth3(vol: np.ndarray, passes: int = 1) -> np.ndarray:
+    """6-neighbor average (edge-padded), optionally repeated."""
+    out = np.asarray(vol, dtype=np.float64)
+    for _ in range(max(1, int(passes))):
+        p = np.pad(out, 1, mode="edge")
+        out = (
+            p[1:-1, 1:-1, 1:-1] * 0.4
+            + p[:-2, 1:-1, 1:-1] * 0.1
+            + p[2:, 1:-1, 1:-1] * 0.1
+            + p[1:-1, :-2, 1:-1] * 0.1
+            + p[1:-1, 2:, 1:-1] * 0.1
+            + p[1:-1, 1:-1, :-2] * 0.1
+            + p[1:-1, 1:-1, 2:] * 0.1
+        )
     return out
 
 
@@ -268,10 +270,40 @@ def isosurface_mesh(
 
     if not verts:
         return np.zeros((0, 3), dtype=np.float64), np.zeros((0, 3), dtype=np.int32)
-    return (
-        np.asarray(verts, dtype=np.float64),
-        np.asarray(faces, dtype=np.int32),
-    )
+    V = np.asarray(verts, dtype=np.float64)
+    F = np.asarray(faces, dtype=np.int32)
+    V = _laplacian_smooth(V, F, iterations=2)
+    return V, F
+
+
+def _laplacian_smooth(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    *,
+    iterations: int = 2,
+    lambda_: float = 0.45,
+) -> np.ndarray:
+    """Relax mesh vertices toward neighbor averages (boundary-friendly)."""
+    if len(vertices) == 0 or len(faces) == 0 or iterations < 1:
+        return vertices
+    n = len(vertices)
+    # undirected adjacency
+    nbrs: list[set[int]] = [set() for _ in range(n)]
+    for a, b, c in faces:
+        for u, v in ((a, b), (b, c), (c, a)):
+            if 0 <= u < n and 0 <= v < n and u != v:
+                nbrs[u].add(int(v))
+                nbrs[v].add(int(u))
+    V = vertices.copy()
+    for _ in range(int(iterations)):
+        new = V.copy()
+        for i in range(n):
+            if not nbrs[i]:
+                continue
+            avg = V[list(nbrs[i])].mean(axis=0)
+            new[i] = (1.0 - lambda_) * V[i] + lambda_ * avg
+        V = new
+    return V
 
 
 def isosurface_levels(

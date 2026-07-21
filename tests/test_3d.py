@@ -218,3 +218,25 @@ def test_geom_isosurface_builds():
     assert layer["indices"]["count"] > 0
     assert any("idx" in pid for pid, _ in payloads)
     assert len(fig._repr_html_()) > 500
+
+
+def test_facet_fixed_shares_numeric_domains():
+    df = pd.DataFrame(
+        {
+            "x": [0.0, 1.0, 10.0, 11.0],
+            "y": [0.0, 1.0, 0.0, 1.0],
+            "panel": ["a", "a", "b", "b"],
+        }
+    )
+    fig = (
+        ggplot(df, aes(x="x", y="y"))
+        + geom_point()
+        + facet_wrap("panel", ncol=2, scales="fixed")
+    )
+    # Build each panel with force scales via the faceted path.
+    from plot3.build import _global_numeric_domains, build_doc
+
+    domains = _global_numeric_domains(fig)
+    assert domains["x"][0] == 0.0 and domains["x"][1] == 11.0
+    html = build_doc(fig)
+    assert html.count("<iframe") == 2
