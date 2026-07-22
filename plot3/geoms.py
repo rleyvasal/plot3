@@ -4,11 +4,46 @@ from __future__ import annotations
 
 from plot3.themes import _CONT_PALETTES
 
+def _as_column_name(value):
+    """Coerce aesthetic values to column-name strings when possible.
+
+    Jupyter R-style masking already turns bare names / backticks into strings.
+    This is a small runtime safety net for escaped sentinels and objects that
+    expose a column name (e.g. tidy3 ``col("x")``).
+    """
+    if value is None or isinstance(value, str):
+        return value
+    name = getattr(value, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    # tidy3 / polars expr sometimes use meta_output_name or similar
+    for attr in ("meta_output_name", "column", "col_name"):
+        fn = getattr(value, attr, None)
+        if callable(fn):
+            try:
+                out = fn()
+                if isinstance(out, str) and out:
+                    return out
+            except Exception:
+                pass
+        elif isinstance(fn, str) and fn:
+            return fn
+    return value
+
+
 class aes(dict):
     """Aesthetic mapping: aes(x=, y=, z=, colour=/color=, fill=, group=).
 
     ``fill`` is accepted as an alias of ``colour`` when colour is omitted
     (useful for surfaces).
+
+    In Jupyter / SolveIt with R-style masking (default), bare names and
+    backticks work like ggplot2::
+
+        aes(x=wt, y=mpg, colour=cyl)
+        aes(x=`First Name`, y=`Age (%)`)
+
+    In plain ``.py`` files, use strings: ``aes(x="wt", y="mpg")``.
     """
 
     def __init__(
@@ -33,7 +68,7 @@ class aes(dict):
                      ("color", colour_value),
                      ("group", group)):
             if v is not None:
-                self[k] = v
+                self[k] = _as_column_name(v)
 
 
 class _Geom:

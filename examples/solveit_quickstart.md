@@ -34,7 +34,7 @@ cars = tidy({
 cars
 >> filter(col("hp") < 250)
 >> select("wt", "mpg", "cyl")
->> ggplot(aes(x="wt", y="mpg", colour="cyl"))
+>> ggplot(aes(x=wt, y=mpg, colour=cyl))  # bare names; use `backticks` if spaces
 + geom_point(size=5, alpha=0.85)
 + labs(title="Weight vs MPG")
 + theme_light()

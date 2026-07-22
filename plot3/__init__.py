@@ -30,7 +30,12 @@ from plot3.geoms import (
 )
 from plot3.ggplot import autohide, ggsave, ggplot  # show via ggplot.show
 from plot3.io import read_bin
-from plot3.jupyter import load_ipython_extension, register_plot3
+from plot3.jupyter import (
+    disable_r_style,
+    enable_r_style,
+    load_ipython_extension,
+    register_plot3,
+)
 
 __all__ = [
     "ggplot",
@@ -60,6 +65,8 @@ __all__ = [
     "ggsave",
     "read_bin",
     "autohide",
+    "enable_r_style",
+    "disable_r_style",
     "load_ipython_extension",
     "register_plot3",
     "__version__",

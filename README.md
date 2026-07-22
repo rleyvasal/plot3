@@ -42,8 +42,14 @@ Under **`%gpu`**, plot3 is seeded to the remote kernel automatically so
 `%restart_kernel`: `seed_plot3_remote(force=True)`.
 
 ```python
+# Jupyter / SolveIt (R-style bare names + backticks — default on load):
+tidy(df) >> filter(x > 0) >> ggplot(aes(x=x, y=y)) + geom_point()
+ggplot(df, aes(x=`First Name`, y=`Age (%)`, colour=group)) + geom_point()
+
+# Plain .py files still use strings:
 tidy(df) >> filter(col("x") > 0) >> ggplot(aes(x="x", y="y")) + geom_point()
-# or
+
+# or the line magic
 %plot3 df x=x y=y color=group
 ```
 
@@ -96,6 +102,13 @@ R oracle notes (ggplot2/base-R stats parity for boxplots, density, histogram).
 ```python
 from plot3 import ggplot, aes, geom_point, geom_line, geom_col, geom_histogram, labs, theme_light
 
+# Jupyter / SolveIt: bare column names (ggplot2-style); backticks if spaces
+(ggplot(df, aes(x=time, y=temp, colour=sensor))
+ + geom_point(size=4)
+ + geom_line(linewidth=2)
+ + labs(title="Sensor temps", y="degC"))
+
+# Plain scripts / libraries: quoted strings
 (ggplot(df, aes(x="time", y="temp", colour="sensor"))
  + geom_point(size=4)
  + geom_line(linewidth=2)
@@ -106,8 +119,24 @@ The mapping-first form is pipeable from tidy3, pandas, or Polars. Layers bind
 before ``>>``, so the expression needs no extra parentheses:
 
 ```python
+# Jupyter
+plot = tidy(df) >> ggplot(aes(x=time, y=temp)) + geom_point()
+# .py
 plot = tidy(df) >> ggplot(aes(x="time", y="temp")) + geom_point()
 ```
+
+### R-style bare names & backticks (Jupyter / SolveIt)
+
+On load, plot3 enables the same style of column masking as tidy3:
+
+| Write | Becomes |
+|-------|---------|
+| `aes(x=wt, y=mpg)` | `aes(x="wt", y="mpg")` |
+| `aes(x=\`First Name\`)` | `aes(x="First Name")` |
+| `facet_wrap(cyl)` | `facet_wrap("cyl")` |
+
+Toggle if needed: `enable_r_style()` / `disable_r_style()`.
+Plain ``.py`` files are never transformed — keep quoted strings there.
 
 Follows [ggplot2](https://github.com/tidyverse/ggplot2) conventions: `+`
 layering, `colour`/`color` both accepted, `geom_line(linewidth=)`, `geom_path`

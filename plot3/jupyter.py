@@ -1,9 +1,10 @@
-"""IPython/SolveIt integration: hide-from-AI, %plot3, extension load."""
+"""IPython/SolveIt integration: hide-from-AI, %plot3, R-style aes, extension load."""
 
 from __future__ import annotations
 
 import json
 import shlex
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -14,6 +15,100 @@ except Exception:  # pragma: no cover
     get_ipython = None
 
 from plot3.io import ssh_bytes
+from plot3.masking import (
+    BT_NAME,
+    Plot3MaskTransformer,
+    is_backtick_transformer,
+    is_mask_transformer,
+    is_tidy3_backtick_transformer,
+    plot3_backtick_transform,
+)
+
+# R-style bare-name / backtick masking for aes() / facet_wrap().
+_R_STYLE_ON = True
+
+
+def _bt_fallback(name: str) -> str:
+    """If a backtick sentinel escapes AST rewrite, treat it as a column name."""
+    return str(name)
+
+
+def enable_r_style(ipython: Any | None = None) -> bool:
+    """Enable bare-name + backtick masking for ``aes`` / ``facet_wrap``.
+
+    Jupyter / SolveIt only. After this::
+
+        aes(x=wt, y=mpg, colour=cyl)
+        aes(x=`First Name`, y=`Age (%)`)
+        facet_wrap(cyl)
+
+    become string column names, matching ggplot2 / tidy3 conventions.
+    """
+    global _R_STYLE_ON
+    _R_STYLE_ON = True
+    if ipython is None:
+        try:
+            ipython = get_ipython() if get_ipython is not None else None
+        except Exception:
+            ipython = None
+    if ipython is None:
+        return False
+
+    ns = getattr(ipython, "user_ns", None)
+    if ns is not None:
+        # Escape hatch if AST missed a sentinel (still a valid column string).
+        ns[BT_NAME] = _bt_fallback
+        # When tidy3 is not loaded, leave tidy3 sentinel unset; plot3 AST
+        # still rewrites __tidy3_bt__ if tidy3's preparser ran first.
+
+    # Source preparser: only install plot3's if tidy3 did not already provide one.
+    for attr in ("input_transformers_cleanup", "input_transformers_post"):
+        transformers = getattr(ipython, attr, None)
+        if not isinstance(transformers, list):
+            continue
+        has_tidy3_bt = any(is_tidy3_backtick_transformer(t) for t in transformers)
+        transformers[:] = [
+            t for t in transformers if not is_backtick_transformer(t)
+        ]
+        if not has_tidy3_bt:
+            transformers.insert(0, plot3_backtick_transform)
+
+    # AST pass for bare names inside aes / facet_wrap.
+    ast_transformers = getattr(ipython, "ast_transformers", None)
+    if isinstance(ast_transformers, list):
+        ast_transformers[:] = [
+            t for t in ast_transformers if not is_mask_transformer(t)
+        ]
+        ast_transformers.append(Plot3MaskTransformer())
+    return True
+
+
+def disable_r_style(ipython: Any | None = None) -> None:
+    """Disable bare-name / backtick masking for plot3 aesthetics."""
+    global _R_STYLE_ON
+    _R_STYLE_ON = False
+    if ipython is None:
+        try:
+            ipython = get_ipython() if get_ipython is not None else None
+        except Exception:
+            ipython = None
+    if ipython is None:
+        return
+    for attr in ("input_transformers_cleanup", "input_transformers_post"):
+        transformers = getattr(ipython, attr, None)
+        if isinstance(transformers, list):
+            transformers[:] = [
+                t for t in transformers if not is_backtick_transformer(t)
+            ]
+    ast_transformers = getattr(ipython, "ast_transformers", None)
+    if isinstance(ast_transformers, list):
+        ast_transformers[:] = [
+            t for t in ast_transformers if not is_mask_transformer(t)
+        ]
+
+
+def r_style_enabled() -> bool:
+    return _R_STYLE_ON
 
 def find_caller_msg_id():
     import inspect
@@ -263,7 +358,7 @@ def run_plot3_from_magic(line: str = ""):
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-def register_plot3(*, quiet=True) -> bool:
+def register_plot3(*, quiet=True, r_style: bool = True) -> bool:
     if get_ipython is None:
         return False
     ip = get_ipython()
@@ -295,9 +390,17 @@ def register_plot3(*, quiet=True) -> bool:
             ns[name] = getattr(plot3_pkg, name)
     except Exception:
         pass
+    # R-style bare names / backticks in aes() (ggplot2 parity with tidy3)
+    if r_style:
+        try:
+            enable_r_style(ip)
+        except Exception as e:
+            if not quiet:
+                print(f"plot3: R-style masking not enabled: {e}")
     if ok and not quiet:
         print("plot3 ready")
-        print("  ggplot(df, aes(x=,y=[,z=][,colour=])) + geom_point()/geom_line()")
+        print("  ggplot(df, aes(x=wt, y=mpg[, colour=cyl])) + geom_point()")
+        print("  aes(x=`First Name`, y=mpg)   # backticks for spaced names")
         print("  %plot3 df x=a y=b [z=c] [color=d]   read_bin(path)   ggsave()")
     return ok
 

@@ -106,7 +106,12 @@ from IPython import get_ipython as _gi
 _ip = _gi()
 if _ip is not None:
     from plot3.jupyter import register_plot3 as _reg
-    _reg(quiet=True)
+    _reg(quiet=True, r_style=True)
+    try:
+        from plot3.jupyter import enable_r_style as _rstyle
+        _rstyle(_ip)
+    except Exception as _e:
+        print("plot3 remote: R-style masking warning: " + repr(_e), flush=True)
 print("plot3 remote: OK v" + _p3.__version__ + " (" + _stamp + ")")
 '''
 
