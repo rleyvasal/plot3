@@ -18,19 +18,34 @@ In VS Code: **Python: Select Interpreter** → this `.venv`. No CRAFT required.
 
 ## SolveIt / CRAFT
 
-Preferred (with gpudev addons):
+**One command** — works local *and* under `%gpu` (CRAFT is auto-detected):
+
+```text
+%run /app/data/gpudevd/plot3/plot3.py
+# or
+%run /path/to/plot3/plot3.py
+%run /path/to/plot3/load.py          # same loader
+```
+
+With tidy3 + optional GPU:
 
 ```text
 %local
-%run /path/to/gpudev/CRAFT.py                 # if using %gpu
-%run /path/to/gpudev/addons/tidy3.py          # optional pipes
-%run /path/to/gpudev/addons/plot3.py
+%run /app/data/gpudevd/tidy3/tidy3.py
+%run /app/data/gpudevd/plot3/plot3.py
+# optional — only if you need %gpu:
+%run /path/to/gpudev/CRAFT.py
+%gpu
 ```
 
-Direct load from a clone:
+Order tip: load **CRAFT first** if you will use `%gpu` in the same session so
+the first `%run plot3.py` can seed immediately; otherwise the loader still
+registers a hook and seeds on the first `%gpu` cell.
+
+gpudev addons are thin wrappers around the same loaders:
 
 ```text
-%run /path/to/plot3/load.py
+%run /path/to/gpudev/addons/plot3.py
 ```
 
 In **SolveIt**, figures use an **inline iframe** (WebGL). Displayed cells are
