@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import numpy as np
+
 from plot3.themes import _CONT_PALETTES
+
 
 def _as_column_name(value):
     """Coerce aesthetic values to column-name strings when possible.
@@ -10,9 +13,15 @@ def _as_column_name(value):
     Jupyter R-style masking already turns bare names / backticks into strings.
     This is a small runtime safety net for escaped sentinels and objects that
     expose a column name (e.g. tidy3 ``col("x")``).
+
+    Integer aesthetics (``0``, ``1``, …) are kept as decimal strings so NumPy
+    array columns can be addressed with ``aes(x=0, y=1, z=2)``.
     """
     if value is None or isinstance(value, str):
         return value
+    # Positional columns for ArrayTable / integer-named frames (not bool).
+    if isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_)):
+        return str(int(value))
     name = getattr(value, "name", None)
     if isinstance(name, str) and name:
         return name
@@ -44,6 +53,10 @@ class aes(dict):
         aes(x=`First Name`, y=`Age (%)`)
 
     In plain ``.py`` files, use strings: ``aes(x="wt", y="mpg")``.
+
+    For 2D NumPy arrays, use integer positions (stored as ``\"0\"``, ``\"1\"``, …)::
+
+        ggplot(points, aes(x=0, y=1, z=2, colour=3)) + geom_point3d()
     """
 
     def __init__(

@@ -195,6 +195,7 @@ preserves data order while `geom_line` sorts by x, `ggsave("fig.html", p)`.
 | `geom_col(width=)` | bars from `y` heights (ggplot2 `geom_col`) |
 | `geom_bar(width=)` | count bars for discrete `x` |
 | `geom_histogram(bins=, binwidth=, method=)` | continuous `x` histogram; auto FD bins when unset |
+| NumPy arrays | `ggplot(pts, aes(x=0, y=1, z=2))` — columns are positions; 1D → index+values |
 | `geom_boxplot(width=, coef=, outlier_size=)` | Tukey box-and-whisker of `y` by `x` |
 | `geom_density(n=, adjust=, fill=)` | KDE of continuous `x` (optional `colour` groups) |
 | `geom_violin(n=, adjust=, width=)` | Mirrored KDE of `y` by `x` |

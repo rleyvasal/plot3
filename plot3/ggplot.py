@@ -118,6 +118,10 @@ def _prefer_external_browser() -> bool:
 class ggplot:
     """A plot3 figure, optionally deferred until data arrives via ``>>``."""
 
+    # Prefer ggplot.__rrshift__ over NumPy bitshift when piping an ndarray:
+    # ``points >> ggplot(aes(x=0, y=1)) + geom_point()``.
+    __array_priority__ = 10000
+
     def __init__(
         self,
         data=None,
