@@ -278,9 +278,52 @@ class ggplot:
         self._maybe_hide_from_ai()
         return self._iframe()
 
-    def _ipython_display_(self) -> None:
-        """IPython entry point — browser in VS Code, iframe in SolveIt."""
+    def _repr_mimebundle_(self, include=None, exclude=None):
+        """HTML plus optional PlotPayload mime for CRAFT host handoff.
+
+        Always includes ``text/html`` (iframe). When the figure can produce a
+        single-panel PlotPayload, also includes
+        ``application/vnd.plot3.v1+json`` so a host can render without
+        re-encoding. Faceted figures only provide HTML.
+        """
+        from plot3.remote import MIME_PLOT3
+
         self._maybe_hide_from_ai()
+        bundle: dict = {"text/html": self._iframe()}
+        try:
+            if self.facet is None and (
+                self._payload is not None or self.data is not None
+            ):
+                bundle[MIME_PLOT3] = self.to_payload()
+        except Exception:
+            # Facet / incomplete figure: HTML only.
+            pass
+        if include is not None:
+            bundle = {k: v for k, v in bundle.items() if k in include}
+        if exclude is not None:
+            bundle = {k: v for k, v in bundle.items() if k not in exclude}
+        return bundle
+
+    def _ipython_display_(self) -> None:
+        """IPython entry point — browser in VS Code, iframe in SolveIt.
+
+        On a CRAFT remote kernel (``PLOT3_REMOTE=1`` etc.), publish a mimebundle
+        that includes the PlotPayload so a smart host can take the compact
+        form; HTML remains the universal fallback.
+        """
+        self._maybe_hide_from_ai()
+        try:
+            from plot3.remote import MIME_PLOT3, is_remote_kernel
+
+            if is_remote_kernel():
+                from IPython.display import publish_display_data
+
+                data = self._repr_mimebundle_()
+                # Prefer publish so both HTML and payload are available.
+                publish_display_data(data)
+                return
+        except Exception:
+            pass
         self.show(browser=_prefer_external_browser())
 
     def to_payload(self) -> dict:

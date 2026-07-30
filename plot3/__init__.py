@@ -45,6 +45,13 @@ from plot3.payload import (
     save_payload,
     validate_payload,
 )
+from plot3.remote import (
+    MIME_PLOT3,
+    has_craft_host,
+    is_remote_kernel,
+    remote_ggplot_payload,
+    show_remote,
+)
 
 __all__ = [
     "ggplot",
@@ -85,6 +92,11 @@ __all__ = [
     "save_payload",
     "load_payload",
     "display_payload",
+    "MIME_PLOT3",
+    "is_remote_kernel",
+    "has_craft_host",
+    "remote_ggplot_payload",
+    "show_remote",
     "__version__",
 ]
 

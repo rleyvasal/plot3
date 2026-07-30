@@ -224,7 +224,11 @@ def hide_caller_from_ai(mid=None):
 
 
 def remote_df(expr: str, cols: dict, max_points: int) -> pd.DataFrame:
-    """Snapshot mapped columns of a remote DataFrame over CRAFT's SSH pipe."""
+    """Snapshot mapped columns of a remote DataFrame over CRAFT's SSH pipe.
+
+    Legacy host path — prefer :func:`remote_plot3_payload` so stats run on the
+    GPU and only a PlotPayload crosses the wire.
+    """
     import io
     import uuid
 
@@ -278,10 +282,77 @@ print(_json.dumps(_meta))
     return pd.DataFrame(data)
 
 
+def remote_plot3_payload(
+    expr: str,
+    mapping: dict,
+    *,
+    kind: str = "point",
+    size: float | None = None,
+    max_points: int = 200_000,
+    theme: str = "dark",
+    height: str = "480px",
+) -> dict:
+    """Build a ggplot on the remote kernel and return a PlotPayload.
+
+    Stats / encoding run where the data lives; only the compact payload is
+    pulled to the host (via :func:`plot3.remote.fetch_remote_payload`).
+    """
+    from plot3.remote import fetch_remote_payload
+
+    # Remote source: load data, optional stride, assemble figure, to_payload.
+    size_lit = "None" if size is None else repr(float(size))
+    source = f"""
+from plot3 import (
+    ggplot, aes, geom_point, geom_line, geom_path, theme_light, theme_dark,
+)
+import numpy as _np
+
+_df = eval({expr!r})
+_m = {int(max_points)}
+# Stride large tables before encode (coord_3d max_points is separate).
+try:
+    _n = len(_df)
+except Exception:
+    _n = getattr(_df, "height", None) or getattr(getattr(_df, "shape", None), "__getitem__", lambda i: None)(0)
+if _m and _n and int(_n) > _m:
+    try:
+        _step = max(1, (int(_n) + _m - 1) // _m)
+        _df = _df.iloc[::_step]
+    except Exception:
+        try:
+            import polars as _pl
+            if isinstance(_df, _pl.DataFrame):
+                _df = _df.with_row_index("_i").filter((_pl.col("_i") % _step) == 0).drop("_i")
+        except Exception:
+            pass
+
+_aes = aes(**{mapping!r})
+_fig = ggplot(_df, _aes, height={height!r}, hide=False)
+_kind = {kind!r}
+_size = {size_lit}
+for _part in _kind.split("+"):
+    _part = _part.strip()
+    if _part == "point":
+        _fig = _fig + (geom_point(size=_size) if _size is not None else geom_point())
+    elif _part == "line":
+        _fig = _fig + geom_line()
+    elif _part == "path":
+        _fig = _fig + geom_path()
+    else:
+        raise ValueError(f"unknown kind {{_part!r}}")
+if {theme!r} != "dark":
+    _fig = _fig + theme_light()
+_plot3_payload = _fig.to_payload()
+"""
+    return fetch_remote_payload(source)
+
+
 def run_plot3_from_magic(line: str = ""):
     parts = shlex.split(line or "")
     if not parts:
         raise ValueError(
+            "%plot3 is an optional host helper; prefer ggplot under %gpu:\n"
+            "  ggplot(df, aes(x=wt, y=mpg)) + geom_point()\n"
             "usage: %plot3 <df_expr> x=col y=col [z=col] [color=col] "
             "[group=col] [kind=point|line|path|point+line] [size=F] "
             "[max_points=N] [theme=dark|light] [height=Npx] [hide=0|1]"
@@ -315,36 +386,70 @@ def run_plot3_from_magic(line: str = ""):
 
     ip = get_ipython() if get_ipython is not None else None
     ns = (ip.user_ns or {}) if ip is not None else {}
-    if callable(ns.get("remote_run_")):
-        df = remote_df(expr, m, max_points)
-    else:
-        df = eval(expr, ns)  # local fallback (plain Jupyter)
-        if not isinstance(df, pd.DataFrame):
-            df = pd.DataFrame(df)
-        if max_points and len(df) > max_points:
-            df = df.iloc[:: (len(df) + max_points - 1) // max_points]
 
     from plot3.geoms import aes, geom_line, geom_path, geom_point, theme_light
     from plot3.ggplot import ggplot
 
-    # hide=False: the magic manages the red eye itself (with its own msg id)
-    fig = ggplot(df, aes(**m), height=height, hide=False)
-    for part in kind.split("+"):
-        part = part.strip()
-        if part == "point":
-            fig = fig + (geom_point(size=size) if size else geom_point())
-        elif part == "line":
-            fig = fig + geom_line()
-        elif part == "path":
-            fig = fig + geom_path()
-        else:
-            raise ValueError(f"unknown kind {part!r}")
-    if theme != "dark":
-        fig = fig + theme_light()
+    if callable(ns.get("remote_run_")):
+        # Phase D: stats/encode on remote; host only renders the payload.
+        try:
+            payload = remote_plot3_payload(
+                expr,
+                m,
+                kind=kind,
+                size=size,
+                max_points=max_points,
+                theme=theme,
+                height=height,
+            )
+            fig = ggplot.from_payload(payload, height=height, hide=False)
+        except Exception as e:
+            # Fall back to legacy column pull if remote payload path fails.
+            print(f"plot3: remote payload path failed ({e}); falling back to remote_df", flush=True)
+            df = remote_df(expr, m, max_points)
+            fig = ggplot(df, aes(**m), height=height, hide=False)
+            for part in kind.split("+"):
+                part = part.strip()
+                if part == "point":
+                    fig = fig + (geom_point(size=size) if size else geom_point())
+                elif part == "line":
+                    fig = fig + geom_line()
+                elif part == "path":
+                    fig = fig + geom_path()
+                else:
+                    raise ValueError(f"unknown kind {part!r}")
+            if theme != "dark":
+                fig = fig + theme_light()
+    else:
+        df = eval(expr, ns)  # local fallback (plain Jupyter)
+        if not isinstance(df, pd.DataFrame):
+            try:
+                from plot3.table import as_table
+
+                df = as_table(df)
+            except Exception:
+                df = pd.DataFrame(df)
+        if max_points and hasattr(df, "__len__") and len(df) > max_points:
+            try:
+                df = df.iloc[:: (len(df) + max_points - 1) // max_points]
+            except Exception:
+                pass
+        fig = ggplot(df, aes(**m), height=height, hide=False)
+        for part in kind.split("+"):
+            part = part.strip()
+            if part == "point":
+                fig = fig + (geom_point(size=size) if size else geom_point())
+            elif part == "line":
+                fig = fig + geom_line()
+            elif part == "path":
+                fig = fig + geom_path()
+            else:
+                raise ValueError(f"unknown kind {part!r}")
+        if theme != "dark":
+            fig = fig + theme_light()
 
     # Prefer fig display path (opens system browser under VS Code; iframe in SolveIt).
     if hide:
-        # show() also respects fig.hide / autohide; magic already resolved msg id.
         fig.hide = False
         fig.show()
         hide_caller_from_ai(mid)

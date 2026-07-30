@@ -1,7 +1,14 @@
 # plot3
 
-Grammar-of-graphics plotting on **three.js** — 2D and 3D figures from pandas
-DataFrames that stay small, stay smooth, and survive
+Grammar-of-graphics plotting on **three.js** — 2D and 3D figures from pandas,
+Polars, tidy3, or NumPy arrays. One API locally and under `%gpu`:
+
+```python
+ggplot(df, aes(x=wt, y=mpg)) + geom_point()
+ggplot(points, aes(x=0, y=1, z=2, colour=3)) + geom_point3d()
+```
+
+Figures stay small and smooth and survive
 [sslive](https://github.com/rleyvasal/sslive) slide export.
 
 Works **locally** (VS Code, terminal, JupyterLab) or under CRAFT / SolveIt.
@@ -52,21 +59,49 @@ In **SolveIt**, figures use an **inline iframe** (WebGL). Displayed cells are
 marked `skipped=1` (red eye) so viewer HTML does not enter the LLM context
 (`ggplot(..., hide=False)` or `autohide(False)` to opt out).
 
-Under **`%gpu`**, plot3 is seeded to the remote kernel automatically so
-`ggplot(...)` cells work there; `%plot3` stays host-local. After
-`%restart_kernel`: `seed_plot3_remote(force=True)`.
+### One API: local and `%gpu`
+
+**Always use the ggplot grammar** — same code on the host and on the GPU kernel:
 
 ```python
 # Jupyter / SolveIt (R-style bare names + backticks — default on load):
 tidy(df) >> filter(x > 0) >> ggplot(aes(x=x, y=y)) + geom_point()
 ggplot(df, aes(x=`First Name`, y=`Age (%)`, colour=group)) + geom_point()
 
+# NumPy / lidar-style arrays (column positions)
+ggplot(points, aes(x=0, y=1, z=2, colour=3)) + geom_point3d()
+
 # Plain .py files still use strings:
 tidy(df) >> filter(col("x") > 0) >> ggplot(aes(x="x", y="y")) + geom_point()
-
-# or the line magic
-%plot3 df x=x y=y color=group
 ```
+
+Under **`%gpu`**, plot3 is **seeded to the remote kernel** automatically so that
+same `ggplot(...) + geom_*()` expression runs where the data lives (pandas /
+Polars / tidy3 / NumPy). After `%restart_kernel`:
+
+```python
+seed_plot3_remote(force=True)
+```
+
+There is **no separate GPU plotting language**. Prefer writing ggplot cells under
+`%gpu` rather than host-only shortcuts.
+
+<details>
+<summary>Optional host helpers (not required)</summary>
+
+These stay for convenience when you are on the **host** and want CRAFT to run a
+ggplot on the remote without putting the full expression in a `%gpu` cell.
+They are **not** the primary API:
+
+```python
+# Thin host magic → remote ggplot + PlotPayload → local display
+%plot3 df x=wt y=mpg color=cyl
+
+# Explicit remote expression (same grammar as a %gpu cell)
+show_remote("ggplot(df, aes(x='wt', y='mpg')) + geom_point()")
+```
+
+</details>
 
 ### VS Code notebooks (blank plot?)
 

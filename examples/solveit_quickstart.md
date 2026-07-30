@@ -19,6 +19,8 @@ plot3 ready   # or quiet register from the addon
 
 ## 2. Wrangle + plot (iframe in SolveIt)
 
+**Primary API** — same grammar everywhere (local and `%gpu`):
+
 ```python
 import numpy as np
 
@@ -42,25 +44,29 @@ cars
 You should see an interactive figure in the cell output. The cell gets the
 **red eye** (skipped from AI context).
 
-## 3. Magic form
+NumPy / point clouds (column indices):
 
 ```python
-pdf = cars.collect(as_="pandas")   # cars is already a TidyFrame
-%plot3 pdf x=wt y=mpg color=cyl
+# points: (n, 4) array → x, y, z, colour
+ggplot(points, aes(x=0, y=1, z=2, colour=3)) + geom_point3d()
 ```
-## 4. Remote data (`%gpu`)
+
+## 3. Remote data (`%gpu`) — same ggplot API
 
 ```text
 %gpu
 ```
 
 ```python
-# paths on the GPU host
+# Same syntax as local — plot3 is seeded onto the remote kernel
 scan_parquet("/home/gpudev/data/example.parquet")
 >> filter(col("value") > 0)
 >> select("x", "y", "group")
 >> ggplot(aes(x="x", y="y", colour="group"))
 + geom_point()
+
+# Arrays on the GPU machine
+ggplot(points, aes(x=0, y=1, z=2, colour=3)) + geom_point3d()
 ```
 
 If remote ggplot fails after a kernel restart:
@@ -68,6 +74,16 @@ If remote ggplot fails after a kernel restart:
 ```python
 seed_tidy3_remote(force=True)
 seed_plot3_remote(force=True)
+```
+
+## 4. Optional host-only helper (not the main API)
+
+Prefer section 2–3. If you stay on the **host** and only want a one-liner that
+runs a remote ggplot for you, `%plot3` still exists as a thin CRAFT helper:
+
+```python
+# Host cell with CRAFT connected — not required if you use ggplot under %gpu
+%plot3 pdf x=wt y=mpg color=cyl
 ```
 
 ## 5. VS Code vs SolveIt display

@@ -10,15 +10,17 @@ What this does (always):
 
 1. Puts the package root on ``sys.path`` (no pip install required)
 2. Fresh-imports plot3 so a ``git pull`` takes effect
-3. Registers ``%plot3``, injects ``ggplot`` / ``aes`` / geoms into user_ns
+3. Injects ``ggplot`` / ``aes`` / geoms into user_ns (primary API)
 4. Enables R-style bare names / backticks in ``aes`` / ``facet_wrap``
+5. Registers optional ``%plot3`` host helper (prefer ggplot under ``%gpu``)
 
 What this does **only when CRAFT is present** (auto-detected):
 
-5. Registers remote seed hooks so ``%gpu`` cells get plot3 without a second command
-6. Exposes ``seed_plot3_remote(force=True)`` for kernel restarts
+6. Registers remote seed hooks so ``%gpu`` cells get plot3 without a second command
+7. Exposes ``seed_plot3_remote(force=True)`` for kernel restarts
 
-You do **not** need different commands for local vs GPU. Load once; CRAFT is
+**Primary API is always** ``ggplot(...) + geom_*()`` — same on local and ``%gpu``.
+You do **not** need a different plotting syntax for GPU. Load once; CRAFT is
 optional and is detected from the environment (``remote_run_``, ``_exec_mgr``,
 or ``gpudev_craft``).
 """
@@ -155,10 +157,10 @@ def seed_remote(*, force: bool = False, quiet: bool = False) -> bool:
             print(f"plot3: {msg}", flush=True)
     else:
         print(
-            "plot3: remote seed FAILED — remote ggplot cells won't work.\n"
+            "plot3: remote seed FAILED — ggplot under %gpu won't work until fixed.\n"
             + msg
             + "\nRetry with seed_plot3_remote(force=True). "
-            "Local %plot3 / host figures still work.",
+            "Host-local ggplot(...) still works.",
             flush=True,
         )
     return ok
@@ -230,10 +232,12 @@ print(
     flush=True,
 )
 print(
-    "  ggplot(df, aes(x=wt, y=mpg)) + geom_point()   # bare names in Jupyter\n"
-    "  aes(x=`First Name`, y=mpg)                    # backticks for spaces\n"
-    "  %plot3 df x=a y=b [z=c] [color=d]\n"
-    "  GPU: same %run; seeds remote when CRAFT is connected "
-    "(seed_plot3_remote(force=True) after kernel restart)",
+    "  Primary API (local and %gpu — same syntax):\n"
+    "    ggplot(df, aes(x=wt, y=mpg)) + geom_point()\n"
+    "    ggplot(points, aes(x=0, y=1, z=2, colour=3)) + geom_point3d()\n"
+    "  Bare names / backticks work in Jupyter after load.\n"
+    "  GPU: %run plot3 seeds the remote; use ggplot(...) under %gpu "
+    "(seed_plot3_remote(force=True) after kernel restart).\n"
+    "  Optional host helper only: %plot3 df x=a y=b  (prefer ggplot under %gpu)",
     flush=True,
 )
