@@ -18,7 +18,8 @@ html,body{margin:0;height:100%;overflow:hidden;
   margin-right:6px;vertical-align:-1px}
 #legend .lg-e{cursor:pointer;user-select:none}
 #tip{position:absolute;display:none;z-index:5;pointer-events:none;
-  padding:4px 8px;border-radius:5px;font-size:11px;white-space:nowrap}
+  padding:4px 8px;border-radius:5px;font-size:11px;white-space:nowrap;
+  line-height:1.45}
 #hint{position:absolute;left:50%;bottom:46px;transform:translateX(-50%);
   z-index:5;pointer-events:none;padding:5px 10px;border-radius:5px;
   font-size:11px;opacity:0;transition:opacity .25s}
@@ -421,21 +422,36 @@ if (!S.is3d) {
           scene.add(mesh);
           if (isCat) regCat(L.color.data[s0] % S.color.cats.length, mesh);
         } else {
-          // Fan triangulation from the first vertex of the closed polygon.
-          const triCount = Math.max(0, cnt - 2);
+          // Violin (and closed polys): authoring order is left bottom→top then
+          // right top→bottom. Fan-from-first folds that contour into leaf-like
+          // fragments; pair left/right halves into a triangle strip instead.
+          const half = cnt >> 1;
+          const paired = half >= 2 && half * 2 === cnt;
+          const triCount = paired
+            ? Math.max(0, half - 1) * 2
+            : Math.max(0, cnt - 2);
           const pos = new Float32Array(triCount * 9);
           const col = new Float32Array(triCount * 9);
           let p = 0, c = 0;
-          const x0 = L.x.data[s0], yA = L.y.data[s0];
-          for (let i = 1; i < cnt - 1; i++) {
-            const i1 = s0 + i, i2 = s0 + i + 1;
+          function pushTri(iA, iB, iC) {
             const tri = [
-              x0, yA, 0,
-              L.x.data[i1], L.y.data[i1], 0,
-              L.x.data[i2], L.y.data[i2], 0,
+              L.x.data[iA], L.y.data[iA], 0,
+              L.x.data[iB], L.y.data[iB], 0,
+              L.x.data[iC], L.y.data[iC], 0,
             ];
             for (let k = 0; k < 9; k++) pos[p++] = tri[k];
             for (let k = 0; k < 3; k++) { col[c++]=r; col[c++]=gch; col[c++]=b; }
+          }
+          if (paired) {
+            for (let i = 0; i < half - 1; i++) {
+              const l0 = s0 + i, l1 = s0 + i + 1;
+              // right side is stored top→bottom, so same-y pair is mirrored
+              const r0 = s0 + cnt - 1 - i, r1 = s0 + cnt - 2 - i;
+              pushTri(l0, r0, l1);
+              pushTri(r0, r1, l1);
+            }
+          } else {
+            for (let i = 1; i < cnt - 1; i++) pushTri(s0, s0 + i, s0 + i + 1);
           }
           const g = new THREE.BufferGeometry();
           g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
@@ -607,38 +623,107 @@ if (!S.is3d) {
   });
 
   let hoverTick = 0;
+  function dataY(norm) { return dataLo('y') + norm * spanOf('y'); }
+  function dataX(norm) { return dataLo('x') + norm * spanOf('x'); }
+  function screenX(norm) {
+    return (norm - cam.left) / (cam.right - cam.left) * W;
+  }
+  function screenY(norm) {
+    return (cam.top - norm) / (cam.top - cam.bottom) * H;
+  }
+  function catHidden(L, i) {
+    return L.color && L.color.kind === 'cat' &&
+      hiddenCats.has(L.color.data[i] % S.color.cats.length);
+  }
+  function colorHead(L, i) {
+    if (L.color && L.color.kind === 'cat')
+      return '<b>' + S.color.cats[L.color.data[i] % S.color.cats.length] + '</b><br>';
+    if (L.color && L.color.kind === 'num')
+      return '<b>' + fmt(cval(L.color.data[i] / 65535)) + '</b><br>';
+    return '';
+  }
   function hover(e) {
     const now = performance.now();
     if (now - hoverTick < 33) return;
     hoverTick = now;
     const r = el.getBoundingClientRect();
     const mx = e.clientX - r.left, my = e.clientY - r.top;
-    let best = null, bestD = 12 * 12;
+    // best: {score, sx, sy, html} — lower score wins; 0 = solid hit
+    let best = null;
+    function consider(score, sx, sy, html) {
+      if (!best || score < best.score) best = { score, sx, sy, html };
+    }
     for (const L of S.layers) {
-      const catL = L.color && L.color.kind === 'cat';
-      for (let i = 0; i < L.n; i++) {
-        if (catL && hiddenCats.has(L.color.data[i] % S.color.cats.length))
-          continue;
-        const sx = (L.x.data[i] - cam.left) / (cam.right - cam.left) * W;
-        const sy = (cam.top - L.y.data[i]) / (cam.top - cam.bottom) * H;
-        const d = (sx-mx)*(sx-mx) + (sy-my)*(sy-my);
-        if (d < bestD) { bestD = d; best = [L, i, sx, sy]; }
+      if (L.kind === 'col') {
+        // Full bar rectangle (not just the top-center point).
+        const hw = (L.width || 0.08) * 0.5;
+        const y0 = (L.y0 != null) ? L.y0 : 0;
+        for (let i = 0; i < L.n; i++) {
+          if (catHidden(L, i)) continue;
+          const x = L.x.data[i], y = L.y.data[i];
+          const sx0 = screenX(x - hw), sx1 = screenX(x + hw);
+          const yLo = Math.min(y, y0), yHi = Math.max(y, y0);
+          const sy0 = screenY(yHi), sy1 = screenY(yLo);
+          const left = Math.min(sx0, sx1), right = Math.max(sx0, sx1);
+          const top = Math.min(sy0, sy1), bot = Math.max(sy0, sy1);
+          if (mx < left || mx > right || my < top || my > bot) continue;
+          const sx = (left + right) * 0.5, sy = (top + bot) * 0.5;
+          const xv = dataX(x), yv = dataY(y);
+          consider(0, sx, sy, colorHead(L, i)
+            + fmtSpan('x', xv, (cam.right - cam.left) * spanOf('x')) + ', '
+            + fmtSpan('y', yv, (cam.top - cam.bottom) * spanOf('y')));
+        }
+      } else if (L.kind === 'box') {
+        // Hit full whisker band; tooltip shows all Tukey stats.
+        const hw = (L.width || 0.08) * 0.5;
+        for (let i = 0; i < L.n; i++) {
+          if (catHidden(L, i)) continue;
+          const x = L.x.data[i];
+          const ymin = L.ymin.data[i], lower = L.lower.data[i];
+          const middle = L.middle.data[i], upper = L.upper.data[i];
+          const ymax = L.ymax.data[i];
+          const sx0 = screenX(x - hw), sx1 = screenX(x + hw);
+          const sy0 = screenY(Math.max(ymin, ymax));
+          const sy1 = screenY(Math.min(ymin, ymax));
+          const left = Math.min(sx0, sx1), right = Math.max(sx0, sx1);
+          const top = Math.min(sy0, sy1), bot = Math.max(sy0, sy1);
+          // slight pad so whisker caps are easy to hit
+          if (mx < left - 4 || mx > right + 4 || my < top - 4 || my > bot + 4)
+            continue;
+          const sx = (left + right) * 0.5, sy = (top + bot) * 0.5;
+          const ySpan = (cam.top - cam.bottom) * spanOf('y');
+          const xv = dataX(x);
+          const html = colorHead(L, i)
+            + fmtSpan('x', xv, (cam.right - cam.left) * spanOf('x')) + '<br>'
+            + 'min ' + fmtSpan('y', dataY(ymin), ySpan) + '<br>'
+            + 'q1 ' + fmtSpan('y', dataY(lower), ySpan) + '<br>'
+            + 'median ' + fmtSpan('y', dataY(middle), ySpan) + '<br>'
+            + 'q3 ' + fmtSpan('y', dataY(upper), ySpan) + '<br>'
+            + 'max ' + fmtSpan('y', dataY(ymax), ySpan);
+          consider(0, sx, sy, html);
+        }
+      } else {
+        // Points / line samples / poly vertices — nearest point within 12px
+        let bestD = 12 * 12;
+        for (let i = 0; i < L.n; i++) {
+          if (catHidden(L, i)) continue;
+          const sx = screenX(L.x.data[i]);
+          const sy = screenY(L.y.data[i]);
+          const d = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
+          if (d < bestD) {
+            bestD = d;
+            const xv = dataX(L.x.data[i]), yv = dataY(L.y.data[i]);
+            consider(d, sx, sy, colorHead(L, i)
+              + fmtSpan('x', xv, (cam.right - cam.left) * spanOf('x')) + ', '
+              + fmtSpan('y', yv, (cam.top - cam.bottom) * spanOf('y')));
+          }
+        }
       }
     }
     if (!best) { tip.style.display = 'none'; return; }
-    const [L, i, sx, sy] = best;
-    const xv = dataLo('x') + L.x.data[i] * spanOf('x');
-    const yv = dataLo('y') + L.y.data[i] * spanOf('y');
-    let head = '';
-    if (L.color && L.color.kind === 'cat')
-      head = '<b>' + S.color.cats[L.color.data[i] % S.color.cats.length] + '</b><br>';
-    else if (L.color && L.color.kind === 'num')
-      head = '<b>' + fmt(cval(L.color.data[i] / 65535)) + '</b><br>';
-    tip.innerHTML = head
-      + fmtSpan('x', xv, (cam.right - cam.left) * spanOf('x')) + ', '
-      + fmtSpan('y', yv, (cam.top - cam.bottom) * spanOf('y'));
-    tip.style.left = (M.l + sx + 12) + 'px';
-    tip.style.top = (M.t + sy - 10) + 'px';
+    tip.innerHTML = best.html;
+    tip.style.left = (M.l + best.sx + 12) + 'px';
+    tip.style.top = (M.t + best.sy - 10) + 'px';
     tip.style.display = 'block';
   }
   el.addEventListener('pointerleave', () => tip.style.display = 'none');
@@ -649,7 +734,8 @@ if (!S.is3d) {
 } else {
   // ═════════════════════════ 3D: orbit viewer ═════════════════════════════
   host.style.left = '0'; host.style.top = '0';
-  const cam = new THREE.PerspectiveCamera(55, 1, 0.01, 100);
+  // FOV 60 matches pcviz; near/far refit after we know the scene radius.
+  const cam = new THREE.PerspectiveCamera(60, 1, 0.01, 100);
   cam.up.set(0, 0, 1);
   const coord = S.coord || { aspect: 'data', sizeMode: 'scene' };
   // proportional cube: preserve data aspect, or equal axes
@@ -659,12 +745,22 @@ if (!S.is3d) {
     ? axesList.map(() => 1)
     : axesList.map((a, i) => spans[i] / maxSpan);
   const sizeAtten = coord.sizeMode !== 'screen';
-  const toCube = (a, i, v) => v * ext[i];
   // Soft lighting for surface meshes (added once).
   scene.add(new THREE.AmbientLight(0xffffff, 0.55));
   const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
   dirLight.position.set(1.2, 0.8, 1.5);
   scene.add(dirLight);
+
+  function pointMaterial(opts) {
+    // depthWrite on opaque marks keeps dense lidar crisp; transparent when alpha<1.
+    const a = opts.opacity != null ? opts.opacity : 1;
+    return new THREE.PointsMaterial({
+      ...opts,
+      sizeAttenuation: sizeAtten,
+      transparent: a < 0.999,
+      depthWrite: a >= 0.999,
+    });
+  }
 
   for (const L of S.layers) {
     const n = L.n;
@@ -677,6 +773,8 @@ if (!S.is3d) {
       pos[i*3+2] = L.z.data[i] * ext[2];
     }
     if (L.kind === 'point') {
+      // Default size is set in Python for unit-cube scene (pcviz-relative).
+      const psz = (L.size != null) ? L.size : 0.001;
       if (isCat) {
         const k = S.color.cats.length;
         const buckets = Array.from({ length: k }, () => []);
@@ -690,9 +788,8 @@ if (!S.is3d) {
           }
           const g = new THREE.BufferGeometry();
           g.setAttribute('position', new THREE.BufferAttribute(sub, 3));
-          const pt = new THREE.Points(g, new THREE.PointsMaterial({
-            color: S.color.palette[ci], size: L.size, sizeAttenuation: sizeAtten,
-            transparent: true, opacity: L.alpha }));
+          const pt = new THREE.Points(g, pointMaterial({
+            color: S.color.palette[ci], size: psz, opacity: L.alpha }));
           scene.add(pt);
           regCat(ci, pt);
         });
@@ -700,9 +797,8 @@ if (!S.is3d) {
         const g = new THREE.BufferGeometry();
         g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
         g.setAttribute('color', new THREE.BufferAttribute(cols, 3));
-        scene.add(new THREE.Points(g, new THREE.PointsMaterial({
-          size: L.size, sizeAttenuation: sizeAtten, vertexColors: true,
-          transparent: true, opacity: L.alpha })));
+        scene.add(new THREE.Points(g, pointMaterial({
+          size: psz, vertexColors: true, opacity: L.alpha })));
       }
     } else if (L.kind === 'surface' || L.kind === 'isosurface') {
       const g = new THREE.BufferGeometry();
@@ -796,17 +892,21 @@ if (!S.is3d) {
     scene.add(tl);
   });
 
+  // Fit like pcviz: bounding sphere of the scene cube, camera on a soft orbit.
   const ctr = new THREE.Vector3(ext[0]/2, ext[1]/2, ext[2]/2);
-  // fit: place the camera so the cube's bounding sphere fills the frustum
-  const rad = Math.sqrt(ext[0]*ext[0] + ext[1]*ext[1] + ext[2]*ext[2]) / 2;
-  const dist = rad / Math.tan((cam.fov * Math.PI / 180) / 2) * 1.45;
+  const rad = Math.max(
+    Math.sqrt(ext[0]*ext[0] + ext[1]*ext[1] + ext[2]*ext[2]) / 2, 1e-3);
+  // pcviz: position at ~1.4R from centre on a diagonal; far = 20R
+  const dist = rad * 1.55 / Math.tan((cam.fov * Math.PI / 180) / 2);
   const dir = new THREE.Vector3(0.55, -0.85, 0.5).normalize();
   cam.position.copy(ctr.clone().add(dir.multiplyScalar(dist)));
-  cam.near = dist / 100;
-  cam.far = dist * 20;
+  cam.near = Math.max(rad / 200, 1e-4);
+  cam.far = rad * 40;
+  cam.updateProjectionMatrix();
   const controls = new OrbitControls(cam, renderer.domElement);
   controls.target.copy(ctr);
   controls.enableDamping = true;
+  controls.update();
 
   // ── 3D hover: nearest point (screen-space) for point layers ────────────
   const tip3 = document.getElementById('tip');

@@ -652,6 +652,28 @@ _2D_ONLY_KINDS = frozenset(
 _3D_POINT_KINDS = frozenset({"point", "line", "surface", "isosurface"})
 
 
+def _default_3d_point_size(n: int, *, size_mode: str = "scene") -> float:
+    """pcviz-like fine points on the unit-cube scene.
+
+    pcviz uses ~0.06 m marks on clouds whose radius is tens of meters
+    (size/radius ≈ 0.001). plot3 places points in a unit cube whose
+    bounding-sphere radius is O(1), so the matching world size is ~0.001,
+    scaled gently with density.
+    """
+    n = max(1, int(n))
+    if size_mode == "screen":
+        # Constant pixel size (Three.js sizeAttenuation=false).
+        if n <= 5_000:
+            return 2.0
+        if n <= 50_000:
+            return 1.5
+        return 1.25
+    # scene mode: world units after [0,1]×aspect encoding
+    base = 0.0010
+    s = base * (2_000.0 / n) ** (1.0 / 3.0)
+    return float(round(min(0.0035, max(0.00035, s)), 5))
+
+
 def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if g.data is None:
         raise ValueError(
@@ -1124,15 +1146,19 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             if getattr(geom, "size", None) is not None:
                 spec_l["size"] = float(geom.size)
             elif is3d:
-                # scene units; density-scaled so dense scans stay crisp
-                spec_l["size"] = round(
-                    min(0.02, max(0.0012,
-                                  0.02 * (500.0 / max(1, n)) ** (1.0 / 3.0))), 5)
+                mode = "scene"
+                if coord is not None:
+                    mode = getattr(coord, "size_mode", "scene") or "scene"
+                spec_l["size"] = _default_3d_point_size(n, size_mode=mode)
             else:
                 # pixels
                 spec_l["size"] = 6.0 if n <= 2000 else (4.0 if n <= 20000 else 2.5)
             if spec_l["alpha"] is None:
-                spec_l["alpha"] = 0.85 if n <= 50000 else 0.6
+                if is3d:
+                    # Opaque marks read sharper for lidar-style clouds (pcviz).
+                    spec_l["alpha"] = 1.0 if n <= 200_000 else 0.85
+                else:
+                    spec_l["alpha"] = 0.85 if n <= 50000 else 0.6
         if spec_l["alpha"] is None:
             spec_l["alpha"] = 1.0
         layer_specs.append(spec_l)

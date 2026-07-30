@@ -100,8 +100,11 @@ class geom_point(_Geom):
     """Scatter points.
 
     In **2D**, ``size`` is pixels. In **3D** (when ``aes(z=...)`` is set),
-    ``size`` is scene units with distance attenuation — lidar clouds typically
-    use ``0.001``–``0.02``. Prefer :class:`geom_point3d` for explicit 3D intent.
+    ``size`` is scene units with distance attenuation (unit-cube space after
+    encoding). Prefer :class:`geom_point3d` for explicit 3D intent.
+
+    When ``size`` is omitted in 3D, a density-aware default is chosen
+    (pcviz-like fine points on dense clouds).
     """
 
     kind = "point"
@@ -114,11 +117,21 @@ class geom_point(_Geom):
 class geom_point3d(geom_point):
     """3D scatter / point-cloud marks (same ``kind`` as :class:`geom_point`).
 
-    Use with ``aes(x=, y=, z=)``. Size is in **scene units** under the default
-    :class:`coord_3d` (``size_mode="scene"``).
+    Use with ``aes(x=, y=, z=)``. Under default :class:`coord_3d`
+    (``size_mode="scene"``), size is in **unit-cube scene units** with
+    distance attenuation — comparable to pcviz's metric sizing after
+    plot3 normalizes axes into a unit cube.
+
+    Parameters
+    ----------
+    size:
+        Point diameter in scene units. Default ``None`` picks a small,
+        density-aware size (roughly pcviz ``size=0.06`` m on a ~50 m cloud).
+        Override for artistic control, e.g. ``size=0.002``.
     """
 
-    def __init__(self, mapping=None, *, size=0.01, **kw):
+    def __init__(self, mapping=None, *, size=None, **kw):
+        # None → build_spec density-aware default (not a hard-coded 0.01 blob).
         super().__init__(mapping, size=size, **kw)
 
 
