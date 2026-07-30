@@ -12,7 +12,7 @@ import copy
 
 from plot3.encode import encode_norm, pack_u16, pack_u32
 from plot3.geoms import _Geom, aes, geom_col, scale_colour_continuous
-from plot3.scales import Scale, col_values
+from plot3.scales import Scale, col_values, resolution
 from plot3.stats3d import isosurface_levels, regular_grid_mesh
 from plot3.table import (
     category_labels,
@@ -97,6 +97,101 @@ def _kde_1d(
     return grid, dens
 
 
+def _as_discrete_x(table, xcol: str):
+    """Cast count-key column to ordered categories so the x scale is discrete.
+
+    ggplot2 users typically map ``factor(x)`` for bar charts; without that,
+    integer/numeric codes sit on a continuous axis (ticks at 5, 7, …). Count
+    bars are categories of *values*, so we draw them discretely while keeping
+    the original labels. Relative ``width`` still defaults to 0.9 (user-settable).
+
+    Returns a small pandas frame (count tables are tiny; categorical levels
+    preserve first-appearance order from ``count_by``).
+    """
+    from plot3.table import as_pandas
+
+    out = as_pandas(table).copy()
+    out[xcol] = out[xcol].map(lambda v: "NA" if pd.isna(v) else str(v))
+    levels = list(dict.fromkeys(out[xcol].tolist()))
+    out[xcol] = pd.Categorical(out[xcol], categories=levels, ordered=True)
+    return out
+
+
+def _hist_counts_left_closed(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
+    """Count with left-closed / right-open bins (ggplot2 ``closed = "left"``)."""
+    values = np.asarray(values, dtype=np.float64)
+    edges = np.asarray(edges, dtype=np.float64)
+    n = len(edges) - 1
+    # searchsorted side='left': edge[i] <= x < edge[i+1] is not default;
+    # use side='right' then subtract 1 for left-closed intervals.
+    idx = np.searchsorted(edges, values, side="right") - 1
+    idx = np.clip(idx, 0, n - 1)
+    # Drop values outside [edges[0], edges[-1]]
+    inside = (values >= edges[0]) & (values <= edges[-1])
+    counts = np.bincount(idx[inside], minlength=n).astype(np.float64)
+    return counts
+
+
+def _histogram_breaks(
+    values: np.ndarray,
+    *,
+    bins: int | None,
+    binwidth: float | None,
+    boundary: float | None,
+) -> np.ndarray:
+    """Compute histogram edges (ggplot2 ``stat_bin``-style params).
+
+    ``binwidth`` overrides ``bins``. ``boundary`` shifts the grid so an edge
+    lands on that value (modulo binwidth). Defaults match ggplot2:
+    ``bins=30`` when neither is set.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return np.asarray([0.0, 1.0], dtype=np.float64)
+    lo = float(np.min(values))
+    hi = float(np.max(values))
+    if hi <= lo:
+        # Single unique value: one bin of unit width around the point.
+        mid = lo
+        w = 1.0 if binwidth is None else float(binwidth)
+        return np.asarray([mid - 0.5 * w, mid + 0.5 * w], dtype=np.float64)
+
+    if binwidth is not None:
+        w = float(binwidth)
+        if w <= 0:
+            raise ValueError("binwidth must be positive")
+        # Align origin via boundary (ggplot2) or start at data min.
+        if boundary is not None:
+            origin = float(boundary)
+            # Shift so origin is an edge: floor((lo - origin)/w)*w + origin
+            start = origin + math.floor((lo - origin) / w) * w
+        else:
+            start = lo
+        # Cover hi: need edges from start to >= hi
+        n = int(math.ceil((hi - start) / w))
+        n = max(1, n)
+        edges = start + np.arange(n + 1, dtype=np.float64) * w
+        # Ensure last edge covers hi (float safety)
+        if edges[-1] < hi:
+            edges = np.append(edges, edges[-1] + w)
+        return edges
+
+    n_bins = 30 if bins is None else max(1, int(bins))
+    if boundary is None:
+        return np.linspace(lo, hi, n_bins + 1)
+    # bins + boundary: fix binwidth from range, then align
+    w = (hi - lo) / n_bins
+    origin = float(boundary)
+    start = origin + math.floor((lo - origin) / w) * w
+    n = int(math.ceil((hi - start) / w))
+    n = max(1, n)
+    edges = start + np.arange(n + 1, dtype=np.float64) * w
+    if edges[-1] < hi:
+        edges = np.append(edges, edges[-1] + w)
+    return edges
+
+
 def expand_stat_geom(geom: _Geom, base_mapping: aes, data) -> _Geom:
     """Turn statistical geoms into concrete drawable layers.
 
@@ -114,8 +209,17 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data) -> _Geom:
         xcol = mapping["x"]
         # Backend-native count: pandas groupby / polars group_by / tidy→polars.
         counts = count_by(data, xcol)
-        out = geom_col(aes(x=xcol, y="y"), width=getattr(geom, "width", 0.9),
-                       color=geom.const_color, colour=None, alpha=geom.alpha)
+        # ggplot2 stat_count at unique x; draw on a discrete scale (factor(x)
+        # style) so integer/numeric codes don't sit on a continuous axis with
+        # phantom ticks. Labels keep the original values as strings.
+        counts = _as_discrete_x(counts, xcol)
+        out = geom_col(
+            aes(x=xcol, y="y"),
+            width=getattr(geom, "width", 0.9),
+            color=geom.const_color,
+            colour=None,
+            alpha=geom.alpha,
+        )
         out.data_override = counts
         out.const_color = geom.const_color
         out.alpha = geom.alpha
@@ -125,22 +229,57 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data) -> _Geom:
             raise ValueError("geom_histogram() requires aes(x=)")
         xcol = mapping["x"]
         values = numeric_array(data, xcol, dropna=True)
+        binwidth = getattr(geom, "binwidth", None)
+        bins = getattr(geom, "bins", 30)
+        boundary = getattr(geom, "boundary", None)
+        closed = getattr(geom, "closed", "right")
         if values.size == 0:
-            frame = pd.DataFrame({"x": np.array([], dtype=float),
-                                  "y": np.array([], dtype=float)})
-            width = 1.0
+            frame = pd.DataFrame(
+                {"x": np.array([], dtype=float), "y": np.array([], dtype=float)}
+            )
+            abs_width = 1.0
+            edge_lo, edge_hi = 0.0, 1.0
         else:
-            bins = max(1, int(getattr(geom, "bins", 30)))
-            counts, edges = np.histogram(values, bins=bins)
+            edges = _histogram_breaks(
+                values,
+                bins=bins,
+                binwidth=binwidth,
+                boundary=boundary,
+            )
+            # numpy: closed right by default (right edge included except last);
+            # closed left uses left-edge convention via density weights unused here.
+            # numpy histogram is right-closed (except last bin); ggplot2
+            # closed="right" matches that convention.
+            if closed == "left":
+                # Shift values slightly so membership matches left-closed bins
+                # without changing edges: count with inverted edges via
+                # searchsorted-based assignment.
+                counts = _hist_counts_left_closed(values, edges)
+            else:
+                counts, _ = np.histogram(values, bins=edges)
             centers = 0.5 * (edges[:-1] + edges[1:])
-            width = float(np.median(np.diff(edges))) if len(edges) > 1 else 1.0
-            frame = pd.DataFrame({"x": centers, "y": counts.astype(np.float64)})
-        out = geom_col(aes(x="x", y="y"), width=getattr(geom, "width", 1.0),
-                       color=geom.const_color, alpha=geom.alpha)
+            abs_width = (
+                float(np.median(np.diff(edges))) if len(edges) > 1 else 1.0
+            )
+            edge_lo, edge_hi = float(edges[0]), float(edges[-1])
+            frame = pd.DataFrame(
+                {"x": centers, "y": counts.astype(np.float64)}
+            )
+        # Absolute bin width → bars touch (ggplot2 geom_histogram / GeomBar).
+        # Relative width stays 1.0 (full bin); users change bins/binwidth, not
+        # a gap fraction, for histograms.
+        out = geom_col(
+            aes(x="x", y="y"),
+            width=1.0,
+            color=geom.const_color,
+            alpha=geom.alpha,
+        )
         out.data_override = frame
         out.const_color = geom.const_color
         out.alpha = geom.alpha
-        out._bar_width_data = width  # absolute data units
+        out._bar_width_data = abs_width  # absolute data units (= binwidth)
+        # Expand continuous domain to full bin edges (not just centres).
+        out._x_domain = (edge_lo, edge_hi)
         return out
     if geom.kind == "boxplot":
         if "x" not in mapping or "y" not in mapping:
@@ -601,6 +740,12 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         for a in axes:
             kind, v, cats = col_values(sub[m[a]])
             vals[a] = _absorb_position(a, kind, v, cats)
+        # Histogram: domain is full bin edges, not just bin centres.
+        x_domain = getattr(geom, "_x_domain", None)
+        if x_domain is not None and "x" in scales and scales["x"].kind == "num":
+            scales["x"].widen(
+                np.asarray([x_domain[0], x_domain[1]], dtype=np.float64)
+            )
         # Bars / densities include the baseline at y=0 in the domain.
         if (
             geom.kind in {"col", "area"}
@@ -847,25 +992,26 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 else:
                     spec_l["y0"] = 0.0
         elif geom.kind in {"col", "box"}:
-            # Bar/box width in normalized [0,1] x-space for the renderer.
+            # Bar/box width in normalized [0,1] x-space (ggplot2 resolution × width).
             scx = scales["x"]
             span = max(scx.hi - scx.lo, 1e-12)
-            if hasattr(geom, "_bar_width_data"):
-                data_w = float(geom._bar_width_data) * float(
-                    getattr(geom, "width", 1.0)
+            rel = float(
+                getattr(
+                    geom,
+                    "width",
+                    0.75 if geom.kind == "box" else 0.9,
                 )
+            )
+            if getattr(geom, "_bar_width_data", None) is not None:
+                # Absolute data width from stat (histogram binwidth).
+                data_w = float(geom._bar_width_data) * rel
             elif scx.kind == "cat":
-                data_w = float(getattr(geom, "width", 0.75 if geom.kind == "box" else 0.9))
+                # Discrete scale: unit spacing between categories (resolution = 1).
+                data_w = 1.0 * rel
             else:
+                # Continuous: data_width = resolution(x) * width (ggplot2).
                 xs = np.asarray(vals["x"][order], dtype=np.float64)
-                if len(xs) >= 2:
-                    gaps = np.diff(np.sort(np.unique(xs)))
-                    step = float(np.median(gaps)) if len(gaps) else 1.0
-                else:
-                    step = span * 0.08
-                data_w = step * float(
-                    getattr(geom, "width", 0.75 if geom.kind == "box" else 0.9)
-                )
+                data_w = resolution(xs, zero=False) * rel
             spec_l["width"] = float(np.clip(data_w / span, 1e-4, 1.0))
             if geom.kind == "col":
                 scy = scales["y"]

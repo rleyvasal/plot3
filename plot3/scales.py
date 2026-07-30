@@ -7,6 +7,44 @@ import math
 import numpy as np
 import pandas as pd
 
+
+def resolution(x, *, zero: bool = True) -> float:
+    """Smallest non-zero distance between adjacent values (ggplot2 ``resolution``).
+
+    Used to turn a relative bar ``width`` (default 0.9) into data units:
+    ``data_width = resolution(x) * width``.
+
+    * Integer-like vectors → ``1`` (ggplot2 treats integers as unit-spaced).
+    * Single unique value / zero range → ``1``.
+    * Otherwise → minimum positive difference between sorted unique values.
+    * If ``zero`` is True (ggplot2 default for some paths), ``0`` is included
+      in the unique set before measuring gaps.
+    """
+    raw = np.asarray(x)
+    # Integer storage (int32/Int64/…) matches ggplot2 is.integer → 1.
+    if np.issubdtype(raw.dtype, np.integer):
+        return 1.0
+    arr = np.asarray(raw, dtype=np.float64).ravel()
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return 1.0
+    lo = float(np.min(arr))
+    hi = float(np.max(arr))
+    if hi <= lo or not math.isfinite(lo) or not math.isfinite(hi):
+        return 1.0
+    uniq = np.unique(arr)
+    if zero:
+        uniq = np.unique(np.concatenate([uniq, np.asarray([0.0])]))
+    if uniq.size < 2:
+        return 1.0
+    d = np.diff(np.sort(uniq))
+    tol = math.sqrt(np.finfo(float).eps)
+    positive = d[d > tol]
+    if positive.size == 0:
+        return 1.0
+    return float(np.min(positive))
+
+
 def nice_ticks(lo: float, hi: float, n: int = 6) -> list[float]:
     if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
         return [lo]

@@ -107,19 +107,21 @@ def test_geom_bar_polars_pilot(polars_mod):
     pl = polars_mod
     df = pl.DataFrame(_bar_frame())
     fig = ggplot(df, aes(x="cat")) + geom_bar()
-    # Input stays polars
+    # Input stays polars (count uses polars; discrete labels materialise small frame)
     assert fig.backend == "polars"
-    # Expand uses backend count (polars result as data_override)
+    assert fig.data is df
     expanded = expand_stat_geom(fig.layers[0], fig.mapping, fig.data)
     assert expanded.kind == "col"
     override = expanded.data_override
-    assert detect_backend(override) == "polars"
-    assert get_columns(override) == ["cat", "y"]
-    assert n_rows(override) == 3
-    # Full build / encode works
+    # Small count table becomes ordered categorical (discrete scale).
+    assert list(override.columns) == ["cat", "y"]
+    assert len(override) == 3
+    # Full build / encode: discrete x, width = 0.9 / n_cats
     spec, _ = build_spec(fig)
     assert spec["layers"][0]["kind"] == "col"
     assert spec["layers"][0]["n"] == 3
+    assert spec["scales"]["x"]["kind"] == "cat"
+    assert abs(spec["layers"][0]["width"] - 0.9 / 3) < 1e-9
     assert len(fig.html()) > 500
 
 
@@ -172,10 +174,12 @@ def test_tidy_backend_optional():
     assert detect_backend(as_table(tf)) == "tidy"
     fig = ggplot(tf, aes(x="cat")) + geom_bar()
     assert fig.backend == "tidy"
-    # count path resolves tidy → polars
+    # Source stays tidy; counts become a small discrete frame for drawing.
     expanded = expand_stat_geom(fig.layers[0], fig.mapping, fig.data)
-    assert detect_backend(expanded.data_override) == "polars"
-    assert build_spec(fig)[0]["layers"][0]["n"] == 3
+    assert len(expanded.data_override) == 3
+    spec, _ = build_spec(fig)
+    assert spec["layers"][0]["n"] == 3
+    assert spec["scales"]["x"]["kind"] == "cat"
 
 
 def test_numeric_array_and_group_pieces_polars(polars_mod):
@@ -202,9 +206,13 @@ def test_geom_histogram_polars(polars_mod):
     assert expanded.kind == "col"
     assert len(expanded.data_override) == 5
     assert expanded.data_override["y"].sum() == 6
+    # Full bin width on edge domain → adjacent bars touch (width = 1/bins).
+    assert expanded._bar_width_data > 0
+    assert expanded._x_domain is not None
     spec, _ = build_spec(fig)
     assert spec["layers"][0]["kind"] == "col"
     assert spec["layers"][0]["n"] == 5
+    assert abs(spec["layers"][0]["width"] - 1.0 / 5) < 1e-9
 
 
 def test_geom_boxplot_polars(polars_mod):
@@ -340,6 +348,34 @@ def test_stat_parity_pandas_vs_polars(polars_mod):
     assert list(b_pd.data_override["middle"]) == list(
         b_pl.data_override["middle"]
     )
+
+
+def test_geom_bar_discrete_and_width_override():
+    df = pd.DataFrame({"cyl": [4, 4, 6, 6, 6, 8]})
+    fig = ggplot(df, aes(x="cyl")) + geom_bar()
+    spec, _ = build_spec(fig)
+    assert spec["scales"]["x"]["kind"] == "cat"
+    assert spec["scales"]["x"]["cats"] == ["4", "6", "8"]
+    # default width 0.9 of unit category spacing
+    assert abs(spec["layers"][0]["width"] - 0.9 / 3) < 1e-9
+    fig2 = ggplot(df, aes(x="cyl")) + geom_bar(width=1.0)
+    assert abs(build_spec(fig2)[0]["layers"][0]["width"] - 1.0 / 3) < 1e-9
+
+
+def test_geom_histogram_bars_touch_and_binwidth():
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame({"x": rng.normal(0, 1, 500)})
+    fig = ggplot(df, aes(x="x")) + geom_histogram(bins=20)
+    spec, _ = build_spec(fig)
+    assert abs(spec["layers"][0]["width"] - 1.0 / 20) < 1e-9
+    fig2 = ggplot(df, aes(x="x")) + geom_histogram(binwidth=0.5)
+    spec2, _ = build_spec(fig2)
+    # Absolute binwidth → domain span / n_bins == 0.5
+    lo, hi = spec2["scales"]["x"]["lo"], spec2["scales"]["x"]["hi"]
+    n = spec2["layers"][0]["n"]
+    assert n >= 1
+    assert abs((hi - lo) / n - 0.5) < 1e-9
+    assert abs(spec2["layers"][0]["width"] - 1.0 / n) < 1e-9
 
 
 def test_tidy_stats_optional():

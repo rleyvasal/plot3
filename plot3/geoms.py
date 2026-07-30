@@ -249,9 +249,13 @@ class geom_line(geom_path):
 class geom_col(_Geom):
     """Bars with heights from ``y`` (ggplot2 ``geom_col``).
 
-    Requires ``aes(x=, y=)``. ``x`` may be categorical or numeric. Optional
-    ``width`` is the bar width as a fraction of the median x-spacing (default
-    0.9). 2D only.
+    Requires ``aes(x=, y=)``. ``x`` may be categorical or numeric.
+
+    Parameters
+    ----------
+    width:
+        Bar width as a fraction of the x resolution (ggplot2 default
+        ``0.9``). Data width is ``resolution(x) * width``. Override freely.
     """
 
     kind = "col"
@@ -263,10 +267,17 @@ class geom_col(_Geom):
 
 
 class geom_bar(_Geom):
-    """Count bars for a discrete ``x`` (ggplot2 ``geom_bar``).
+    """Count bars for a discrete ``x`` (ggplot2 ``geom_bar`` / ``stat_count``).
 
     Only ``aes(x=)`` is required; counts become ``y``. Expanded to
-    ``geom_col`` at build time. 2D only.
+    ``geom_col`` at build time. Counted ``x`` values are drawn on a
+    **discrete** scale (like ``factor(x)`` in ggplot2). 2D only.
+
+    Parameters
+    ----------
+    width:
+        Bar width as a fraction of category spacing (ggplot2 default
+        ``0.9``). Use ``1.0`` for flush bars, smaller for more gap.
     """
 
     kind = "bar"
@@ -277,18 +288,51 @@ class geom_bar(_Geom):
 
 
 class geom_histogram(_Geom):
-    """Histogram of a continuous ``x`` (ggplot2 ``geom_histogram``).
+    """Histogram of a continuous ``x`` (ggplot2 ``geom_histogram`` / ``stat_bin``).
 
     Only ``aes(x=)`` is required. Bins are computed in Python and drawn as
-    ``geom_col``. 2D only.
+    ``geom_col`` with **full bin width** so adjacent bars touch (no gaps).
+    2D only.
+
+    Parameters
+    ----------
+    bins:
+        Number of bins (ggplot2 default ``30``). Ignored when ``binwidth``
+        is set. Override to preference — 30 is rarely ideal for every dataset.
+    binwidth:
+        Absolute bin width in data units. When set, overrides ``bins``.
+    boundary:
+        Optional bin boundary (ggplot2 ``boundary``). Aligns edges so that
+        one edge falls on this value (modulo ``binwidth``).
+    closed:
+        ``"right"`` (default) or ``"left"`` — which side of each bin is
+        closed (matches numpy / ggplot2 closed intervals).
     """
 
     kind = "histogram"
 
-    def __init__(self, mapping=None, *, bins=30, width=1.0, **kw):
+    def __init__(
+        self,
+        mapping=None,
+        *,
+        bins: int | None = 30,
+        binwidth: float | None = None,
+        boundary: float | None = None,
+        closed: str = "right",
+        **kw,
+    ):
         super().__init__(mapping, **kw)
-        self.bins = int(bins)
-        self.width = float(width)
+        if bins is not None and int(bins) < 1:
+            raise ValueError("bins must be positive")
+        if binwidth is not None and float(binwidth) <= 0:
+            raise ValueError("binwidth must be positive")
+        if closed not in {"right", "left"}:
+            raise ValueError("closed must be 'right' or 'left'")
+        self.bins = None if bins is None else int(bins)
+        self.binwidth = None if binwidth is None else float(binwidth)
+        self.boundary = None if boundary is None else float(boundary)
+        self.closed = closed
+        # Histograms use absolute bin width (bars touch); no relative width.
 
 
 class geom_boxplot(_Geom):
