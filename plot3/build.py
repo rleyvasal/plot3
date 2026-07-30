@@ -132,18 +132,109 @@ def _hist_counts_left_closed(values: np.ndarray, edges: np.ndarray) -> np.ndarra
     return counts
 
 
+def _edges_from_binwidth(
+    lo: float,
+    hi: float,
+    w: float,
+    boundary: float | None,
+) -> np.ndarray:
+    """Build equal-width edges covering [lo, hi] with optional boundary align."""
+    if w <= 0 or not math.isfinite(w):
+        raise ValueError("binwidth must be a positive finite number")
+    if boundary is not None:
+        origin = float(boundary)
+        start = origin + math.floor((lo - origin) / w) * w
+    else:
+        start = lo
+    n = max(1, int(math.ceil((hi - start) / w)))
+    edges = start + np.arange(n + 1, dtype=np.float64) * w
+    if edges[-1] < hi:
+        edges = np.append(edges, edges[-1] + w)
+    return edges
+
+
+def _auto_binwidth(values: np.ndarray, method: str = "fd") -> float:
+    """Data-driven bin width (Freedman–Diaconis by default).
+
+    Falls back along Scott → Sturges-derived width when a rule is undefined
+    (e.g. zero IQR or zero variance).
+    """
+    x = np.asarray(values, dtype=np.float64)
+    x = x[np.isfinite(x)]
+    n = int(x.size)
+    if n <= 1:
+        return 1.0
+    lo = float(np.min(x))
+    hi = float(np.max(x))
+    span = hi - lo
+    if span <= 0:
+        return 1.0
+
+    method = (method or "fd").lower()
+    n_root = n ** (1.0 / 3.0)
+
+    def fd_width() -> float | None:
+        q75, q25 = np.percentile(x, [75.0, 25.0])
+        iqr = float(q75 - q25)
+        if iqr > 0:
+            return 2.0 * iqr / n_root
+        return None
+
+    def scott_width() -> float | None:
+        # Sample SD; Scott's normal-reference rule.
+        sd = float(np.std(x, ddof=1)) if n > 1 else 0.0
+        if sd > 0:
+            return 3.49 * sd / n_root
+        return None
+
+    def sturges_width() -> float:
+        # Convert Sturges bin count into a width over the data span.
+        k = max(1, int(math.ceil(math.log2(n) + 1.0)))
+        return span / k
+
+    order: list[str]
+    if method in {"fd", "freedman-diaconis", "freedman_diaconis"}:
+        order = ["fd", "scott", "sturges"]
+    elif method == "scott":
+        order = ["scott", "fd", "sturges"]
+    elif method == "sturges":
+        order = ["sturges"]
+    elif method == "auto":
+        # Prefer FD, then Scott, then Sturges (same cascade as a robust default).
+        order = ["fd", "scott", "sturges"]
+    else:
+        # Unknown name: still try FD cascade rather than failing hard here;
+        # numpy edges path handles named rules when bins is the method string.
+        order = ["fd", "scott", "sturges"]
+
+    for name in order:
+        if name == "fd":
+            w = fd_width()
+        elif name == "scott":
+            w = scott_width()
+        else:
+            w = sturges_width()
+        if w is not None and w > 0 and math.isfinite(w):
+            # At least one bin, at most a fine grid (avoid pathological widths).
+            return float(min(max(w, span / 1000.0), span))
+    return sturges_width()
+
+
 def _histogram_breaks(
     values: np.ndarray,
     *,
     bins: int | None,
     binwidth: float | None,
     boundary: float | None,
+    method: str = "fd",
 ) -> np.ndarray:
-    """Compute histogram edges (ggplot2 ``stat_bin``-style params).
+    """Compute histogram edges.
 
-    ``binwidth`` overrides ``bins``. ``boundary`` shifts the grid so an edge
-    lands on that value (modulo binwidth). Defaults match ggplot2:
-    ``bins=30`` when neither is set.
+    Priority (user settings always win when given):
+
+    1. ``binwidth`` — absolute width (optional ``boundary`` alignment)
+    2. ``bins`` — explicit bin count (optional ``boundary``)
+    3. automatic width from ``method`` (default Freedman–Diaconis), then edges
     """
     values = np.asarray(values, dtype=np.float64)
     values = values[np.isfinite(values)]
@@ -158,38 +249,38 @@ def _histogram_breaks(
         return np.asarray([mid - 0.5 * w, mid + 0.5 * w], dtype=np.float64)
 
     if binwidth is not None:
-        w = float(binwidth)
-        if w <= 0:
-            raise ValueError("binwidth must be positive")
-        # Align origin via boundary (ggplot2) or start at data min.
-        if boundary is not None:
-            origin = float(boundary)
-            # Shift so origin is an edge: floor((lo - origin)/w)*w + origin
-            start = origin + math.floor((lo - origin) / w) * w
-        else:
-            start = lo
-        # Cover hi: need edges from start to >= hi
-        n = int(math.ceil((hi - start) / w))
-        n = max(1, n)
-        edges = start + np.arange(n + 1, dtype=np.float64) * w
-        # Ensure last edge covers hi (float safety)
-        if edges[-1] < hi:
-            edges = np.append(edges, edges[-1] + w)
-        return edges
+        return _edges_from_binwidth(lo, hi, float(binwidth), boundary)
 
-    n_bins = 30 if bins is None else max(1, int(bins))
-    if boundary is None:
-        return np.linspace(lo, hi, n_bins + 1)
-    # bins + boundary: fix binwidth from range, then align
-    w = (hi - lo) / n_bins
-    origin = float(boundary)
-    start = origin + math.floor((lo - origin) / w) * w
-    n = int(math.ceil((hi - start) / w))
-    n = max(1, n)
-    edges = start + np.arange(n + 1, dtype=np.float64) * w
-    if edges[-1] < hi:
-        edges = np.append(edges, edges[-1] + w)
-    return edges
+    if bins is not None:
+        n_bins = max(1, int(bins))
+        if boundary is None:
+            return np.linspace(lo, hi, n_bins + 1)
+        w = (hi - lo) / n_bins
+        return _edges_from_binwidth(lo, hi, w, boundary)
+
+    # Automatic: prefer numpy's named rule when it matches; otherwise FD cascade.
+    method = (method or "fd").lower()
+    numpy_names = {
+        "fd",
+        "scott",
+        "sturges",
+        "auto",
+        "doane",
+        "stone",
+        "rice",
+        "sqrt",
+    }
+    if method in numpy_names and boundary is None:
+        try:
+            edges = np.histogram_bin_edges(values, bins=method)
+            edges = np.asarray(edges, dtype=np.float64)
+            if edges.size >= 2 and np.all(np.isfinite(edges)):
+                return edges
+        except Exception:
+            pass
+    # FD/Scott/Sturges width cascade (also used when boundary is set).
+    w = _auto_binwidth(values, method=method)
+    return _edges_from_binwidth(lo, hi, w, boundary)
 
 
 def expand_stat_geom(geom: _Geom, base_mapping: aes, data) -> _Geom:
@@ -230,7 +321,8 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data) -> _Geom:
         xcol = mapping["x"]
         values = numeric_array(data, xcol, dropna=True)
         binwidth = getattr(geom, "binwidth", None)
-        bins = getattr(geom, "bins", 30)
+        bins = getattr(geom, "bins", None)
+        method = getattr(geom, "method", "fd")
         boundary = getattr(geom, "boundary", None)
         closed = getattr(geom, "closed", "right")
         if values.size == 0:
@@ -245,6 +337,7 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data) -> _Geom:
                 bins=bins,
                 binwidth=binwidth,
                 boundary=boundary,
+                method=method,
             )
             # numpy: closed right by default (right edge included except last);
             # closed left uses left-edge convention via density weights unused here.

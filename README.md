@@ -194,7 +194,7 @@ preserves data order while `geom_line` sorts by x, `ggsave("fig.html", p)`.
 | `geom_line(linewidth=)` / `geom_path()` | line sorts by x; path keeps data order; work in 3D too |
 | `geom_col(width=)` | bars from `y` heights (ggplot2 `geom_col`) |
 | `geom_bar(width=)` | count bars for discrete `x` |
-| `geom_histogram(bins=, width=)` | continuous `x` histogram → bars |
+| `geom_histogram(bins=, binwidth=, method=)` | continuous `x` histogram; auto FD bins when unset |
 | `geom_boxplot(width=, coef=, outlier_size=)` | Tukey box-and-whisker of `y` by `x` |
 | `geom_density(n=, adjust=, fill=)` | KDE of continuous `x` (optional `colour` groups) |
 | `geom_violin(n=, adjust=, width=)` | Mirrored KDE of `y` by `x` |

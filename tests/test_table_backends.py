@@ -378,6 +378,36 @@ def test_geom_histogram_bars_touch_and_binwidth():
     assert abs(spec2["layers"][0]["width"] - 1.0 / n) < 1e-9
 
 
+def test_geom_histogram_auto_bins_adapts_to_small_n():
+    """Default (no bins/binwidth) uses Freedman–Diaconis, not fixed 30."""
+    from plot3.build import _histogram_breaks, expand_stat_geom
+    from plot3.geoms import geom_histogram as GH
+
+    # Tiny sample: fixed bins=30 would be mostly empty; auto should be coarser.
+    x = np.array([10.4, 14.3, 15.2, 18.7, 21.0, 22.8, 30.4, 33.9], dtype=float)
+    edges_auto = _histogram_breaks(x, bins=None, binwidth=None, boundary=None, method="fd")
+    edges_30 = _histogram_breaks(x, bins=30, binwidth=None, boundary=None, method="fd")
+    n_auto = len(edges_auto) - 1
+    n_30 = len(edges_30) - 1
+    assert n_30 == 30
+    assert 1 <= n_auto < n_30
+
+    df = pd.DataFrame({"mpg": x})
+    fig = ggplot(df, aes(x="mpg")) + geom_histogram()  # auto
+    spec, _ = build_spec(fig)
+    assert spec["layers"][0]["n"] == n_auto
+    # Explicit bins still honored.
+    fig30 = ggplot(df, aes(x="mpg")) + geom_histogram(bins=30)
+    assert build_spec(fig30)[0]["layers"][0]["n"] == 30
+    # method=scott is accepted
+    fig_s = ggplot(df, aes(x="mpg")) + geom_histogram(method="scott")
+    assert build_spec(fig_s)[0]["layers"][0]["n"] >= 1
+    # expand path stores absolute bin width so bars touch
+    expanded = expand_stat_geom(GH(), {"x": "mpg"}, df)
+    assert expanded._bar_width_data > 0
+    assert expanded._x_domain is not None
+
+
 def test_tidy_stats_optional():
     pytest.importorskip("polars")
     try:

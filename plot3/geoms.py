@@ -297,10 +297,18 @@ class geom_histogram(_Geom):
     Parameters
     ----------
     bins:
-        Number of bins (ggplot2 default ``30``). Ignored when ``binwidth``
-        is set. Override to preference — 30 is rarely ideal for every dataset.
+        Explicit number of bins. When omitted (default), binning is chosen
+        from the data via ``method`` (Freedman–Diaconis by default). Ignored
+        when ``binwidth`` is set. Pass ``bins=30`` to force a fixed count
+        (ggplot2's historical default).
     binwidth:
-        Absolute bin width in data units. When set, overrides ``bins``.
+        Absolute bin width in data units. When set, overrides ``bins`` and
+        ``method``.
+    method:
+        Automatic rule used only when both ``bins`` and ``binwidth`` are
+        omitted: ``"fd"`` (Freedman–Diaconis, default), ``"scott"``,
+        ``"sturges"``, ``"auto"`` (numpy's multi-rule choice), or other
+        names accepted by ``numpy.histogram_bin_edges``.
     boundary:
         Optional bin boundary (ggplot2 ``boundary``). Aligns edges so that
         one edge falls on this value (modulo ``binwidth``).
@@ -315,8 +323,9 @@ class geom_histogram(_Geom):
         self,
         mapping=None,
         *,
-        bins: int | None = 30,
+        bins: int | None = None,
         binwidth: float | None = None,
+        method: str = "fd",
         boundary: float | None = None,
         closed: str = "right",
         **kw,
@@ -328,8 +337,11 @@ class geom_histogram(_Geom):
             raise ValueError("binwidth must be positive")
         if closed not in {"right", "left"}:
             raise ValueError("closed must be 'right' or 'left'")
+        if not isinstance(method, str) or not method.strip():
+            raise ValueError("method must be a non-empty string")
         self.bins = None if bins is None else int(bins)
         self.binwidth = None if binwidth is None else float(binwidth)
+        self.method = method.strip().lower()
         self.boundary = None if boundary is None else float(boundary)
         self.closed = closed
         # Histograms use absolute bin width (bars touch); no relative width.
