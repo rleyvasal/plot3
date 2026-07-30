@@ -1,10 +1,11 @@
 """Serializable PlotPayload — the contract between stats and the viewer.
 
-Phase A of the remote/local split:
+Remote/local split:
 
 * **Data / stats side** (local or GPU) produces a ``PlotPayload`` via
   :func:`build_payload` / :meth:`ggplot.to_payload`.
-* **Viewer side** turns that payload into HTML via :func:`render_payload`.
+* **Viewer side** turns that payload into HTML via :func:`render_payload`
+  or a payload-backed figure via :meth:`ggplot.from_payload`.
 
 A payload does not hold a DataFrame. It holds the already-encoded wire format
 that the three.js template consumes (JSON spec + base64 binary blobs).
@@ -25,6 +26,7 @@ grid of independent figure payloads (each panel is a normal figure payload).
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 # Wire-format version for PlotPayload (independent of spec["v"]).
@@ -37,6 +39,9 @@ __all__ = [
     "validate_payload",
     "payload_from_spec",
     "payload_blobs_list",
+    "save_payload",
+    "load_payload",
+    "display_payload",
 ]
 
 
@@ -154,3 +159,41 @@ def render_payload(
                 "plot3: warning — figure may exceed sslive's ~1.8 MB in-slide cap"
             )
     return doc
+
+
+def save_payload(payload: dict[str, Any], path: str | Path) -> str:
+    """Write a PlotPayload to a JSON file (remote → local handoff artifact)."""
+    payload = validate_payload(payload)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return str(path.resolve())
+
+
+def load_payload(path: str | Path) -> dict[str, Any]:
+    """Load and validate a PlotPayload JSON file."""
+    path = Path(path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return validate_payload(data)
+
+
+def display_payload(
+    payload: dict[str, Any],
+    *,
+    browser: bool | None = None,
+    path: str | Path | None = None,
+    height: str | int = "480px",
+    hide: bool | None = None,
+):
+    """Show a PlotPayload without a live DataFrame (local viewer half).
+
+    Builds a payload-backed :class:`~plot3.ggplot.ggplot` and calls
+    :meth:`~plot3.ggplot.ggplot.show`.
+    """
+    from plot3.ggplot import ggplot
+
+    fig = ggplot.from_payload(payload, height=height, hide=hide)
+    return fig.show(browser=browser, path=path)

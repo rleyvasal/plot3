@@ -151,6 +151,8 @@ class ggplot:
         self.quantize = bool(quantize)
         self.compress = bool(compress)
         self.hide = hide  # None -> module default (autohide())
+        # Frozen PlotPayload (Phase C): display without source data.
+        self._payload: dict | None = None
 
     @staticmethod
     def _as_table(data):
@@ -161,16 +163,69 @@ class ggplot:
     def _detect_backend(data) -> str:
         return detect_backend(data)
 
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict,
+        *,
+        height: str | int = "480px",
+        hide: bool | None = None,
+    ) -> "ggplot":
+        """Rebuild a displayable figure from a PlotPayload (no DataFrame).
+
+        The returned object can call :meth:`html`, :meth:`show`, and
+        :meth:`save` using only the payload. Grammar operators (``+``, ``>>``)
+        invalidate the payload and require live data again.
+        """
+        from plot3.payload import validate_payload
+
+        payload = validate_payload(payload)
+        g = cls(data=None, height=height, hide=hide)
+        g._payload = payload
+        # Best-effort labels for iframe title; full labs live in the payload.
+        labs_map = payload["spec"].get("labs") or {}
+        g.labs = {
+            k: v
+            for k, v in labs_map.items()
+            if v not in (None, "") and k in ("title", "x", "y", "z", "color")
+        }
+        return g
+
+    def freeze(self) -> "ggplot":
+        """Encode stats into a PlotPayload and drop the source table.
+
+        After :meth:`freeze`, display methods use only the payload (suitable
+        for shipping across a local/remote boundary). Adding layers or piping
+        new data clears the freeze.
+        """
+        if getattr(self, "facet", None) is not None:
+            raise ValueError(
+                "freeze() does not support facet_wrap(); use html() for faceted figures"
+            )
+        if self._payload is None:
+            if self.data is None and not self.layers:
+                raise ValueError("freeze() needs data and at least one layer")
+            self._payload = self.to_payload()
+        self.data = None
+        self.backend = None
+        return self
+
     def __rrshift__(self, data):
         """Bind data to a deferred ``ggplot(aes(...))`` template."""
         if self.data is not None:
             raise TypeError("cannot pipe data into a ggplot that already has data")
+        if self._payload is not None:
+            raise TypeError(
+                "cannot pipe data into a payload-backed ggplot; "
+                "build a new ggplot(...) template instead"
+            )
         g = copy.copy(self)
         g.layers = list(self.layers)
         g.labs = dict(self.labs)
         g.facet = self.facet
         g.coord = self.coord
         g.stat_density_3d = self.stat_density_3d
+        g._payload = None
         g.data = self._as_table(data)
         g.backend = self._detect_backend(g.data)
         return g
@@ -182,6 +237,8 @@ class ggplot:
         g.facet = self.facet
         g.coord = self.coord
         g.stat_density_3d = self.stat_density_3d
+        # Grammar changes invalidate a frozen payload.
+        g._payload = None
         if isinstance(other, _Geom):
             g.layers.append(other)
         elif isinstance(other, labs):
@@ -233,14 +290,22 @@ class ggplot:
         retain the source DataFrame. Suitable for shipping from a remote/GPU
         kernel to a local viewer via :func:`plot3.payload.render_payload`.
 
-        Faceted figures are not supported here; use :meth:`html` / ``build_doc``.
+        Returns a cached payload when the figure was built with
+        :meth:`from_payload` or :meth:`freeze`. Faceted figures are not
+        supported here; use :meth:`html` / ``build_doc``.
         """
+        if self._payload is not None:
+            return self._payload
         from plot3.payload import build_payload
 
         return build_payload(self)
 
     def html(self) -> str:
         """The full standalone document (what the iframe srcdoc carries)."""
+        if self._payload is not None:
+            from plot3.payload import render_payload
+
+            return render_payload(self._payload, log=True)
         from plot3.build import build_doc
 
         return build_doc(self)
@@ -328,14 +393,22 @@ class ggplot:
 
     def _iframe(self) -> str:
         doc = self.html()
-        title = self.labs.get("title", "plot3 figure")
+        if self._payload is not None:
+            spec = self._payload.get("spec") or {}
+            title = (spec.get("labs") or {}).get("title") or "plot3 figure"
+            surface = (spec.get("theme") or {}).get("surface") or _THEMES[
+                self.theme_name
+            ]["surface"]
+        else:
+            title = self.labs.get("title", "plot3 figure")
+            surface = _THEMES[self.theme_name]["surface"]
         # sandbox must allow scripts or the three.js viewer never starts.
         return (
             f'<iframe srcdoc="{_htmlesc.escape(doc, quote=True)}" '
             f'sandbox="allow-scripts allow-same-origin allow-pointer-lock" '
             f'allow="fullscreen" '
             f'style="width:100%;height:{self.height};border:0;'
-            f'border-radius:6px;background:{_THEMES[self.theme_name]["surface"]}" '
+            f'border-radius:6px;background:{surface}" '
             f'title="{_htmlesc.escape(str(title))}"></iframe>'
         )
 

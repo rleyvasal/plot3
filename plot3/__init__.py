@@ -39,7 +39,10 @@ from plot3.jupyter import (
 from plot3.payload import (
     PAYLOAD_VERSION,
     build_payload,
+    display_payload,
+    load_payload,
     render_payload,
+    save_payload,
     validate_payload,
 )
 
@@ -79,6 +82,9 @@ __all__ = [
     "build_payload",
     "render_payload",
     "validate_payload",
+    "save_payload",
+    "load_payload",
+    "display_payload",
     "__version__",
 ]
 
