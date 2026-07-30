@@ -14,6 +14,20 @@ from plot3.encode import encode_norm, pack_u16, pack_u32
 from plot3.geoms import _Geom, aes, geom_col, scale_colour_continuous
 from plot3.scales import Scale, col_values
 from plot3.stats3d import isosurface_levels, regular_grid_mesh
+from plot3.table import (
+    category_labels,
+    count_by,
+    filter_equal,
+    get_columns,
+    group_pieces,
+    has_column,
+    materialize_columns,
+    n_rows,
+    numeric_array,
+    require_columns,
+    subsample_rows,
+    unique_levels,
+)
 from plot3.themes import _CONT_PALETTES, _THEMES as THEMES
 from plot3.viewer import _DOC_TEMPLATE as DOC_TEMPLATE
 
@@ -83,22 +97,23 @@ def _kde_1d(
     return grid, dens
 
 
-def expand_stat_geom(geom: _Geom, base_mapping: aes, data: pd.DataFrame) -> _Geom:
-    """Turn statistical geoms into concrete drawable layers."""
+def expand_stat_geom(geom: _Geom, base_mapping: aes, data) -> _Geom:
+    """Turn statistical geoms into concrete drawable layers.
+
+    Stats run against the native table backend (pandas / polars / tidy→polars).
+    Only selected columns are pulled to arrays; small *result* frames used as
+    ``data_override`` are plain pandas (already computed, render-ready).
+    Identity geoms (point / line / …) are returned unchanged and materialise
+    columns at the render boundary.
+    """
     mapping = dict(base_mapping)
     mapping.update(geom.mapping)
     if geom.kind == "bar":
         if "x" not in mapping:
             raise ValueError("geom_bar() requires aes(x=)")
         xcol = mapping["x"]
-        if xcol not in data.columns:
-            raise KeyError(f"column(s) not in DataFrame: {[xcol]}")
-        counts = (
-            data.groupby(xcol, dropna=False, observed=True, sort=False)
-            .size()
-            .rename("y")
-            .reset_index()
-        )
+        # Backend-native count: pandas groupby / polars group_by / tidy→polars.
+        counts = count_by(data, xcol)
         out = geom_col(aes(x=xcol, y="y"), width=getattr(geom, "width", 0.9),
                        color=geom.const_color, colour=None, alpha=geom.alpha)
         out.data_override = counts
@@ -109,11 +124,7 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data: pd.DataFrame) -> _Geo
         if "x" not in mapping:
             raise ValueError("geom_histogram() requires aes(x=)")
         xcol = mapping["x"]
-        if xcol not in data.columns:
-            raise KeyError(f"column(s) not in DataFrame: {[xcol]}")
-        values = pd.to_numeric(data[xcol], errors="coerce").dropna().to_numpy(
-            dtype=np.float64
-        )
+        values = numeric_array(data, xcol, dropna=True)
         if values.size == 0:
             frame = pd.DataFrame({"x": np.array([], dtype=float),
                                   "y": np.array([], dtype=float)})
@@ -135,24 +146,16 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data: pd.DataFrame) -> _Geo
         if "x" not in mapping or "y" not in mapping:
             raise ValueError("geom_boxplot() requires aes(x=, y=)")
         xcol, ycol = mapping["x"], mapping["y"]
-        missing = [c for c in (xcol, ycol) if c not in data.columns]
-        if missing:
-            raise KeyError(f"column(s) not in DataFrame: {missing}")
+        require_columns(data, [xcol, ycol])
         colour_col = mapping.get("color")
         group_cols = [xcol]
-        if colour_col and colour_col != xcol and colour_col in data.columns:
+        if colour_col and colour_col != xcol and has_column(data, colour_col):
             group_cols.append(colour_col)
         coef = float(getattr(geom, "coef", 1.5))
         rows: list[dict] = []
         outlier_rows: list[dict] = []
-        grouping = data.groupby(
-            group_cols, dropna=False, observed=True, sort=False
-        )
-        for key, piece in grouping:
-            key_tuple = key if isinstance(key, tuple) else (key,)
-            values = pd.to_numeric(piece[ycol], errors="coerce").to_numpy(
-                dtype=np.float64
-            )
+        for key_tuple, piece in group_pieces(data, group_cols):
+            values = numeric_array(piece, ycol, dropna=False)
             stats = _boxplot_stats(values, coef=coef)
             if stats is None:
                 continue
@@ -206,28 +209,28 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data: pd.DataFrame) -> _Geo
         if "x" not in mapping:
             raise ValueError("geom_density() requires aes(x=)")
         xcol = mapping["x"]
-        if xcol not in data.columns:
-            raise KeyError(f"column(s) not in DataFrame: {[xcol]}")
+        require_columns(data, [xcol])
         colour_col = mapping.get("color")
         n_grid = int(getattr(geom, "n", 512))
         adjust = float(getattr(geom, "adjust", 1.0))
         fill = bool(getattr(geom, "fill", True))
         pieces: list[pd.DataFrame] = []
-        if colour_col and colour_col in data.columns:
-            groups = data.groupby(colour_col, dropna=False, observed=True, sort=False)
-            for key, piece in groups:
+        if colour_col and has_column(data, colour_col):
+            for key_tuple, piece in group_pieces(data, [colour_col]):
                 grid, dens = _kde_1d(
-                    pd.to_numeric(piece[xcol], errors="coerce").to_numpy(),
+                    numeric_array(piece, xcol, dropna=False),
                     n=n_grid,
                     adjust=adjust,
                 )
                 if grid.size == 0:
                     continue
-                frame = pd.DataFrame({"x": grid, "y": dens, colour_col: key})
+                frame = pd.DataFrame(
+                    {"x": grid, "y": dens, colour_col: key_tuple[0]}
+                )
                 pieces.append(frame)
         else:
             grid, dens = _kde_1d(
-                pd.to_numeric(data[xcol], errors="coerce").to_numpy(),
+                numeric_array(data, xcol, dropna=False),
                 n=n_grid,
                 adjust=adjust,
             )
@@ -257,31 +260,22 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data: pd.DataFrame) -> _Geo
         if "x" not in mapping or "y" not in mapping:
             raise ValueError("geom_violin() requires aes(x=, y=)")
         xcol, ycol = mapping["x"], mapping["y"]
-        missing = [c for c in (xcol, ycol) if c not in data.columns]
-        if missing:
-            raise KeyError(f"column(s) not in DataFrame: {missing}")
+        require_columns(data, [xcol, ycol])
         colour_col = mapping.get("color")
         n_grid = int(getattr(geom, "n", 128))
         adjust = float(getattr(geom, "adjust", 1.0))
         width = float(getattr(geom, "width", 0.9))
-        # Stable category order of appearance.
-        if isinstance(data[xcol].dtype, pd.CategoricalDtype):
-            levels = [str(c) for c in data[xcol].cat.categories]
-        else:
-            levels = list(dict.fromkeys(data[xcol].astype(str).tolist()))
+        levels = category_labels(data, xcol)
         level_index = {level: i for i, level in enumerate(levels)}
         rows: list[dict] = []
         grouping_cols = [xcol]
-        if colour_col and colour_col != xcol and colour_col in data.columns:
+        if colour_col and colour_col != xcol and has_column(data, colour_col):
             grouping_cols.append(colour_col)
-        for key, piece in data.groupby(
-            grouping_cols, dropna=False, observed=True, sort=False
-        ):
-            key_tuple = key if isinstance(key, tuple) else (key,)
+        for key_tuple, piece in group_pieces(data, grouping_cols):
             x_key = key_tuple[0]
             x_pos = float(level_index.get(str(x_key), 0))
             grid_y, dens = _kde_1d(
-                pd.to_numeric(piece[ycol], errors="coerce").to_numpy(),
+                numeric_array(piece, ycol, dropna=False),
                 n=n_grid,
                 adjust=adjust,
             )
@@ -326,8 +320,11 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data: pd.DataFrame) -> _Geo
             raise ValueError("geom_surface() requires aes(x=, y=, z=)")
         xcol, ycol, zcol = mapping["x"], mapping["y"], mapping["z"]
         ccol = mapping.get("color")
+        require_columns(data, [xcol, ycol, zcol])
+        # Only mesh columns cross the table→pandas boundary.
+        mesh_df = _surface_input_frame(data, xcol, ycol, zcol, ccol)
         vertices, indices, nx, ny = regular_grid_mesh(
-            data, xcol, ycol, zcol, ccol=ccol
+            mesh_df, xcol, ycol, zcol, ccol=ccol
         )
         map_kwargs: dict = {"x": "x", "y": "y", "z": "z"}
         if ccol and "colour" in vertices.columns:
@@ -350,15 +347,14 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data: pd.DataFrame) -> _Geo
         if "x" not in mapping or "y" not in mapping or "z" not in mapping:
             raise ValueError("geom_isosurface() requires aes(x=, y=, z=)")
         xcol, ycol, zcol = mapping["x"], mapping["y"], mapping["z"]
-        for col in (xcol, ycol, zcol):
-            if col not in data.columns:
-                raise KeyError(f"column(s) not in DataFrame: {[col]}")
-        pts = (
-            data.loc[:, [xcol, ycol, zcol]]
-            .apply(pd.to_numeric, errors="coerce")
-            .dropna()
-            .to_numpy(dtype=np.float64)
-        )
+        require_columns(data, [xcol, ycol, zcol])
+        # Column arrays only — no full-frame pandas conversion.
+        xs = numeric_array(data, xcol, dropna=False)
+        ys = numeric_array(data, ycol, dropna=False)
+        zs = numeric_array(data, zcol, dropna=False)
+        pts = np.column_stack([xs, ys, zs])
+        finite = np.isfinite(pts).all(axis=1)
+        pts = pts[finite]
         n_bins = int(getattr(geom, "n", 32))
         # Optional stat_density_3d on the figure is applied in build_spec.
         n_bins = int(getattr(geom, "_density_n", n_bins))
@@ -391,6 +387,33 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data: pd.DataFrame) -> _Geo
     return geom
 
 
+def _surface_input_frame(data, xcol: str, ycol: str, zcol: str, ccol: str | None):
+    """Build a small pandas frame for ``regular_grid_mesh`` (xyz [+ colour]).
+
+    Drops rows with non-finite x/y/z only; colour may remain null.
+    Only the selected mesh columns are converted — not the full source table.
+    """
+    from plot3.table import _eager_polars, _polars_to_pandas, detect_backend
+
+    cols = [xcol, ycol, zcol]
+    if ccol and has_column(data, ccol) and ccol not in cols:
+        cols.append(ccol)
+    backend = detect_backend(data)
+    if backend == "pandas":
+        work = data.loc[:, cols].copy()
+        for c in (xcol, ycol, zcol):
+            work[c] = pd.to_numeric(work[c], errors="coerce")
+        return work.dropna(subset=[xcol, ycol, zcol])
+
+    import polars as pl
+
+    frame = _eager_polars(data).select(cols)
+    for c in (xcol, ycol, zcol):
+        frame = frame.with_columns(pl.col(c).cast(pl.Float64, strict=False))
+    frame = frame.drop_nulls(subset=[xcol, ycol, zcol])
+    return _polars_to_pandas(frame)
+
+
 # Geoms that cannot enter a 3D figure (stat expansions use these kinds too).
 _2D_ONLY_KINDS = frozenset(
     {"col", "box", "area", "poly", "bar", "histogram", "boxplot", "density", "violin"}
@@ -418,11 +441,11 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         and getattr(coord, "max_points", None)
         and not has_mesh
     ):
-        n_rows = len(data)
+        nrows = n_rows(data)
         cap = int(coord.max_points)
-        if n_rows > cap:
-            step = max(1, (n_rows + cap - 1) // cap)
-            data = data.iloc[::step].copy()
+        if nrows > cap:
+            step = max(1, (nrows + cap - 1) // cap)
+            data = subsample_rows(data, step)
 
     theme = THEMES[g.theme_name]
     # Apply optional stat_density_3d options onto isosurface layers.
@@ -486,7 +509,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             sc.widen(v)
         return v
 
-    # Pass 1 — per-layer values + global scale domains
+    # Pass 1 — per-layer values + global scale domains.
+    # Only selected columns are materialised to pandas at this boundary.
     layer_vals = []
     for geom, m in resolved:
         frame = getattr(geom, "data_override", None)
@@ -499,14 +523,12 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 geom, "_stat_y_cols", ("ymin", "lower", "middle", "upper", "ymax")
             )
             cols = [xcol, *y_stat_cols]
-            if "color" in m and m["color"] in frame.columns:
+            frame_cols = get_columns(frame)
+            if "color" in m and m["color"] in frame_cols:
                 cols.append(m["color"])
-            missing = [c for c in cols if c not in frame.columns]
-            if missing:
-                raise KeyError(f"column(s) not in DataFrame: {missing}")
-            sub = frame[list(dict.fromkeys(cols))].dropna(
-                subset=[xcol, *y_stat_cols]
-            )
+            sub = materialize_columns(frame, list(dict.fromkeys(cols)))
+            # dropna already applied; for box require all stat y cols present
+            sub = sub.dropna(subset=[xcol, *y_stat_cols])
             vals = {}
             kind, v, cats = col_values(sub[xcol])
             vals["x"] = _absorb_position("x", kind, v, cats)
@@ -574,10 +596,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         cols = [m[a] for a in axes if a in m] + (
             [m["color"]] if "color" in m else []
         ) + ([m["group"]] if "group" in m else [])
-        missing = [c for c in cols if c not in frame.columns]
-        if missing:
-            raise KeyError(f"column(s) not in DataFrame: {missing}")
-        sub = frame[list(dict.fromkeys(cols))].dropna()
+        sub = materialize_columns(frame, list(dict.fromkeys(cols)))
         vals = {}
         for a in axes:
             kind, v, cats = col_values(sub[m[a]])
@@ -944,13 +963,14 @@ def _panel_grid(n: int, ncol: int | None, nrow: int | None) -> tuple[int, int]:
     return ncol, int(math.ceil(n / ncol))
 
 
-def _clone_ggplot_with_data(g: ggplot, data: pd.DataFrame) -> ggplot:
+def _clone_ggplot_with_data(g: ggplot, data) -> ggplot:
     import copy
 
-    from plot3.ggplot import ggplot as Ggplot
+    from plot3.table import detect_backend
 
     out = copy.copy(g)
     out.data = data
+    out.backend = detect_backend(data) if data is not None else None
     out.layers = list(g.layers)
     out.labs = dict(g.labs)
     out.facet = None  # panels are leaf plots
@@ -999,10 +1019,13 @@ def _global_numeric_domains(g: ggplot) -> dict[str, tuple[float, float]]:
     if "color" in mapping:
         cols["color"] = mapping["color"]
     domains: dict[str, tuple[float, float]] = {}
+    data_cols = get_columns(g.data)
     for ax, col in cols.items():
-        if col not in g.data.columns:
+        if col not in data_cols:
             continue
-        series = pd.to_numeric(g.data[col], errors="coerce").dropna()
+        # Materialise only this column at the domain boundary.
+        sub = materialize_columns(g.data, [col])
+        series = pd.to_numeric(sub[col], errors="coerce").dropna()
         if series.empty:
             continue
         lo, hi = float(series.min()), float(series.max())
@@ -1019,16 +1042,10 @@ def _build_doc_faceted(g: ggplot, facet) -> str:
     if g.data is None:
         raise ValueError("ggplot has no data")
     col = facet.variable
-    if col not in g.data.columns:
+    if not has_column(g.data, col):
         raise KeyError(f"facet column not in DataFrame: {col!r}")
 
-    if isinstance(g.data[col].dtype, pd.CategoricalDtype):
-        levels = [c for c in g.data[col].cat.categories if (g.data[col] == c).any()]
-        # also include NaN panel if present
-        if g.data[col].isna().any():
-            levels = list(levels) + [pd.NA]
-    else:
-        levels = list(dict.fromkeys(g.data[col].tolist()))
+    levels = unique_levels(g.data, col)
 
     if not levels:
         raise ValueError("facet_wrap() found no panel levels")
@@ -1041,13 +1058,17 @@ def _build_doc_faceted(g: ggplot, facet) -> str:
     cells: list[str] = []
     total_kb = 0
     for level in levels:
-        if pd.isna(level):
-            mask = g.data[col].isna()
+        is_na = level is None or (isinstance(level, float) and np.isnan(level))
+        try:
+            is_na = is_na or bool(pd.isna(level))
+        except (TypeError, ValueError):
+            pass
+        if is_na:
+            panel_data = filter_equal(g.data, col, None)
             label = "NA"
         else:
-            mask = g.data[col] == level
+            panel_data = filter_equal(g.data, col, level)
             label = str(level)
-        panel_data = g.data.loc[mask].copy()
         panel = _clone_ggplot_with_data(g, panel_data)
         # Surface facet level in the panel title.
         base_title = panel.labs.get("title", "")

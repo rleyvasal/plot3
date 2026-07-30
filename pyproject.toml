@@ -17,8 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "polars>=1.0"]
 jupyter = ["ipython>=8.0"]
+polars = ["polars>=1.0"]
 
 [project.urls]
 Homepage = "https://github.com/rleyvasal/plot3"

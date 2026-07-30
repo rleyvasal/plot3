@@ -9,8 +9,6 @@ import sys
 import webbrowser
 from pathlib import Path
 
-import pandas as pd
-
 from plot3.geoms import (
     _Geom,
     aes,
@@ -21,6 +19,7 @@ from plot3.geoms import (
     stat_density_3d,
     _Theme,
 )
+from plot3.table import as_table, detect_backend
 from plot3.themes import _THEMES
 
 
@@ -134,7 +133,8 @@ class ggplot:
         # dataframe constructor input.
         if isinstance(data, aes) and mapping is None:
             data, mapping = None, data
-        self.data = self._as_pandas(data) if data is not None else None
+        self.data = self._as_table(data) if data is not None else None
+        self.backend = self._detect_backend(self.data) if self.data is not None else None
         self.mapping = mapping or aes()
         self.layers: list[_Geom] = []
         self.labs: dict = {}
@@ -149,15 +149,13 @@ class ggplot:
         self.hide = hide  # None -> module default (autohide())
 
     @staticmethod
-    def _as_pandas(data) -> pd.DataFrame:
-        if isinstance(data, pd.DataFrame):
-            return data
-        to_pandas = getattr(data, "to_pandas", None)
-        if callable(to_pandas):
-            data = to_pandas()
-            if isinstance(data, pd.DataFrame):
-                return data
-        return pd.DataFrame(data)
+    def _as_table(data):
+        """Keep pandas / polars / tidy3 frames; wrap plain constructors as pandas."""
+        return as_table(data)
+
+    @staticmethod
+    def _detect_backend(data) -> str:
+        return detect_backend(data)
 
     def __rrshift__(self, data):
         """Bind data to a deferred ``ggplot(aes(...))`` template."""
@@ -169,7 +167,8 @@ class ggplot:
         g.facet = self.facet
         g.coord = self.coord
         g.stat_density_3d = self.stat_density_3d
-        g.data = self._as_pandas(data)
+        g.data = self._as_table(data)
+        g.backend = self._detect_backend(g.data)
         return g
 
     def __add__(self, other):
