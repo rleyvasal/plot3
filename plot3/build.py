@@ -29,7 +29,6 @@ from plot3.table import (
     unique_levels,
 )
 from plot3.themes import _CONT_PALETTES, _THEMES as THEMES
-from plot3.viewer import _DOC_TEMPLATE as DOC_TEMPLATE
 
 
 def copy_geom_with_density_n(geom: _Geom, n: int) -> _Geom:
@@ -1223,27 +1222,19 @@ def _clone_ggplot_with_data(g: ggplot, data) -> ggplot:
 
 
 def build_doc(g: ggplot) -> str:
+    """Build a standalone HTML document for *g*.
+
+    Single-panel figures go through :func:`plot3.payload.build_payload` then
+    :func:`plot3.payload.render_payload`. Faceted figures assemble a grid of
+    per-panel documents (each panel uses the same payload path).
+    """
     facet = getattr(g, "facet", None)
     if facet is not None:
         return _build_doc_faceted(g, facet)
 
-    spec, payloads = build_spec(g)
-    blocks = "\n".join(
-        f'<script type="text/plain" id="{pid}">{b64}</script>'
-        for pid, b64 in payloads
-    )
-    doc = (
-        DOC_TEMPLATE
-        .replace("__SPEC__", json.dumps(spec, separators=(",", ":")))
-        .replace("__PAYLOADS__", blocks)
-    )
-    kb = len(doc) // 1024
-    rows = sum(sp["n"] for sp in spec["layers"])
-    print(f"plot3: {len(spec['layers'])} layer(s), {rows:,} rows -> {kb:,} KB "
-          f"portable HTML{' (3D)' if spec['is3d'] else ''}")
-    if kb > 1500:
-        print("plot3: warning — figure may exceed sslive's ~1.8 MB in-slide cap")
-    return doc
+    from plot3.payload import build_payload, render_payload
+
+    return render_payload(build_payload(g), log=True)
 
 
 def _global_numeric_domains(g: ggplot) -> dict[str, tuple[float, float]]:

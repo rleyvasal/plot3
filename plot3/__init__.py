@@ -36,6 +36,12 @@ from plot3.jupyter import (
     load_ipython_extension,
     register_plot3,
 )
+from plot3.payload import (
+    PAYLOAD_VERSION,
+    build_payload,
+    render_payload,
+    validate_payload,
+)
 
 __all__ = [
     "ggplot",
@@ -69,6 +75,10 @@ __all__ = [
     "disable_r_style",
     "load_ipython_extension",
     "register_plot3",
+    "PAYLOAD_VERSION",
+    "build_payload",
+    "render_payload",
+    "validate_payload",
     "__version__",
 ]
 

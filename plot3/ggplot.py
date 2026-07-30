@@ -222,6 +222,19 @@ class ggplot:
         self._maybe_hide_from_ai()
         self.show(browser=_prefer_external_browser())
 
+    def to_payload(self) -> dict:
+        """Serialize this figure to a PlotPayload (stats + encoded blobs).
+
+        The payload is JSON-friendly (spec dict + base64 blobs) and does not
+        retain the source DataFrame. Suitable for shipping from a remote/GPU
+        kernel to a local viewer via :func:`plot3.payload.render_payload`.
+
+        Faceted figures are not supported here; use :meth:`html` / ``build_doc``.
+        """
+        from plot3.payload import build_payload
+
+        return build_payload(self)
+
     def html(self) -> str:
         """The full standalone document (what the iframe srcdoc carries)."""
         from plot3.build import build_doc
