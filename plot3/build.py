@@ -282,7 +282,12 @@ def _histogram_breaks(
     return _edges_from_binwidth(lo, hi, w, boundary)
 
 
-def expand_stat_geom(geom: _Geom, base_mapping: aes, data) -> _Geom:
+def expand_stat_geom(
+    geom: _Geom,
+    base_mapping: aes,
+    data,
+    domains: dict | None = None,
+) -> _Geom:
     """Turn statistical geoms into concrete drawable layers.
 
     Stats run against the native table backend (pandas / polars / tidy→polars).
@@ -291,6 +296,10 @@ def expand_stat_geom(geom: _Geom, base_mapping: aes, data) -> _Geom:
     Identity geoms (point / line / …) are returned unchanged and materialise
     columns at the render boundary.
     """
+    if getattr(geom, "kind", None) == "function":
+        from plot3.function import expand_function
+
+        return expand_function(geom, base_mapping, data, domains)
     mapping = dict(base_mapping)
     mapping.update(geom.mapping)
     if geom.kind == "bar":
@@ -674,14 +683,32 @@ def _default_3d_point_size(n: int, *, size_mode: str = "scene") -> float:
     return float(round(min(0.0035, max(0.00035, s)), 5))
 
 
+def _axis_label(g, base_map: dict, resolved, axis: str, is3d: bool) -> str:
+    """Axis title: labs, then the ggplot mapping, then a function's variable."""
+    if g.labs.get(axis):
+        return g.labs[axis]
+    mapped = base_map.get(axis)
+    if mapped:
+        return mapped
+    for geom, _mapping in resolved:
+        labels = getattr(geom, "_axis_labels", None)
+        if labels and labels.get(axis):
+            return str(labels[axis])
+    if axis == "z" and not is3d:
+        return ""
+    return axis
+
+
 def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
-    if g.data is None:
+    if not g.layers:
+        raise ValueError("add a geom: ggplot(df, aes(...)) + geom_point()")
+    # Function layers sample their own grid, so a figure may have no data frame.
+    needs_data = any(getattr(layer, "kind", None) != "function" for layer in g.layers)
+    if g.data is None and needs_data:
         raise ValueError(
             "ggplot has no data; use ggplot(df, aes(...)) or "
             "pipe data with `data >> ggplot(aes(...))`"
         )
-    if not g.layers:
-        raise ValueError("add a geom: ggplot(df, aes(...)) + geom_point()")
 
     data = g.data
     coord = getattr(g, "coord", None)
@@ -690,7 +717,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         getattr(layer, "kind", None) in mesh_kinds for layer in g.layers
     )
     if (
-        coord is not None
+        data is not None
+        and coord is not None
         and getattr(coord, "max_points", None)
         and not has_mesh
     ):
@@ -708,13 +736,22 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         if getattr(geom, "kind", None) == "isosurface" and density_stat is not None:
             geom = copy_geom_with_density_n(geom, density_stat.n)
         layers_in.append(geom)
+    domains = None
+    if any(getattr(layer, "kind", None) == "function" for layer in layers_in):
+        from plot3.function import data_domains
+
+        domains = data_domains(g, data)
     expanded = [
-        expand_stat_geom(geom, g.mapping, data) for geom in layers_in
+        expand_stat_geom(geom, g.mapping, data, domains) for geom in layers_in
     ]
     resolved = []  # per layer: (geom, mapping)
     for geom in expanded:
-        m = dict(g.mapping)
-        m.update(geom.mapping)
+        # Function layers carry their own columns; don't inherit colour/group.
+        if getattr(geom, "_replace_mapping", False):
+            m = dict(geom.mapping)
+        else:
+            m = dict(g.mapping)
+            m.update(geom.mapping)
         if "x" not in m or "y" not in m:
             raise ValueError("aes(x=, y=) are required (bar/histogram/density supply y)")
         if geom.kind == "surface" and "z" not in m:
@@ -908,6 +945,22 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             if scales[ax].hi <= scales[ax].lo:
                 scales[ax].hi = scales[ax].lo + 1.0
 
+    # A function's ylim/zlim clips the view even when samples sit inside it.
+    for geom, _locked_mapping in resolved:
+        lock = getattr(geom, "_axis_lock", None)
+        if not lock:
+            continue
+        for axis_name, bounds in lock.items():
+            if axis_name not in scales:
+                continue
+            lo, hi = float(bounds[0]), float(bounds[1])
+            if hi < lo:
+                lo, hi = hi, lo
+            if hi <= lo:
+                hi = lo + 1.0
+            scales[axis_name].lo = lo
+            scales[axis_name].hi = hi
+
     # Numeric colour limits: robust 2-98 percentile by default so skewed data
     # (lidar intensity) actually varies; override via scale_colour_continuous.
     num_color = None
@@ -936,6 +989,14 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         num_color = (lo_c, hi_c, cs.trans, tf)
 
     # Pass 2 — encode payloads per layer (quantized against the shared scales)
+    # Distinct default colours so several formulas can share a legend.
+    palette = theme["cat"]
+    color_slot = 0
+    for geom, _mapped in resolved:
+        if getattr(geom, "_legend_label", None) and geom.const_color is None:
+            geom.const_color = palette[color_slot % len(palette)]
+            color_slot += 1
+
     payloads: list[tuple[str, str]] = []
     layer_specs = []
     for li, ((geom, m), vals) in enumerate(zip(resolved, layer_vals)):
@@ -946,7 +1007,10 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             group_vec = vals["group"][0]
         elif vals.get("color") and vals["color"][0] == "cat":
             group_vec = vals["color"][1]
-        if geom.kind in {"line", "area"}:
+        # Precomputed breaks (implicit contours, clipped formulas) stay in order.
+        if getattr(geom, "_groups", None) is not None:
+            order = np.arange(n)
+        elif geom.kind in {"line", "area"}:
             keys = []
             if group_vec is not None:
                 keys.append(group_vec)
@@ -1083,7 +1147,15 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 spec_l["color"] = {"id": pid, "dtype": "u16", "kind": "num"}
 
         if geom.kind in {"line", "area", "poly"}:
-            if group_vec is not None:
+            preset_groups = getattr(geom, "_groups", None)
+            if preset_groups is not None:
+                spec_l["groups"] = [
+                    [int(start), int(count)] for start, count in preset_groups
+                ]
+                spec_l["linewidth"] = float(getattr(geom, "linewidth", 2.0))
+                if geom.kind in {"area", "poly"} and spec_l["alpha"] is None:
+                    spec_l["alpha"] = 0.4 if geom.kind == "area" else 0.45
+            elif group_vec is not None:
                 gv = group_vec[order]
                 cut = np.flatnonzero(np.diff(gv)) + 1
                 starts = np.concatenate([[0], cut])
@@ -1178,6 +1250,15 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             ramp = _CONT_PALETTES.get(pal, theme["seq"])
             cspec = {"kind": "num", "lo": num_color[0], "hi": num_color[1],
                      "trans": num_color[2], "ramp": ramp}
+    if legend is None:
+        entries = []
+        for geom, _mapped in resolved:
+            label = getattr(geom, "_legend_label", None)
+            if not label or not geom.const_color:
+                continue
+            entries.append({"label": str(label), "color": geom.const_color})
+        if entries:
+            legend = entries
 
     base_map = dict(g.mapping)
     if is3d:
@@ -1199,9 +1280,9 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         "theme": theme,
         "labs": {
             "title": g.labs.get("title", ""),
-            "x": g.labs.get("x", base_map.get("x", "x")),
-            "y": g.labs.get("y", base_map.get("y", "y")),
-            "z": g.labs.get("z", base_map.get("z", "z")) if is3d else "",
+            "x": _axis_label(g, base_map, resolved, "x", is3d),
+            "y": _axis_label(g, base_map, resolved, "y", is3d),
+            "z": _axis_label(g, base_map, resolved, "z", is3d) if is3d else "",
             "color": g.labs.get("color", base_map.get("color", "")),
         },
         "scales": {a: scales[a].spec() for a in axes},

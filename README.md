@@ -227,6 +227,7 @@ preserves data order while `geom_line` sorts by x, `ggsave("fig.html", p)`.
 | `stat_density_3d(n=)` | Optional density-grid settings for `geom_isosurface` |
 | `coord_3d(aspect=, size_mode=, max_points=)` | 3D aspect (`data`/`equal`), point size mode, optional subsample |
 | `geom_line(linewidth=)` / `geom_path()` | line sorts by x; path keeps data order; work in 3D too |
+| `geom_function("y = 2x + 2")` | curve, implicit contour, or `z = f(x, y)` surface; `ggplot()` needs no data |
 | `geom_col(width=)` | bars from `y` heights (ggplot2 `geom_col`) |
 | `geom_bar(width=)` | count bars for discrete `x` |
 | `geom_histogram(bins=, binwidth=, method=)` | continuous `x` histogram; auto FD bins when unset |
@@ -242,6 +243,30 @@ preserves data order while `geom_line` sorts by x, `ggsave("fig.html", p)`.
 | `ggsave(filename, p)` / `p.save(path)` | standalone HTML file |
 | `read_bin(path, stride=5)` | point-cloud `.bin` → DataFrame; `remote=True` streams via CRAFT |
 
+## Functions
+
+`geom_function` plots a formula with the same grammar as a data layer. The
+quoted string is the form that works everywhere. `^` is power, and `2x` means
+`2*x`.
+
+```python
+ggplot() + geom_function("y = 2x + 2")
+ggplot() + geom_function("y = a x^2 + b x + c", a=2, b=-3, c=1)
+ggplot() + geom_function("x^2 + y^2 = 1")          # contour where F = 0
+ggplot() + geom_function("z = sin(x) cos(y)")      # surface
+ggplot(df, aes(x="wt", y="mpg")) + geom_point() + geom_function("y = 37 - 5x")
+```
+
+In a notebook the transformer also accepts `geom_function(y = 2*x + 2)`.
+A callable is full Python: `geom_function(lambda x: x**2)`. Pass your own
+functions as keywords: `geom_function("y = damp(x) sin(3x)", damp=damp)`.
+A name such as `t` or `theta` becomes an axis label (`"v = 9.8 t"` labels x
+as `t` and y as `v`). A coefficient such as `a` must be passed at the end
+(`a=2`).
+
+`xlim` / `ylim` / `zlim` set the domain or clip the view. A curve uses `n=501`
+samples; a surface or implicit curve uses `n=80` per axis.
+
 ## Package layout
 
 ```text
@@ -250,6 +275,8 @@ plot3/
   geoms.py         # aes, geoms, labs, colour scales, themes
   ggplot.py        # ggplot, ggsave, autohide
   build.py         # stats expand + layer/spec encoding
+  expr.py          # formula parser for geom_function
+  function.py      # sample formulas into lines and surfaces
   viewer.py        # three.js HTML template
   encode.py        # quantize / gzip payloads
   scales.py        # positional scales & ticks

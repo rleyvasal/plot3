@@ -272,6 +272,94 @@ class geom_line(geom_path):
     sort_x = True  # ggplot2 geom_line: connect in order of x
 
 
+class geom_function(_Geom):
+    """Draw a formula or callable as a curve or surface.
+
+    The quoted string is the form that works in scripts and notebooks::
+
+        ggplot() + geom_function("y = 2x + 2")
+        ggplot() + geom_function("z = sin(x) cos(y)", xlim=(-4, 4), ylim=(-4, 4))
+        ggplot() + geom_function("y = a x^2 + b", a=1, b=-2)
+
+    In a notebook, the same expression can be written without quotes
+    (``geom_function(y = 2*x + 2)``). A callable is full Python::
+
+        ggplot() + geom_function(lambda x: np.where(x < 0, 0, x**2))
+
+    ``xlim`` / ``ylim`` / ``zlim`` are axis limits. On a curve, ``xlim`` is
+    the domain and ``ylim`` clips the view. On a surface, ``xlim`` and
+    ``ylim`` are the domain and ``zlim`` clips the view. ``n`` is the sample
+    count (default 501 on a curve, 80 per axis on a surface or implicit curve).
+    """
+
+    kind = "function"
+
+    def __init__(
+        self,
+        expr=None,
+        mapping=None,
+        *,
+        y=None,
+        z=None,
+        f=None,
+        xlim=None,
+        ylim=None,
+        zlim=None,
+        n=None,
+        linewidth=None,
+        wireframe: bool = False,
+        color=None,
+        colour=None,
+        alpha=None,
+        **params,
+    ):
+        from plot3.expr import parse_formula
+
+        super().__init__(
+            mapping, color=color, colour=colour, alpha=alpha, **params
+        )
+        bound = dict(params)
+        formula = expr
+        lhs_name = None
+        if formula is not None:
+            if y is not None:
+                bound["y"] = y
+            if z is not None:
+                bound["z"] = z
+            if f is not None:
+                bound["f"] = f
+        elif y is not None:
+            formula = y
+            lhs_name = "y"
+        elif z is not None:
+            formula = z
+            lhs_name = "z"
+        elif f is not None:
+            formula = f
+            lhs_name = "f"
+        # Notebook form ``geom_function(y = 2*x + 2)`` arrives as the keyword
+        # value only. Put that name back on the left of the formula.
+        if (
+            lhs_name
+            and isinstance(formula, str)
+            and "=" not in formula
+        ):
+            formula = f"{lhs_name} = {formula}"
+        if formula is None:
+            raise ValueError(
+                'geom_function() needs a formula, for example '
+                'geom_function("y = 2x + 2")'
+            )
+        self.formula = parse_formula(formula, bound)
+        self.xlim = xlim
+        self.ylim = ylim
+        self.zlim = zlim
+        self.n = None if n is None else int(n)
+        self.linewidth = None if linewidth is None else float(linewidth)
+        self.wireframe = bool(wireframe)
+        self.params = bound
+
+
 class geom_col(_Geom):
     """Bars with heights from ``y`` (ggplot2 ``geom_col``).
 

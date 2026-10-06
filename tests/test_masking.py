@@ -89,6 +89,33 @@ def test_ggplot_aes_chain_source():
     assert 'y="mpg"' in out or "y='mpg'" in out
 
 
+def test_geom_function_formula_is_quoted():
+    out = _norm("geom_function(y = 2*x + 2)")
+    assert "geom_function" in out
+    assert "2 * x + 2" in out or "2*x+2" in out
+    assert out.count("geom_function") == 1
+
+
+def test_geom_function_caret_is_power():
+    out = _norm("geom_function(y = x^2 + 1)")
+    assert "**" in out
+    assert "^" not in out
+
+
+def test_geom_function_leaves_parameters_and_limits():
+    out = _norm("geom_function(y = a*x**2 + b, a=2, b=1, xlim=(0, x_max))")
+    assert "x**2" in out or "x ** 2" in out
+    assert "a=2" in out or "a = 2" in out
+    assert "x_max" in out
+    assert "xlim" in out
+
+
+def test_geom_function_lambda_stays_python():
+    out = _norm("geom_function(lambda x: x**2)")
+    assert "lambda" in out
+    assert 'lambda x: x**2' in out or "lambda x: x ** 2" in out
+
+
 def test_known_names_not_rewritten():
     known = default_known_names({"wt", "my_x"})
     out = apply_masking("aes(x=wt, y=mpg)", known=known)

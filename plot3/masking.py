@@ -210,6 +210,8 @@ class Plot3MaskTransformer(ast.NodeTransformer):
             return self.generic_visit(node)
 
         name = node.func.id
+        if name == "geom_function":
+            return self._visit_geom_function(node)
         if name not in _SELECTOR_FUNCS:
             return self.generic_visit(node)
 
@@ -240,6 +242,71 @@ class Plot3MaskTransformer(ast.NodeTransformer):
             return node
 
         return self.generic_visit(node)
+
+    def _visit_geom_function(self, node: ast.Call) -> ast.AST:
+        """Stringify the formula argument only (``y=``, ``z=``, ``f=``, or first).
+
+        ``a=``, ``xlim=``, ``n=`` and other keywords stay Python so they
+        evaluate normally. ``^`` inside the formula is read as power.
+        """
+        known = self._known()
+        formula_done = False
+        new_args: list[ast.AST] = []
+        for index, arg in enumerate(node.args):
+            if index == 0 and not formula_done and _is_formula_expr(arg, known):
+                new_args.append(_formula_string(arg))
+                formula_done = True
+            else:
+                new_args.append(self.visit(arg))
+        new_kws: list[ast.keyword] = []
+        for kw in node.keywords:
+            if (
+                not formula_done
+                and kw.arg in {"y", "z", "f"}
+                and _is_formula_expr(kw.value, known)
+            ):
+                new_kws.append(
+                    ast.keyword(arg=kw.arg, value=_formula_string(kw.value))
+                )
+                formula_done = True
+            else:
+                new_kws.append(
+                    ast.keyword(arg=kw.arg, value=self.visit(kw.value))
+                )
+        node.args = new_args
+        node.keywords = new_kws
+        return node
+
+
+class _BitXorToPow(ast.NodeTransformer):
+    """Notebook ``x^2`` is bitwise xor; formulas read it as power."""
+
+    def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.op, ast.BitXor):
+            node.op = ast.Pow()
+        return node
+
+
+def _is_formula_expr(node: ast.AST, known: set[str]) -> bool:
+    """True when this argument is a formula to quote, not a Python value."""
+    if isinstance(node, ast.Lambda):
+        return False
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return False
+    if isinstance(node, (ast.Attribute, ast.Subscript)):
+        return False
+    if isinstance(node, ast.Name) and node.id in known:
+        return False
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        return False
+    return True
+
+
+def _formula_string(node: ast.AST) -> ast.Constant:
+    rewritten = _BitXorToPow().visit(node)
+    text = ast.unparse(rewritten)
+    return ast.copy_location(ast.Constant(value=text), node)
 
 
 def apply_masking(

@@ -17,6 +17,7 @@ REQUIRED = {
     "geom_histogram",
     "geom_boxplot",
     "geom_density",
+    "geom_function",
     "geom_violin",
     "geom_surface",
     "geom_isosurface",

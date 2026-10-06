@@ -292,7 +292,7 @@ class ggplot:
         bundle: dict = {"text/html": self._iframe()}
         try:
             if self.facet is None and (
-                self._payload is not None or self.data is not None
+                self._payload is not None or self.data is not None or self.layers
             ):
                 bundle[MIME_PLOT3] = self.to_payload()
         except Exception:
