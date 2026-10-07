@@ -318,3 +318,137 @@ def test_masking_size_and_transition_column():
     assert "year" in out and ("'year'" in out or '"year"' in out)
     assert "'pop'" in out or '"pop"' in out
     assert "'country'" in out or '"country"' in out
+
+
+def test_unbound_coefficient_errors_at_build_time():
+    from plot3 import geom_function
+    from plot3.expr import ExprError
+
+    layer = geom_function("y = a x^2")
+    assert layer.formula.pending == ("a",)
+    assert layer.formula.variables == ("x",)
+    with pytest.raises(ExprError, match=r"transition_time\(a=\(0, 3\)\)"):
+        build_spec(ggplot() + layer)
+
+
+def test_function_parameter_sweep_fixes_axes():
+    import json
+
+    from plot3 import geom_function
+
+    spec, payloads = build_spec(
+        ggplot() + geom_function("y = a x^2") + transition_time(a=(0, 3))
+    )
+    json.dumps(spec)
+    tr = spec["transition"]
+    assert tr["nFrames"] == 60
+    assert tr["type"] == "time"
+    assert tr["params"] == [{"name": "a", "lo": 0.0, "hi": 3.0}]
+    assert spec["scales"]["x"]["lo"] == pytest.approx(-10)
+    assert spec["scales"]["x"]["hi"] == pytest.approx(10)
+    assert spec["scales"]["y"]["lo"] == pytest.approx(0)
+    assert spec["scales"]["y"]["hi"] == pytest.approx(300)
+    layer = spec["layers"][0]
+    assert layer["frames"]["nFrames"] == 60
+    y = _u16(_blob(payloads, layer["frames"]["y"]["id"]))
+    mat = y.reshape(-1, 60)
+    assert int(mat[:, 0].max()) == 0
+    assert int(mat[:, -1].max()) == 65535
+
+
+def test_function_sweep_uses_every_frame_for_the_scale():
+    # The last frame is y = 0. The middle frame is y = x on [-10, 10].
+    from plot3 import geom_function
+
+    spec, _payloads = build_spec(
+        ggplot()
+        + geom_function("y = sin(a) x")
+        + transition_time(a=(0, math.pi), frames=5)
+    )
+    assert spec["transition"]["nFrames"] == 5
+    assert spec["scales"]["y"]["lo"] == pytest.approx(-10)
+    assert spec["scales"]["y"]["hi"] == pytest.approx(10)
+
+
+def test_transition_time_column_xor_ranges():
+    with pytest.raises(TypeError, match="takes a column"):
+        transition_time()
+    with pytest.raises(TypeError, match="takes a column"):
+        transition_time("year", a=(0, 3))
+    swept = transition_time(a=(3, 0))
+    assert swept.column is None
+    assert swept.ranges["a"] == (0.0, 3.0)
+    assert swept.frames == 60
+    with pytest.raises(ValueError, match="at least 2"):
+        transition_time(a=(0, 1), frames=1)
+
+
+def test_masking_keeps_transition_ranges_as_python():
+    import ast
+
+    src = "transition_time(a=(0, 2*pi), frames=30)"
+    out = ast.unparse(ast.parse(apply_masking(src, known=default_known_names())))
+    assert "2 * pi" in out or "2*pi" in out
+    assert "'pi'" not in out and '"pi"' not in out
+    named = ast.unparse(
+        ast.parse(
+            apply_masking("transition_time(column=year)", known=default_known_names())
+        )
+    )
+    assert "'year'" in named or '"year"' in named
+
+
+def test_parameter_ranges_reject_point_layers():
+    df = pd.DataFrame({"x": [1.0], "y": [1.0]})
+    with pytest.raises(ValueError, match="geom_function"):
+        build_spec(
+            ggplot(df, aes(x="x", y="y"))
+            + geom_point()
+            + transition_time(a=(0, 1))
+        )
+
+
+def test_implicit_parameter_sweep_steps():
+    from plot3 import geom_function
+
+    spec, _payloads = build_spec(
+        ggplot()
+        + geom_function("x^2 + y^2 = a", n=20)
+        + transition_time(a=(1, 4), frames=3)
+    )
+    frames = spec["layers"][0]["frames"]
+    assert frames["mode"] == "step"
+    assert frames["nFrames"] == 3
+    counts = [span[1] for span in frames["spans"]]
+    assert all(count >= 2 for count in counts)
+    assert len(set(counts)) > 1
+
+
+def test_surface_parameter_sweep_uses_middle_frames():
+    from plot3 import geom_function
+
+    spec, _payloads = build_spec(
+        ggplot()
+        + geom_function("z = sin(a) sin(x) cos(y)", n=8)
+        + transition_time(a=(0, math.pi), frames=5)
+    )
+    assert spec["is3d"] is True
+    assert spec["layers"][0]["kind"] == "surface"
+    assert spec["layers"][0]["frames"]["nFrames"] == 5
+    # Quiet frames must not pull the robust window in and clip the wave.
+    assert not spec.get("notes")
+    assert spec["scales"]["z"]["lo"] == pytest.approx(-0.83, abs=0.05)
+    assert spec["scales"]["z"]["hi"] == pytest.approx(0.83, abs=0.05)
+
+
+def test_parameter_sweep_still_clips_poles():
+    from plot3 import geom_function
+
+    spec, _payloads = build_spec(
+        ggplot()
+        + geom_function("y = a tan(x)", xlim=(-3, 3), n=201)
+        + transition_time(a=(0, 1), frames=5)
+    )
+    assert spec["notes"][0].startswith("y clipped to [")
+    assert spec["scales"]["y"]["hi"] == pytest.approx(12.46, abs=0.1)
+    assert spec["layers"][0]["frames"]["nFrames"] == 5

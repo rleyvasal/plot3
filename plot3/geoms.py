@@ -319,6 +319,7 @@ class geom_function(_Geom):
         ggplot() + geom_function("y = 2x + 2")
         ggplot() + geom_function("z = sin(x) cos(y)", xlim=(-4, 4), ylim=(-4, 4))
         ggplot() + geom_function("y = a x^2 + b", a=1, b=-2)
+        ggplot() + geom_function("y = a x^2") + transition_time(a=(0, 3))
 
     A raw LaTeX string is accepted too. Without the ``r`` prefix Python
     eats the backslashes (``\\frac`` becomes a form feed) before plot3
@@ -411,7 +412,9 @@ class geom_function(_Geom):
                 'geom_function() needs a formula, for example '
                 'geom_function("y = 2x + 2")'
             )
-        self.formula = parse_formula(formula, bound)
+        # Defer unbound coefficients (``a`` in ``y = a x^2``). The transition
+        # is added with ``+`` afterwards, so it does not exist yet.
+        self.formula = parse_formula(formula, bound, defer_missing=True)
         self.xlim = xlim
         self.ylim = ylim
         self.zlim = zlim
@@ -719,18 +722,47 @@ class scale_y_log10:
     axis = "y"
 
 
+def _as_range(value, name: str) -> tuple[float, float]:
+    """A finite ``(lo, hi)`` pair. Inverted pairs are swapped."""
+    pair = None
+    if isinstance(value, (tuple, list, np.ndarray)) and not isinstance(
+        value, (str, bytes)
+    ):
+        try:
+            if len(value) == 2:
+                pair = value
+        except TypeError:
+            pair = None
+    if pair is not None:
+        try:
+            lo = float(pair[0])
+            hi = float(pair[1])
+        except (TypeError, ValueError):
+            lo = hi = float("nan")
+        else:
+            if math.isfinite(lo) and math.isfinite(hi):
+                if hi < lo:
+                    lo, hi = hi, lo
+                return (lo, hi)
+    raise TypeError(
+        f"transition_time() range {name} must be a pair of numbers, "
+        f"for example {name}=(0, 3)"
+    )
+
+
 class transition_time:
-    """Animate a point layer over a continuous column.
+    """Animate points over a column, or a formula over parameter ranges.
 
-    Each ``aes(group=)`` value is one object (a country). Rows are the
-    keyframes of that object. The viewer stores every keyframe and
-    interpolates in the browser, in scale space, with the axes held fixed
-    on the range of every frame. The clock runs linearly from the first
-    time value to the last, so a ten-year gap takes ten times as long as
-    a one-year gap.
+    Column form (Gapminder). Each ``aes(group=)`` value is one object.
+    Rows are the keyframes of that object. The viewer stores every
+    keyframe and interpolates in the browser, in scale space, with the
+    axes held fixed on the range of every frame. The clock runs linearly
+    from the first time value to the last, so a ten-year gap takes ten
+    times as long as a one-year gap.
 
-    ``{frame_time}`` in a title or axis label is replaced by the current
-    frame value while the chart plays.
+    Range form. ``transition_time(a=(0, 3))`` sweeps every unbound
+    coefficient of a ``geom_function`` together across ``frames`` steps
+    (default 60). ``{frame_time}`` shows the parameters (``a = 1.50``).
 
         (
             ggplot(df, aes(x="gdp", y="life", size="pop", colour="continent",
@@ -740,15 +772,30 @@ class transition_time:
             + transition_time("year")
             + labs(title="{frame_time}")
         )
+
+        ggplot() + geom_function("y = a x^2") + transition_time(a=(0, 3))
     """
 
     kind = "time"
 
-    def __init__(self, column):
-        name = _as_column_name(column)
-        if not isinstance(name, str) or not name:
-            raise TypeError("transition_time() needs a column name")
-        self.column = name
+    def __init__(self, column=None, *, frames: int = 60, **ranges):
+        if (column is None) == (not ranges):
+            raise TypeError(
+                "transition_time() takes a column (transition_time('year')) "
+                "or parameter ranges (transition_time(a=(0, 3)))"
+            )
+        if column is None:
+            self.column = None
+        else:
+            name = _as_column_name(column)
+            if not isinstance(name, str) or not name:
+                raise TypeError("transition_time() needs a column name")
+            self.column = name
+        self.ranges = {k: _as_range(v, k) for k, v in ranges.items()}
+        nframes = int(frames)
+        if self.ranges and nframes < 2:
+            raise ValueError("transition_time() needs at least 2 frames")
+        self.frames = nframes
 
 
 class transition_states:

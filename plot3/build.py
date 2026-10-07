@@ -296,6 +296,7 @@ def expand_stat_geom(
     base_mapping: aes,
     data,
     domains: dict | None = None,
+    transition=None,
 ) -> _Geom:
     """Turn statistical geoms into concrete drawable layers.
 
@@ -308,7 +309,7 @@ def expand_stat_geom(
     if getattr(geom, "kind", None) == "function":
         from plot3.function import expand_function
 
-        return expand_function(geom, base_mapping, data, domains)
+        return expand_function(geom, base_mapping, data, domains, transition)
     mapping = dict(base_mapping)
     mapping.update(geom.mapping)
     if geom.kind == "bar":
@@ -931,6 +932,37 @@ def _pivot_transition(sub: pd.DataFrame, mapping: dict, transition) -> dict:
     }
 
 
+def _range_transition_meta(transition) -> dict:
+    """Clock for a parameter sweep. Times follow the first range."""
+    names = list(transition.ranges)
+    first = names[0]
+    lo, hi = transition.ranges[first]
+    n_frames = int(transition.frames)
+    times_arr = np.linspace(float(lo), float(hi), n_frames)
+    scale = np.maximum(1.0, np.abs(times_arr))
+    integer = bool(
+        np.all(np.abs(times_arr - np.round(times_arr)) <= 1e-6 * scale)
+    )
+    if integer:
+        times = [int(round(float(t))) for t in times_arr]
+    else:
+        times = [float(t) for t in times_arr]
+    params = [
+        {"name": name, "lo": float(bounds[0]), "hi": float(bounds[1])}
+        for name, bounds in transition.ranges.items()
+    ]
+    return {
+        "type": "time",
+        "column": first,
+        "nFrames": n_frames,
+        "times": times,
+        "integer": integer,
+        "ease": "linear",
+        "duration": 12,
+        "params": params,
+    }
+
+
 def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if not g.layers:
         raise ValueError("add a geom: ggplot(df, aes(...)) + geom_point()")
@@ -968,13 +1000,15 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         if getattr(geom, "kind", None) == "isosurface" and density_stat is not None:
             geom = copy_geom_with_density_n(geom, density_stat.n)
         layers_in.append(geom)
+    transition = getattr(g, "transition", None)
     domains = None
     if any(getattr(layer, "kind", None) == "function" for layer in layers_in):
         from plot3.function import data_domains
 
         domains = data_domains(g, data)
     expanded = [
-        expand_stat_geom(geom, g.mapping, data, domains) for geom in layers_in
+        expand_stat_geom(geom, g.mapping, data, domains, transition)
+        for geom in layers_in
     ]
     resolved = []  # per layer: (geom, mapping)
     for geom in expanded:
@@ -1004,20 +1038,44 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if is3d and getattr(g, "facet", None) is not None:
         raise ValueError("facet_wrap() is not supported with 3D figures yet")
 
-    transition = getattr(g, "transition", None)
     if transition is not None:
         tname = (
             "transition_states" if transition.kind == "states" else "transition_time"
         )
-        kinds = {geom.kind for geom, _ in resolved}
-        if "point" not in kinds:
-            raise ValueError(f"{tname}() needs a geom_point layer")
-        extra = sorted(kinds - {"point"})
-        if extra:
-            raise ValueError(
-                f"{tname}() animates geom_point layers only "
-                f"(this figure also has {extra})"
+        # geom_function has already become a line, path, or surface. A
+        # parameter sweep is recognised by the formula stamp, not by kind.
+        if getattr(transition, "ranges", None):
+            formula_layers = [
+                geom
+                for geom, _mapped in resolved
+                if getattr(geom, "_is_formula", False)
+            ]
+            if not formula_layers:
+                raise ValueError(
+                    "transition_time() parameter ranges need a geom_function layer"
+                )
+            extra = sorted(
+                {
+                    geom.kind
+                    for geom, _mapped in resolved
+                    if not getattr(geom, "_is_formula", False)
+                }
             )
+            if extra:
+                raise ValueError(
+                    "transition_time() parameter ranges animate geom_function "
+                    f"layers only (this figure also has {extra})"
+                )
+        else:
+            kinds = {geom.kind for geom, _ in resolved}
+            if "point" not in kinds:
+                raise ValueError(f"{tname}() needs a geom_point layer")
+            extra = sorted(kinds - {"point"})
+            if extra:
+                raise ValueError(
+                    f"{tname}() animates geom_point layers only "
+                    f"(this figure also has {extra})"
+                )
 
     axes = ["x", "y", "z"] if is3d else ["x", "y"]
     scales: dict[str, Scale] = {}
@@ -1026,6 +1084,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     dropped_log = 0
     size_label = str(g.labs.get("size") or "")
     transition_meta: dict | None = None
+    if transition is not None and getattr(transition, "ranges", None):
+        transition_meta = _range_transition_meta(transition)
 
     def _axis_trans(axis: str) -> str | None:
         if axis == "x" and getattr(g, "scale_x", None) is not None:
@@ -1121,10 +1181,67 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             )
         _filter_rows(vals, ok)
 
+    def _vals_from_step(anim: dict) -> dict:
+        parts_x = []
+        parts_y = []
+        spans = []
+        groups = []
+        cursor = 0
+        for fr in anim["frames"]:
+            xs = np.asarray(fr["x"], dtype=np.float64).ravel()
+            ys = np.asarray(fr["y"], dtype=np.float64).ravel()
+            parts_x.append(xs)
+            parts_y.append(ys)
+            spans.append([cursor, int(xs.size)])
+            groups.append([[int(a), int(b)] for a, b in fr["groups"]])
+            cursor += int(xs.size)
+        all_x = np.concatenate(parts_x) if cursor else np.zeros(0)
+        all_y = np.concatenate(parts_y) if cursor else np.zeros(0)
+        tx = np.asarray(_absorb_position("x", "num", all_x, []), dtype=np.float64)
+        ty = np.asarray(_absorb_position("y", "num", all_y, []), dtype=np.float64)
+        static_i = int(anim.get("static", len(spans) - 1))
+        start, count = spans[static_i]
+        return {
+            "x": tx[start:start + count].copy(),
+            "y": ty[start:start + count].copy(),
+            "frames": {
+                "mode": "step",
+                "nFrames": int(len(spans)),
+                "spans": spans,
+                "groups": groups,
+                "x": tx,
+                "y": ty,
+            },
+        }
+
+    def _vals_from_function_anim(anim: dict) -> dict:
+        if anim.get("mode") == "step":
+            return _vals_from_step(anim)
+        channels = anim["channels"]
+        sample = next(iter(channels.values()))
+        _n, n_frames = sample.shape
+        frames = {
+            "mode": "tween",
+            "nFrames": int(n_frames),
+            "nObj": int(sample.shape[0]),
+        }
+        vals = {"frames": frames}
+        for axis_name, mat in channels.items():
+            mat = np.asarray(mat, dtype=np.float64)
+            flat = _absorb_position(axis_name, "num", mat.ravel(), [])
+            stored = np.asarray(flat, dtype=np.float64).reshape(mat.shape)
+            frames[axis_name] = stored
+            vals[axis_name] = stored[:, -1].copy()
+        return vals
+
     # Pass 1 — per-layer values + global scale domains.
     # Only selected columns are materialised to pandas at this boundary.
     layer_vals = []
     for geom, m in resolved:
+        anim = getattr(geom, "_anim", None)
+        if anim is not None:
+            layer_vals.append(_vals_from_function_anim(anim))
+            continue
         frame = getattr(geom, "data_override", None)
         if frame is None:
             frame = data
@@ -1210,11 +1327,15 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         ) + ([m["group"]] if "group" in m else [])
         if geom.kind == "point" and "size" in m:
             cols.append(m["size"])
-        if transition is not None:
+        if transition is not None and getattr(transition, "column", None):
             cols.append(transition.column)
         sub = materialize_columns(frame, list(dict.fromkeys(cols)))
 
-        if transition is not None and geom.kind == "point":
+        if (
+            transition is not None
+            and geom.kind == "point"
+            and not getattr(transition, "ranges", None)
+        ):
             pivot = _pivot_transition(sub, m, transition)
             channels: dict[str, np.ndarray] = {}
             if "size" in m:
@@ -1731,7 +1852,21 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         if spec_l["alpha"] is None:
             spec_l["alpha"] = 1.0
         frames = vals.get("frames")
-        if frames and geom.kind == "point":
+        if frames and frames.get("mode") == "step":
+            spec_l["frames"] = {
+                "mode": "step",
+                "nFrames": int(frames["nFrames"]),
+                "spans": frames["spans"],
+                "groups": frames["groups"],
+            }
+            for axis_name in ("x", "y"):
+                spec_l["frames"][axis_name] = _encode_matrix(
+                    axis_name,
+                    frames[axis_name],
+                    scales[axis_name].lo,
+                    scales[axis_name].hi,
+                )
+        elif frames and geom.kind == "point":
             spec_l["frames"] = {
                 "nFrames": int(frames["nFrames"]),
                 "nObj": int(frames["nObj"]),
@@ -1781,6 +1916,17 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                     ch = _encode_matrix("c", transformed, lo_t, hi_t)
                     ch["kind"] = "num"
                     spec_l["frames"]["color"] = ch
+        elif frames:
+            spec_l["frames"] = {
+                "nFrames": int(frames["nFrames"]),
+                "nObj": int(frames["nObj"]),
+            }
+            for a in axes:
+                if frames.get(a) is None:
+                    continue
+                spec_l["frames"][a] = _encode_matrix(
+                    a, frames[a], scales[a].lo, scales[a].hi
+                )
         if geom.kind == "point":
             labels = None
             if isinstance(vals.get("ids"), list) and len(vals["ids"]) == n:

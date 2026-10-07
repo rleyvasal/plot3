@@ -7,13 +7,14 @@ with ``data_override`` already filled — the same path bar and density stats us
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from plot3.contour import _contour_lines, _refine_active_cells
-from plot3.expr import ExprError, Formula, evaluate
+from plot3.expr import ExprError, Formula, _missing_param_build_message, evaluate
 from plot3.mathtext import split_math
 from plot3.geoms import _Geom, aes, geom_line, geom_path
 from plot3.stats3d import regular_grid_mesh
@@ -67,11 +68,20 @@ def expand_function(
     base_mapping: Any,
     data: Any,
     domains: dict[str, tuple[float, float]] | None = None,
+    transition: Any = None,
 ) -> _Geom:
     """Turn ``geom_function`` into a line, path, or surface layer."""
     del base_mapping, data  # the formula carries its own samples
     formula: Formula = geom.formula
     domains = domains or {}
+    pending = tuple(getattr(formula, "pending", ()) or ())
+    ranges = getattr(transition, "ranges", None) or {}
+    if pending:
+        missing = [name for name in pending if name not in ranges]
+        if missing:
+            raise ExprError(_missing_param_build_message(missing[0]))
+        axes = _assign_axes(formula)
+        return _expand_animated(geom, formula, axes, domains, transition)
     axes = _assign_axes(formula)
     if axes.kind == "surface":
         return _expand_surface(geom, formula, axes, domains)
@@ -555,4 +565,338 @@ def _expand_implicit(
     out._implicit = True
     _stamp_formula(out, geom, formula)
     out._axis_labels = {"x": axes.x, "y": axes.y}
+    return out
+
+
+_MISSING = object()
+
+
+@contextmanager
+def _bound_params(formula: Formula, params: dict[str, float]):
+    """Inject sweep values for one frame, then restore the namespace."""
+    saved: list[tuple[str, Any]] = []
+    try:
+        for name, value in params.items():
+            saved.append((name, formula.namespace.get(name, _MISSING)))
+            formula.namespace[name] = float(value)
+        yield
+    finally:
+        for name, old in saved:
+            if old is _MISSING:
+                formula.namespace.pop(name, None)
+            else:
+                formula.namespace[name] = old
+
+
+def _sweep(transition: Any) -> list[dict[str, float]]:
+    """One shared step for every parameter, from lo to hi across ``frames``."""
+    count = int(transition.frames)
+    weights = np.linspace(0.0, 1.0, count)
+    steps: list[dict[str, float]] = []
+    for weight in weights:
+        t = float(weight)
+        steps.append(
+            {
+                name: float(lo + t * (hi - lo))
+                for name, (lo, hi) in transition.ranges.items()
+            }
+        )
+    return steps
+
+
+def _shared_frame_window(
+    mat: np.ndarray,
+) -> tuple[float, float, bool]:
+    """One clip window from every frame, without letting quiet frames shrink it.
+
+    A frame that stays inside its own robust window contributes its true
+    min and max. A frame with a pole contributes only that robust window.
+    Quiet frames (``a = 0``) would otherwise pull a pooled median toward
+    zero and clip a wave that is perfectly finite on its own.
+    """
+    healthy_lo = float("inf")
+    healthy_hi = -float("inf")
+    robust_lo = float("inf")
+    robust_hi = -float("inf")
+    any_blow = False
+    any_healthy = False
+    for col in range(mat.shape[1]):
+        values = mat[:, col]
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            continue
+        lo, hi, blew_up = _robust_window(values)
+        if blew_up:
+            any_blow = True
+            robust_lo = min(robust_lo, lo)
+            robust_hi = max(robust_hi, hi)
+        else:
+            any_healthy = True
+            healthy_lo = min(healthy_lo, float(np.min(values)))
+            healthy_hi = max(healthy_hi, float(np.max(values)))
+    if not any_blow:
+        return 0.0, 0.0, False
+    if any_healthy:
+        lo = min(robust_lo, healthy_lo)
+        hi = max(robust_hi, healthy_hi)
+    else:
+        lo, hi = robust_lo, robust_hi
+    if hi <= lo:
+        hi = lo + 1.0
+    return lo, hi, True
+
+
+def _clip_matrix(
+    mat: np.ndarray,
+    view_lim: tuple[float, float] | None,
+    view_axis: str,
+    note_name: str | None,
+) -> tuple[np.ndarray, tuple[float, float] | None, str | None]:
+    """One window for every frame. Vertices stay; poles are clipped, not dropped."""
+    finite = mat[np.isfinite(mat)]
+    if finite.size == 0:
+        raise ExprError("geom_function() is undefined everywhere on this domain")
+    if view_lim is not None:
+        lo, hi = view_lim
+        filled = np.where(np.isfinite(mat), mat, lo)
+        return np.clip(filled, lo, hi), (lo, hi), None
+    lo, hi, blew_up = _shared_frame_window(mat)
+    if blew_up:
+        filled = np.where(np.isfinite(mat), mat, lo)
+        return (
+            np.clip(filled, lo, hi),
+            (lo, hi),
+            _clip_note(note_name or view_axis, lo, hi, param=view_axis),
+        )
+    fill = float(np.median(finite))
+    return np.where(np.isfinite(mat), mat, fill), None, None
+
+
+def _curve_matrix(
+    formula: Formula, samples: np.ndarray, steps: list[dict[str, float]]
+) -> np.ndarray:
+    columns = []
+    for params in steps:
+        with _bound_params(formula, params):
+            columns.append(_curve_values(formula, None, samples))
+    return np.column_stack(columns)
+
+
+def _expand_animated(geom, formula, axes, domains, transition) -> _Geom:
+    if axes.kind == "surface":
+        return _expand_surface_anim(geom, formula, axes, domains, transition)
+    if axes.kind == "implicit":
+        return _expand_implicit_anim(geom, formula, axes, domains, transition)
+    return _expand_curve_anim(geom, formula, axes, domains, transition)
+
+
+def _expand_curve_anim(geom, formula, axes, domains, transition) -> _Geom:
+    # Same samples on every frame, so the line can tween vertex for vertex.
+    sample_axis = "y" if axes.computed == "x" else "x"
+    (lo, hi), source = _domain_for(geom, sample_axis, domains)
+    count = _sample_count(geom, grid=False)
+    samples = _linspace(lo, hi, count)
+    steps = _sweep(transition)
+    mat = _curve_matrix(formula, samples, steps)
+    if source == "default":
+        finite = np.isfinite(mat)
+        fraction = float(np.mean(finite)) if finite.size else 0.0
+        if 0.0 < fraction < 0.55:
+            good = np.any(finite, axis=1)
+            if np.any(good):
+                nlo = float(np.min(samples[good]))
+                nhi = float(np.max(samples[good]))
+                if nhi > nlo:
+                    samples = _linspace(nlo, nhi, count)
+                    mat = _curve_matrix(formula, samples, steps)
+    view_axis = "x" if axes.computed == "x" else "y"
+    view_lim = _limit_pair(getattr(geom, view_axis + "lim", None), view_axis + "lim")
+    view_name = axes.x if view_axis == "x" else axes.y
+    mat, lock, note = _clip_matrix(mat, view_lim, view_axis, view_name)
+    n_frames = mat.shape[1]
+    repeated = np.repeat(samples[:, None], n_frames, axis=1)
+    if axes.computed == "x":
+        x_mat, y_mat = mat, repeated
+    else:
+        x_mat, y_mat = repeated, mat
+    frame = pd.DataFrame(
+        {
+            "x": np.asarray(x_mat[:, -1], dtype=np.float64),
+            "y": np.asarray(y_mat[:, -1], dtype=np.float64),
+        }
+    )
+    maker = geom_path if axes.computed == "x" else geom_line
+    linewidth = getattr(geom, "linewidth", None)
+    out = maker(
+        aes(x="x", y="y"),
+        linewidth=2.0 if linewidth is None else linewidth,
+        color=geom.const_color,
+        alpha=geom.alpha,
+    )
+    out.data_override = frame
+    out._groups = [[0, int(samples.size)]]
+    out._replace_mapping = True
+    _stamp_formula(out, geom, formula)
+    out._axis_labels = {"x": axes.x, "y": axes.y}
+    if lock is not None:
+        out._axis_lock = {view_axis: lock}
+    if note:
+        out._notes = [note]
+    out._anim = {
+        "mode": "tween",
+        "channels": {"x": x_mat, "y": y_mat},
+    }
+    return out
+
+
+def _expand_surface_anim(geom, formula, axes, domains, transition) -> _Geom:
+    count = _sample_count(geom, grid=True)
+    (xlo, xhi), x_source = _domain_for(geom, "x", domains)
+    (ylo, yhi), y_source = _domain_for(geom, "y", domains)
+    xs = _linspace(xlo, xhi, count)
+    ys = _linspace(ylo, yhi, count)
+    steps = _sweep(transition)
+
+    def grids(x_axis: np.ndarray, y_axis: np.ndarray) -> np.ndarray:
+        layers = []
+        for params in steps:
+            with _bound_params(formula, params):
+                layers.append(_surface_values(formula, axes, x_axis, y_axis))
+        return np.stack(layers, axis=-1)
+
+    stack = grids(xs, ys)
+    finite = np.isfinite(stack)
+    fraction = float(np.mean(finite)) if finite.size else 0.0
+    narrow_x = x_source == "default"
+    narrow_y = y_source == "default"
+    if 0.0 < fraction < 0.55 and (narrow_x or narrow_y):
+        any_finite = np.any(finite, axis=-1)
+        rows = np.any(any_finite, axis=1)
+        cols = np.any(any_finite, axis=0)
+        if narrow_y and np.any(rows):
+            ys = _linspace(float(ys[rows][0]), float(ys[rows][-1]), count)
+        if narrow_x and np.any(cols):
+            xs = _linspace(float(xs[cols][0]), float(xs[cols][-1]), count)
+        stack = grids(xs, ys)
+    zlim = _limit_pair(geom.zlim, "zlim")
+    flat = stack.reshape(-1, stack.shape[-1])
+    z_mat, lock, note = _clip_matrix(flat, zlim, "z", axes.z or "z")
+    xx, yy = np.meshgrid(xs, ys)
+    n_frames = z_mat.shape[1]
+    last = pd.DataFrame(
+        {
+            "x": xx.ravel(),
+            "y": yy.ravel(),
+            "z": np.asarray(z_mat[:, -1], dtype=np.float64),
+        }
+    )
+    vertices, indices, nx, ny = regular_grid_mesh(last, "x", "y", "z")
+    vx = vertices["x"].to_numpy(dtype=np.float64)
+    vy = vertices["y"].to_numpy(dtype=np.float64)
+    if np.allclose(vx, xx.ravel()) and np.allclose(vy, yy.ravel()):
+        src = np.arange(xx.size)
+    else:
+        ix = np.clip(np.searchsorted(xs, vx), 0, len(xs) - 1)
+        iy = np.clip(np.searchsorted(ys, vy), 0, len(ys) - 1)
+        src = iy * len(xs) + ix
+    x_mat = np.repeat(xx.ravel()[:, None], n_frames, axis=1)[src]
+    y_mat = np.repeat(yy.ravel()[:, None], n_frames, axis=1)[src]
+    z_ordered = z_mat[src]
+    out = _Geom(
+        aes(x="x", y="y", z="z"),
+        color=geom.const_color,
+        alpha=geom.alpha if geom.alpha is not None else 0.95,
+    )
+    out.kind = "surface"
+    out.data_override = vertices
+    out.const_color = geom.const_color
+    out.alpha = geom.alpha if geom.alpha is not None else 0.95
+    out.wireframe = bool(getattr(geom, "wireframe", False))
+    out._indices = indices
+    out._nx = nx
+    out._ny = ny
+    out._replace_mapping = True
+    _stamp_formula(out, geom, formula)
+    out._axis_labels = {"x": axes.x, "y": axes.y, "z": axes.z or "z"}
+    out._function_surface = True
+    if lock is not None:
+        out._axis_lock = {"z": lock}
+    if note:
+        out._notes = [note]
+    out._anim = {
+        "mode": "tween",
+        "channels": {"x": x_mat, "y": y_mat, "z": z_ordered},
+    }
+    return out
+
+
+def _rows_from_polylines(polylines) -> tuple[np.ndarray, np.ndarray, list]:
+    rows_x: list[float] = []
+    rows_y: list[float] = []
+    groups: list[list[int]] = []
+    for poly in polylines or []:
+        if len(poly) < 2:
+            continue
+        start = len(rows_x)
+        for x_val, y_val in poly:
+            rows_x.append(float(x_val))
+            rows_y.append(float(y_val))
+        groups.append([start, len(rows_x) - start])
+    return (
+        np.asarray(rows_x, dtype=np.float64),
+        np.asarray(rows_y, dtype=np.float64),
+        groups,
+    )
+
+
+def _expand_implicit_anim(geom, formula, axes, domains, transition) -> _Geom:
+    # Vertex counts change with the parameter, so frames are shown as-is.
+    count = _sample_count(geom, grid=True)
+    (xlo, xhi), _x_source = _domain_for(geom, "x", domains)
+    (ylo, yhi), _y_source = _domain_for(geom, "y", domains)
+    xs = _linspace(xlo, xhi, count)
+    ys = _linspace(ylo, yhi, count)
+    steps = _sweep(transition)
+    frames: list[dict] = []
+    static = None
+    static_i = 0
+    for index, params in enumerate(steps):
+
+        def sample(xx_fine, yy_fine, params=params):
+            with _bound_params(formula, params):
+                return _call_formula(formula, {axes.x: xx_fine, axes.y: yy_fine})
+
+        with _bound_params(formula, params):
+            xx, yy = np.meshgrid(xs, ys)
+            field = _call_formula(formula, {axes.x: xx, axes.y: yy})
+        polylines = _refine_active_cells(xs, ys, field, 0.0, sample)
+        if polylines is None:
+            polylines = _contour_lines(xs, ys, field, 0.0)
+        rows_x, rows_y, groups = _rows_from_polylines(polylines)
+        frame = {"x": rows_x, "y": rows_y, "groups": groups}
+        frames.append(frame)
+        if rows_x.size >= 2:
+            static = frame
+            static_i = index
+    if static is None:
+        raise ExprError(
+            "geom_function() found no curve where the equation is zero "
+            "on this domain. Try a wider xlim= and ylim="
+        )
+    drawn = pd.DataFrame({"x": static["x"], "y": static["y"]})
+    linewidth = getattr(geom, "linewidth", None)
+    out = geom_path(
+        aes(x="x", y="y"),
+        linewidth=2.0 if linewidth is None else linewidth,
+        color=geom.const_color,
+        alpha=geom.alpha,
+    )
+    out.data_override = drawn
+    out.sort_x = False
+    out._groups = static["groups"]
+    out._replace_mapping = True
+    out._implicit = True
+    _stamp_formula(out, geom, formula)
+    out._axis_labels = {"x": axes.x, "y": axes.y}
+    out._anim = {"mode": "step", "frames": frames, "static": int(static_i)}
     return out

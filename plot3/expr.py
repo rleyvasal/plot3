@@ -109,6 +109,9 @@ class Formula:
     legend_pretty: str = ""
     caption_latex: str = ""
     caption_pretty: str = ""
+    # Coefficients such as ``a`` in ``y = a x^2``. Empty unless parsing was
+    # asked to wait: a following ``transition_time(a=(0, 3))`` may bind them.
+    pending: tuple[str, ...] = ()
 
     def _repr_latex_(self) -> str:
         """Notebook display of the parsed formula, not the raw input text."""
@@ -116,15 +119,26 @@ class Formula:
         return f"${body}$"
 
 
-def parse_formula(expr: Any, params: dict[str, Any] | None = None) -> Formula:
-    """Turn a string, callable, or sympy-like object into a :class:`Formula`."""
+def parse_formula(
+    expr: Any,
+    params: dict[str, Any] | None = None,
+    *,
+    defer_missing: bool = False,
+) -> Formula:
+    """Turn a string, callable, or sympy-like object into a :class:`Formula`.
+
+    ``defer_missing`` records unbound coefficients on ``Formula.pending``
+    instead of raising. ``geom_function`` uses that so a later
+    ``transition_time(a=(0, 3))`` can still animate them. A direct
+    ``parse_formula`` call keeps raising immediately.
+    """
     bound = dict(params or {})
     if isinstance(expr, str):
-        return _parse_math(expr, bound)
+        return _parse_math(expr, bound, defer_missing=defer_missing)
     if callable(expr):
         return _parse_callable(expr)
     if getattr(expr, "free_symbols", None) is not None:
-        return _parse_sympyish(expr, bound)
+        return _parse_sympyish(expr, bound, defer_missing=defer_missing)
     raise TypeError(
         "geom_function() expects a formula string or a callable, "
         f"got {type(expr).__name__}"
@@ -197,12 +211,16 @@ def _parse_callable(fn: Callable[..., Any]) -> Formula:
     )
 
 
-def _parse_sympyish(expr: Any, params: dict[str, Any]) -> Formula:
+def _parse_sympyish(
+    expr: Any, params: dict[str, Any], *, defer_missing: bool = False
+) -> Formula:
     """Duck-type sympy: ``Equality`` via our parser, other exprs via lambdify."""
     lhs = getattr(expr, "lhs", None)
     rhs = getattr(expr, "rhs", None)
     if lhs is not None and rhs is not None and type(expr).__name__ == "Equality":
-        return _parse_math(f"({lhs}) = ({rhs})", params)
+        return _parse_math(
+            f"({lhs}) = ({rhs})", params, defer_missing=defer_missing
+        )
 
     try:
         import sympy
@@ -235,7 +253,7 @@ def _parse_sympyish(expr: Any, params: dict[str, Any]) -> Formula:
             fn_args=names,
             **_callable_math(str(expr)),
         )
-    return _parse_math(str(expr), params)
+    return _parse_math(str(expr), params, defer_missing=defer_missing)
 
 
 def _evaluated_tree(source: str, params: dict[str, Any] | None = None) -> ast.AST:
@@ -246,7 +264,11 @@ def _evaluated_tree(source: str, params: dict[str, Any] | None = None) -> ast.AS
 
 
 def _parse_math(
-    source: str, params: dict[str, Any], _sink: dict[str, ast.AST] | None = None
+    source: str,
+    params: dict[str, Any],
+    _sink: dict[str, ast.AST] | None = None,
+    *,
+    defer_missing: bool = False,
 ) -> Formula:
     try:
         reject_eaten_backslashes(source)
@@ -312,6 +334,7 @@ def _parse_math(
     skip_names = {lhs_tree.id} if lone_lhs else set()
 
     free: list[str] = []
+    pending: list[str] = []
     for name in ordered:
         if name in skip_names:
             continue
@@ -322,7 +345,12 @@ def _parse_math(
         hint = _juxtaposition_hint(name)
         if hint is not None:
             raise ExprError(f"unknown name {name!r}: did you mean {hint}?")
+        # A coefficient is not a plot variable. Recording it on ``pending``
+        # (instead of ``free``) keeps ``y = a x^2`` a curve, not a surface.
         if len(name) == 1 and name not in _PLOT_LETTERS:
+            if defer_missing:
+                pending.append(name)
+                continue
             raise ExprError(_missing_param_message(name))
         free.append(name)
 
@@ -384,6 +412,7 @@ def _parse_math(
         dependent=dependent,
         variables=tuple(free),
         namespace=namespace,
+        pending=tuple(pending),
         **texts,
     )
 
@@ -445,6 +474,25 @@ def _missing_param_message(name: str) -> str:
     return (
         f"'{name}' has no value. Pass it at the end: "
         f"geom_function(..., {name}=2)"
+    )
+
+
+def _missing_param_build_message(name: str) -> str:
+    """Same hint as parse time, plus the transition that can animate it.
+
+    Raised from ``build_spec``, once the figure's layers are known. A
+    notebook still shows it on the cell that displays the plot.
+    """
+    found = _notebook_number(name)
+    animate = f", or animate it: + transition_time({name}=(0, 3))"
+    if found is not None:
+        return (
+            f"'{name}' has no value. Your notebook has {name} = {_fmt_num(found)}. "
+            f"Use geom_function(..., {name}={name}){animate}"
+        )
+    return (
+        f"'{name}' has no value. Pass it at the end: "
+        f"geom_function(..., {name}=2){animate}"
     )
 
 

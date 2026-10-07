@@ -442,6 +442,9 @@ function bubbleMaterial(opacity, sizeAtten) {
   return m;
 }
 const bubbleEntries = [];
+const lineEntries = [];
+const surfaceEntries = [];
+const stepEntries = [];
 let hoverHold = false;
 let trail = null;
 let trailId = null;
@@ -609,6 +612,172 @@ function writeBubbleFrame(entry, t) {
   if (colorDirty) entry.geom.attributes.color.needsUpdate = true;
   applyBubbleHide(entry);
 }
+function frameBlend(t) {
+  const sample = frameSample(t);
+  let u = sample.u;
+  if (S.transition && S.transition.ease === 'smooth') u = u * u * (3 - 2 * u);
+  return { f0: sample.f0, f1: sample.f1, u: u };
+}
+function writeLineFrame(entry, t) {
+  const L = entry.L;
+  const F = L.frames;
+  if (!F || !F.x || !S.transition) return;
+  const nF = F.nFrames;
+  const n = L.n;
+  const blend = frameBlend(t);
+  const f0 = blend.f0, f1 = blend.f1, u = blend.u;
+  const ext = entry.ext;
+  const hasZ = !!entry.hasZ;
+  for (let i = 0; i < n; i++) {
+    const i0 = i * nF + f0;
+    const i1 = i * nF + f1;
+    L._x[i] = F.x.data[i0] * (1 - u) + F.x.data[i1] * u;
+    L._y[i] = F.y ? (F.y.data[i0] * (1 - u) + F.y.data[i1] * u) : L.y.data[i];
+    if (hasZ && F.z) L._z[i] = F.z.data[i0] * (1 - u) + F.z.data[i1] * u;
+  }
+  for (let s = 0; s < entry.segs.length; s++) {
+    const seg = entry.segs[s];
+    const flat = new Float32Array(seg.cnt * 3);
+    for (let k = 0; k < seg.cnt; k++) {
+      const i = seg.s0 + k;
+      flat[k * 3] = L._x[i] * ext[0];
+      flat[k * 3 + 1] = L._y[i] * ext[1];
+      flat[k * 3 + 2] = hasZ ? L._z[i] * ext[2] : 0;
+    }
+    seg.geom.setPositions(Array.from(flat));
+  }
+}
+function writeSurfaceFrame(entry, t) {
+  const L = entry.L;
+  const F = L.frames;
+  if (!F || !S.transition) return;
+  const nF = F.nFrames;
+  const n = L.n;
+  const blend = frameBlend(t);
+  const f0 = blend.f0, f1 = blend.f1, u = blend.u;
+  const ext = entry.ext;
+  const pos = entry.pos;
+  for (let i = 0; i < n; i++) {
+    const i0 = i * nF + f0;
+    const i1 = i * nF + f1;
+    const x = F.x ? F.x.data[i0] * (1 - u) + F.x.data[i1] * u : L.x.data[i];
+    const y = F.y ? F.y.data[i0] * (1 - u) + F.y.data[i1] * u : L.y.data[i];
+    const z = F.z ? F.z.data[i0] * (1 - u) + F.z.data[i1] * u : L.z.data[i];
+    L._x[i] = x;
+    L._y[i] = y;
+    L._z[i] = z;
+    pos[i * 3] = x * ext[0];
+    pos[i * 3 + 1] = y * ext[1];
+    pos[i * 3 + 2] = z * ext[2];
+  }
+  entry.geom.attributes.position.needsUpdate = true;
+  entry.geom.computeVertexNormals();
+  if (entry.wire) {
+    const next = new THREE.WireframeGeometry(entry.geom);
+    entry.wire.geometry.dispose();
+    entry.wire.geometry = next;
+  }
+}
+function writeStepFrame(entry, t) {
+  const sample = frameSample(t);
+  let f = sample.u >= 0.5 ? sample.f1 : sample.f0;
+  if (sample.f0 === sample.f1) f = sample.f0;
+  const bucket = entry.bucket;
+  for (let i = 0; i < bucket.length; i++) {
+    const on = i === f;
+    for (let s = 0; s < bucket[i].length; s++) bucket[i][s].visible = on;
+  }
+  const L = entry.L;
+  const F = L.frames;
+  const span = F.spans[f];
+  const start = span[0], count = span[1];
+  L._stepN = count;
+  if (!L._x || L._x.length !== count) {
+    L._x = new Float32Array(count);
+    L._y = new Float32Array(count);
+  }
+  for (let i = 0; i < count; i++) {
+    L._x[i] = F.x.data[start + i];
+    L._y[i] = F.y.data[start + i];
+  }
+}
+function addTweenLines(L, ext, cols) {
+  const n = L.n;
+  const hasZ = !!(L.z && L.z.data);
+  L._x = new Float32Array(L.x.data);
+  L._y = new Float32Array(L.y.data);
+  if (hasZ) L._z = new Float32Array(L.z.data);
+  const segs = [];
+  const groups = L.groups || [[0, n]];
+  for (let g = 0; g < groups.length; g++) {
+    const s0 = groups[g][0], cnt = groups[g][1];
+    if (cnt < 2) continue;
+    const flat = new Float32Array(cnt * 3);
+    for (let i = 0; i < cnt; i++) {
+      const j = s0 + i;
+      flat[i * 3] = L.x.data[j] * ext[0];
+      flat[i * 3 + 1] = L.y.data[j] * ext[1];
+      flat[i * 3 + 2] = hasZ ? L.z.data[j] * ext[2] : 0;
+    }
+    const lg = new LineGeometry();
+    lg.setPositions(Array.from(flat));
+    const lm = new LineMaterial({
+      color: new THREE.Color(cols[s0 * 3], cols[s0 * 3 + 1], cols[s0 * 3 + 2]).getHex(),
+      linewidth: L.linewidth || 2,
+      worldUnits: false,
+      transparent: true,
+      opacity: L.alpha == null ? 1 : L.alpha
+    });
+    lineMats.push(lm);
+    scene.add(new Line2(lg, lm));
+    segs.push({ geom: lg, s0: s0, cnt: cnt });
+  }
+  lineEntries.push({ L: L, ext: ext, segs: segs, hasZ: hasZ });
+}
+function addStepLayer(L, ext, cols) {
+  const F = L.frames;
+  const rgb = [cols[0], cols[1], cols[2]];
+  const bucket = [];
+  for (let f = 0; f < F.nFrames; f++) {
+    const span = F.spans[f];
+    const start = span[0], count = span[1];
+    const groups = (F.groups && F.groups[f]) || [[0, count]];
+    const segs = [];
+    for (let g = 0; g < groups.length; g++) {
+      const gs = groups[g][0], gc = groups[g][1];
+      if (gc < 2) continue;
+      const flat = new Float32Array(gc * 3);
+      for (let i = 0; i < gc; i++) {
+        const j = start + gs + i;
+        flat[i * 3] = F.x.data[j] * ext[0];
+        flat[i * 3 + 1] = F.y.data[j] * ext[1];
+        flat[i * 3 + 2] = 0;
+      }
+      const lg = new LineGeometry();
+      lg.setPositions(Array.from(flat));
+      const lm = new LineMaterial({
+        color: new THREE.Color(rgb[0], rgb[1], rgb[2]).getHex(),
+        linewidth: L.linewidth || 2,
+        worldUnits: false,
+        transparent: true,
+        opacity: L.alpha == null ? 1 : L.alpha
+      });
+      lineMats.push(lm);
+      const ln = new Line2(lg, lm);
+      ln.visible = false;
+      scene.add(ln);
+      segs.push(ln);
+    }
+    bucket.push(segs);
+  }
+  stepEntries.push({ L: L, bucket: bucket, ext: ext });
+}
+function registerSurface(L, ext, geom, pos, wire) {
+  L._x = new Float32Array(L.x.data);
+  L._y = new Float32Array(L.y.data);
+  L._z = new Float32Array(L.z.data);
+  surfaceEntries.push({ L: L, ext: ext, geom: geom, pos: pos, wire: wire });
+}
 function clearTrail() {
   if (trail) {
     scene.remove(trail);
@@ -671,8 +840,25 @@ function withFrame(text) {
   if (s.indexOf('{frame_time}') < 0) return s;
   return s.split('{frame_time}').join(frameLabel);
 }
+function fmtParam(v) {
+  if (!isFinite(v)) return String(v);
+  const a = Math.abs(v);
+  if (a >= 1e6 || (a > 0 && a < 1e-3)) return v.toExponential(2);
+  return v.toFixed(2);
+}
 function frameText(t) {
   const tr = S.transition;
+  if (tr.params && tr.params.length) {
+    const nF = tr.nFrames;
+    const u = nF <= 1 ? 0 : t / (nF - 1);
+    const parts = [];
+    for (let i = 0; i < tr.params.length; i++) {
+      const p = tr.params[i];
+      const v = (+p.lo) + u * ((+p.hi) - (+p.lo));
+      parts.push(p.name + ' = ' + fmtParam(v));
+    }
+    return parts.join(', ');
+  }
   const sample = frameSample(t);
   if (tr.type === 'states') {
     return String(sample.u < 0.5 ? tr.times[sample.f0] : tr.times[sample.f1]);
@@ -751,6 +937,9 @@ function installPlayer(renderFrame) {
   }
   function paint() {
     for (const e of bubbleEntries) if (e.L.frames) writeBubbleFrame(e, playT);
+    for (const e of lineEntries) writeLineFrame(e, playT);
+    for (const e of surfaceEntries) writeSurfaceFrame(e, playT);
+    for (const e of stepEntries) writeStepFrame(e, playT);
     syncChrome();
     renderFrame();
   }
@@ -1114,6 +1303,10 @@ if (!S.is3d) {
         scene.add(ln);
         if (isCat) regCat(L.color.data[s0] % S.color.cats.length, ln);
       }
+    } else if (L.frames && L.frames.mode === 'step') {
+      addStepLayer(L, [1, 1, 1], cols);
+    } else if (L.frames && L.frames.x) {
+      addTweenLines(L, [1, 1, 1], cols);
     } else {
       for (const [s0, cnt] of L.groups) {
         if (cnt < 2) continue;
@@ -1370,7 +1563,8 @@ if (!S.is3d) {
         const ys = L._y || (L.y && L.y.data);
         if (!xs || !ys) continue;
         let bestD = Infinity;
-        for (let i = 0; i < L.n; i++) {
+        const nHover = L._stepN != null ? L._stepN : L.n;
+        for (let i = 0; i < nHover; i++) {
           if (L._alpha && L._alpha[i] <= 0.04) continue;
           if (L._ci && S.color.cats && hiddenCats.has(L._ci[i] % S.color.cats.length)) continue;
           if (!L._ci && catHidden(L, i)) continue;
@@ -1401,7 +1595,7 @@ if (!S.is3d) {
               : head
                 + fmtSpan('x', xv, xSpan) + ', '
                 + fmtSpan('y', yv, ySpan) + sizeBit;
-            consider(d, sx, sy, html, !!(L.frames && S.transition));
+            consider(d, sx, sy, html, !!(L.kind === 'point' && L.frames && S.transition));
           }
         }
       }
@@ -1425,7 +1619,7 @@ if (!S.is3d) {
     const mx = e.clientX - r.left, my = e.clientY - r.top;
     let hit = null, hitD = Infinity;
     for (const L of S.layers) {
-      if (!L.frames || !L._x) continue;
+      if (L.kind !== 'point' || !L.frames || !L._x) continue;
       for (let i = 0; i < L.n; i++) {
         if (L._alpha && L._alpha[i] <= 0.04) continue;
         const sx = screenX(L._x[i]), sy = screenY(L._y[i]);
@@ -1528,14 +1722,21 @@ if (!S.is3d) {
       if (L.wireframe) {
         const rgb = L.constColor ? hex2rgb(L.constColor) : hex2rgb(T.ink2 || '#c3c2b7');
         const wf = new THREE.WireframeGeometry(g);
-        scene.add(new THREE.LineSegments(wf, new THREE.LineBasicMaterial({
+        const wire = new THREE.LineSegments(wf, new THREE.LineBasicMaterial({
           color: new THREE.Color(rgb[0], rgb[1], rgb[2]),
-          transparent: true, opacity: baseAlpha })));
+          transparent: true, opacity: baseAlpha }));
+        scene.add(wire);
+        if (L.frames && L.kind === 'surface') registerSurface(L, ext, g, pos, wire);
       } else {
         scene.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({
           vertexColors: true, transparent: true, opacity: baseAlpha,
           side: THREE.DoubleSide, depthWrite: L.kind !== 'isosurface' })));
+        if (L.frames && L.kind === 'surface') registerSurface(L, ext, g, pos, null);
       }
+    } else if (L.frames && L.frames.mode === 'step') {
+      addStepLayer(L, ext, cols);
+    } else if (L.frames && L.frames.x) {
+      addTweenLines(L, ext, cols);
     } else {
       for (const [s0, cnt] of (L.groups || [[0, n]])) {
         if (cnt < 2) continue;
@@ -1663,7 +1864,7 @@ if (!S.is3d) {
     let best = null, bestD = Infinity;
     const maxScan = 80000;
     for (const { L } of pickLayers) {
-      const n = L.n;
+      const n = L._stepN != null ? L._stepN : L.n;
       const step = n > maxScan ? Math.ceil(n / maxScan) : 1;
       const xs = L._x || L.x.data;
       const ys = L._y || L.y.data;
@@ -1688,7 +1889,7 @@ if (!S.is3d) {
         }
       }
     }
-    hoverHold = !!(best && best[0].frames && S.transition);
+    hoverHold = !!(best && best[0].kind === 'point' && best[0].frames && S.transition);
     if (!best) { tip3.style.display = 'none'; return; }
     const [L, i, sx, sy, xn, yn, zn] = best;
     const xv = fromScale('x', xn);
@@ -1759,7 +1960,7 @@ if (!S.is3d) {
     const w = Math.max(rect.width, 1), h = Math.max(rect.height, 1);
     let hit = null, hitD = Infinity;
     for (const L of S.layers) {
-      if (!L.frames || !L._x || !L._z) continue;
+      if (L.kind !== 'point' || !L.frames || !L._x || !L._z) continue;
       for (let i = 0; i < L.n; i++) {
         if (L._alpha && L._alpha[i] <= 0.04) continue;
         const v = new THREE.Vector3(L._x[i] * ext[0], L._y[i] * ext[1], L._z[i] * ext[2]);

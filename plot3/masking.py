@@ -273,7 +273,26 @@ class Plot3MaskTransformer(ast.NodeTransformer):
             ]
             return node
 
-        if name in {"transition_time", "transition_states"}:
+        if name == "transition_time":
+            # The column is a selector. Parameter ranges (``a=(0, 2*pi)``)
+            # and ``frames=`` stay Python, so ``pi`` is not quoted.
+            node.args = [self._mask_selector(a) for a in node.args]
+            new_kws: list[ast.keyword] = []
+            for kw in node.keywords:
+                if kw.arg == "column":
+                    new_kws.append(
+                        ast.keyword(
+                            arg=kw.arg, value=self._mask_selector(kw.value)
+                        )
+                    )
+                else:
+                    new_kws.append(
+                        ast.keyword(arg=kw.arg, value=self.visit(kw.value))
+                    )
+            node.keywords = new_kws
+            return node
+
+        if name == "transition_states":
             # The frame column is a selector, positional or keyword.
             node.args = [self._mask_selector(a) for a in node.args]
             node.keywords = [
