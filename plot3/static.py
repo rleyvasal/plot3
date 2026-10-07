@@ -1,26 +1,42 @@
-"""Offline PNG and SVG export.
+"""Offline PNG, SVG, and PDF export.
 
-Both formats replay one list of drawing commands, so a ``.png`` and a
-``.svg`` of the same figure show the same chart. Nothing here opens a
-browser or imports an image library: SVG is text, and PNG is a zlib
-RGB file. The geometry is the static channel already stored on each
-layer (the last frame of a transition, the low end of a slider).
+PNG, SVG, and PDF replay one list of drawing commands. SVG is text.
+PNG and PDF are that same SVG rendered by cairosvg when the optional
+``plot3[export]`` extra is installed, so the three files share one
+drawing and one font. Without cairosvg, PNG falls back to a zlib RGB
+file and a built-in 5×7 font, and PDF raises with an install hint.
+The geometry is the static channel already stored on each layer (the
+last frame of a transition, the low end of a slider).
 """
 
 from __future__ import annotations
 
 import base64
 import gzip
+import io
 import math
 import struct
 import zlib
 from pathlib import Path
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, quoteattr
 
 import numpy as np
 
 _MAX_PX = 8192
+_CSS_DPI = 96.0
 _PAD = 0.03  # same normalized camera pad as the 2D viewer
+_DEFAULT_FAMILY = "Helvetica, Arial, sans-serif"
+_UNIT_INCH = {
+    "in": 1.0,
+    "inch": 1.0,
+    "inches": 1.0,
+    "cm": 1.0 / 2.54,
+    "mm": 1.0 / 25.4,
+}
+_EXPORT_HINT = (
+    "ggsave() needs the optional export extra to write this file with a "
+    "journal font. Install it with: pip install 'plot3[export]'"
+)
 
 # Column bitmasks, LSB = top row. 5x7, authored for axis labels and titles.
 def _glyph(*rows: str) -> tuple[int, ...]:
@@ -148,25 +164,284 @@ _FOLD = str.maketrans({
 _KINDS = frozenset({"point", "line", "col", "box", "area", "poly", "surface", "isosurface"})
 
 
-def save_static(fig, path, *, width=None, height=None) -> str:
-    """Write ``fig`` to a ``.png`` or ``.svg`` file. ``width`` and ``height`` are pixels."""
+def save_static(
+    fig,
+    path,
+    *,
+    width=None,
+    height=None,
+    units: str = "px",
+    dpi: float | None = None,
+    family: str | None = None,
+    fontsize: float | None = None,
+) -> str:
+    """Write ``fig`` to a ``.png``, ``.svg``, or ``.pdf`` file.
+
+    Bare ``width`` and ``height`` are pixels. ``units="in"`` (also
+    ``"cm"`` and ``"mm"``) with ``dpi`` (default 300) sets a physical
+    page. Layout stays in CSS pixels (96 per inch) so type keeps its
+    size, and cairosvg rasterizes that SVG at ``dpi``.
+    """
     path = Path(path)
-    width_px, height_px = _figure_pixels(fig, width, height)
-    commands = _figure_commands(fig, width_px, height_px)
+    suffix = path.suffix.lower()
+    if suffix not in {".png", ".svg", ".pdf"}:
+        raise ValueError("save_static() writes .png, .svg, or .pdf")
+    size = _figure_size(fig, width, height, units, dpi)
+    layout_w, layout_h = size["layout"]
+    base_pt = _resolve_base_pt(fig, fontsize)
+    family_name = _resolve_family(fig, family)
+    commands = _figure_commands(fig, layout_w, layout_h, base_pt)
+    svg = _svg_text(
+        commands,
+        layout_w,
+        layout_h,
+        svg_width=size["svg_width"],
+        svg_height=size["svg_height"],
+        family=family_name,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.suffix.lower() == ".png":
-        data = _png_bytes(_raster(commands, width_px, height_px))
+    fallback = False
+    if suffix == ".svg":
+        data = svg.encode("utf-8")
+    elif suffix == ".pdf":
+        data = _pdf_bytes(svg)
     else:
-        data = _svg_text(commands, width_px, height_px).encode("utf-8")
+        data, fallback = _png_file_bytes(svg, commands, size)
     path.write_bytes(data)
     print(f"plot3: saved {path} ({len(data) // 1024} KB)")
+    if fallback:
+        print(
+            "plot3: PNG used the built-in font. "
+            "pip install 'plot3[export]' for Helvetica."
+        )
     return str(path)
+
+
+def _figure_size(fig, width, height, units, dpi) -> dict:
+    unit = str(units or "px").strip().lower()
+    if unit in {"px", "pixel", "pixels"}:
+        if dpi is not None:
+            raise ValueError(
+                "ggsave() dpi applies when units is 'in', 'cm', or 'mm'. "
+                "For a 7 by 4 inch figure: "
+                "ggsave('fig.png', plot, width=7, height=4, units='in', dpi=300)"
+            )
+        w, h = _figure_pixels(fig, width, height)
+        return {
+            "layout": (w, h),
+            "png": (w, h),
+            "svg_width": str(w),
+            "svg_height": str(h),
+            "scale": (1.0, 1.0),
+            "dpi": _CSS_DPI,
+            "physical": False,
+        }
+    if unit not in _UNIT_INCH:
+        raise ValueError("ggsave() units must be 'px', 'in', 'cm', or 'mm'")
+    dpi_value = 300.0 if dpi is None else _plain_float(
+        dpi,
+        "dpi",
+        "ggsave() dpi must be between 1 and 2400",
+        minimum=1,
+        maximum=2400,
+        type_message="ggsave() dpi must be a number, for example dpi=300",
+    )
+    default_h = _css_px(getattr(fig, "height", None), 480)
+    width_in = _as_inches(width, "width", unit, 800)
+    height_in = _as_inches(height, "height", unit, default_h)
+    layout = (_px_extent(width_in, _CSS_DPI, "width"), _px_extent(height_in, _CSS_DPI, "height"))
+    png = (_px_extent(width_in, dpi_value, "width"), _px_extent(height_in, dpi_value, "height"))
+    return {
+        "layout": layout,
+        "png": png,
+        "svg_width": _inch_attr(width_in),
+        "svg_height": _inch_attr(height_in),
+        "scale": (png[0] / layout[0], png[1] / layout[1]),
+        "dpi": dpi_value,
+        "physical": True,
+    }
 
 
 def _figure_pixels(fig, width, height) -> tuple[int, int]:
     w = 800 if width is None else _pixels(width, "width")
     h = _css_px(getattr(fig, "height", None), 480) if height is None else _pixels(height, "height")
     return w, h
+
+
+def _as_inches(value, name: str, unit: str, default_px: int) -> float:
+    if value is None:
+        return default_px / _CSS_DPI
+    if isinstance(value, str):
+        raise TypeError(
+            f"ggsave() {name} is a number of {unit}. "
+            f"For example {name}=7, units='in'."
+        )
+    number = _plain_float(
+        value,
+        name,
+        f"ggsave() {name} must be greater than 0",
+        minimum=1e-6,
+        maximum=None,
+        type_message=(
+            f"ggsave() {name} is a number of {unit}. "
+            f"For example {name}=7, units='in'."
+        ),
+    )
+    return number * _UNIT_INCH[unit]
+
+
+def _px_extent(inches: float, dpi: float, name: str) -> int:
+    pixels = int(round(inches * dpi))
+    if pixels < 1:
+        raise ValueError(f"ggsave() {name} must be at least 1 pixel")
+    if pixels > _MAX_PX:
+        raise ValueError(
+            f"ggsave() {name} is {pixels} pixels, and the maximum is {_MAX_PX}. "
+            "Lower dpi or the size."
+        )
+    return pixels
+
+
+def _inch_attr(inches: float) -> str:
+    text = f"{inches:.6f}".rstrip("0").rstrip(".")
+    return f"{text}in"
+
+
+def _plain_float(value, name: str, bounds_message: str, *, minimum, maximum, type_message=None) -> float:
+    if isinstance(value, bool):
+        raise TypeError(type_message or bounds_message)
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(type_message or bounds_message) from exc
+    if not math.isfinite(number):
+        raise ValueError(bounds_message)
+    if minimum is not None and number < minimum:
+        raise ValueError(bounds_message)
+    if maximum is not None and number > maximum:
+        raise ValueError(bounds_message)
+    return number
+
+
+def _resolve_family(fig, family) -> str:
+    chosen = family if family not in (None, "") else getattr(fig, "theme_family", None)
+    if chosen in (None, ""):
+        return _DEFAULT_FAMILY
+    return str(chosen)
+
+
+def _resolve_base_pt(fig, fontsize) -> float | None:
+    if fontsize is not None:
+        return _font_points(fontsize, "fontsize")
+    theme_size = getattr(fig, "theme_base_size", None)
+    if theme_size is None:
+        return None
+    return _font_points(theme_size, "base_size")
+
+
+def _font_points(value, name: str) -> float:
+    number = _plain_float(
+        value,
+        name,
+        f"ggsave() {name} must be between 1 and 96 points",
+        minimum=1,
+        maximum=96,
+        type_message=f"ggsave() {name} must be a font size in points, for example {name}=11",
+    )
+    return number
+
+
+def _load_cairosvg():
+    try:
+        import cairosvg
+    except Exception:
+        return None
+    return cairosvg
+
+
+def _cairo_bytes(method: str, svg: str, **kwargs) -> bytes | None:
+    lib = _load_cairosvg()
+    if lib is None:
+        return None
+    buf = io.BytesIO()
+    try:
+        getattr(lib, method)(bytestring=svg.encode("utf-8"), write_to=buf, **kwargs)
+    except OSError:
+        return None
+    data = buf.getvalue()
+    return data or None
+
+
+def _pdf_bytes(svg: str) -> bytes:
+    data = _cairo_bytes("svg2pdf", svg)
+    if not data:
+        raise RuntimeError(_EXPORT_HINT)
+    return data
+
+
+def _png_file_bytes(svg: str, commands, size: dict) -> tuple[bytes, bool]:
+    data = _cairo_bytes("svg2png", svg, dpi=size["dpi"])
+    if data:
+        return data, False
+    sx, sy = size["scale"]
+    png_w, png_h = size["png"]
+    if sx != 1.0 or sy != 1.0:
+        commands = _scale_commands(commands, sx, sy)
+    return _png_bytes(_raster(commands, png_w, png_h)), True
+
+
+def _scale_commands(commands, sx: float, sy: float) -> list:
+    stroke = (sx + sy) / 2.0
+    scaled = []
+    for cmd in commands:
+        op = cmd[0]
+        if op == "rect":
+            _op, x, y, w, h, fill, color, sw, alpha = cmd
+            scaled.append((
+                "rect", x * sx, y * sy, w * sx, h * sy, fill, color,
+                (sw or 0) * stroke, alpha,
+            ))
+        elif op == "line":
+            _op, x1, y1, x2, y2, color, sw, alpha = cmd
+            scaled.append((
+                "line", x1 * sx, y1 * sy, x2 * sx, y2 * sy, color,
+                (sw or 0) * stroke, alpha,
+            ))
+        elif op == "polyline":
+            _op, pts, color, sw, alpha = cmd
+            scaled.append((
+                "polyline", [(px * sx, py * sy) for px, py in pts], color,
+                (sw or 0) * stroke, alpha,
+            ))
+        elif op == "polygon":
+            _op, pts, fill, color, sw, alpha = cmd
+            scaled.append((
+                "polygon", [(px * sx, py * sy) for px, py in pts], fill, color,
+                (sw or 0) * stroke, alpha,
+            ))
+        elif op == "polymask":
+            _op, tris, color, alpha = cmd
+            scaled.append((
+                "polymask",
+                [[(px * sx, py * sy) for px, py in tri] for tri in tris],
+                color,
+                alpha,
+            ))
+        elif op == "circle":
+            _op, cx, cy, r, fill, color, sw, alpha = cmd
+            scaled.append((
+                "circle", cx * sx, cy * sy, r * stroke, fill, color,
+                (sw or 0) * stroke, alpha,
+            ))
+        elif op == "text":
+            _op, x, y, text, size, fill, anchor, baseline, rotate, weight = cmd
+            scaled.append((
+                "text", x * sx, y * sy, text, float(size) * stroke, fill,
+                anchor, baseline, rotate, weight,
+            ))
+        else:
+            scaled.append(cmd)
+    return scaled
 
 
 def _pixels(value, name: str) -> int:
@@ -210,7 +485,7 @@ def _css_px(value, default: int) -> int:
     return int(round(min(number, _MAX_PX)))
 
 
-def _figure_commands(fig, width: int, height: int) -> list:
+def _figure_commands(fig, width: int, height: int, base_pt: float | None = None) -> list:
     panels, grid, parent_title = _panels(fig)
     theme = panels[0][0].get("theme") or {}
     surface = theme.get("surface") or "#0b1020"
@@ -218,7 +493,7 @@ def _figure_commands(fig, width: int, height: int) -> list:
     commands: list = [("rect", 0, 0, width, height, surface, None, 0, 1.0)]
     if grid is None:
         spec, blobs = panels[0]
-        _draw_spec(spec, blobs, 0, 0, width, height, commands, border=False)
+        _draw_spec(spec, blobs, 0, 0, width, height, commands, border=False, base_pt=base_pt)
         return commands
 
     ncol, nrow = grid
@@ -226,15 +501,20 @@ def _figure_commands(fig, width: int, height: int) -> list:
     title_h = 0
     if parent_title:
         parent_title = _with_frame(parent_title, _static_label(panels[0][0]))
-        title_h = 26
-        commands.append(("text", 14, 6, parent_title, 14, ink, "start", "top", 0, 600))
+        title_size = _font_sizes(width, base_pt)[1]
+        title_h = title_size + 12
+        commands.append((
+            "text", 14, 6, parent_title, title_size, ink, "start", "top", 0, 600,
+        ))
     cell_w = (width - pad * (ncol + 1)) / ncol
     cell_h = (height - title_h - pad * (nrow + 1)) / nrow
     for index, (spec, blobs) in enumerate(panels):
         row, col = divmod(index, ncol)
         x = pad + col * (cell_w + pad)
         y = title_h + pad + row * (cell_h + pad)
-        _draw_spec(spec, blobs, x, y, cell_w, cell_h, commands, border=True)
+        _draw_spec(
+            spec, blobs, x, y, cell_w, cell_h, commands, border=True, base_pt=base_pt,
+        )
     return commands
 
 
@@ -307,7 +587,7 @@ def _is_missing(level) -> bool:
         return False
 
 
-def _draw_spec(spec, blobs, x, y, w, h, commands, *, border: bool) -> None:
+def _draw_spec(spec, blobs, x, y, w, h, commands, *, border: bool, base_pt: float | None = None) -> None:
     theme = spec.get("theme") or {}
     if border:
         commands.append((
@@ -315,7 +595,7 @@ def _draw_spec(spec, blobs, x, y, w, h, commands, *, border: bool) -> None:
         ))
     labs = _labs(spec)
     is3d = bool(spec.get("is3d"))
-    fonts = _font_sizes(w)
+    fonts = _font_sizes(w, base_pt)
     if is3d:
         _draw_3d(spec, blobs, x, y, w, h, commands, labs, theme, fonts)
     else:
@@ -394,8 +674,18 @@ def _static_label(spec) -> str:
     return _fmt_tick(times[-1], bool(transition.get("integer")))
 
 
-def _font_sizes(width: float) -> tuple[int, int, int]:
-    """Tick, title, and note sizes in pixels."""
+def _font_sizes(width: float, base_pt: float | None = None) -> tuple[int, int, int]:
+    """Tick, title, and note sizes in CSS pixels.
+
+    ``base_pt`` is a ggplot2 base size in points. Axis text is 0.8× and
+    the title is 1.2×. Without it, the size follows the panel width.
+    """
+    if base_pt is not None:
+        px = float(base_pt) * _CSS_DPI / 72.0
+        tick = max(6, int(round(px * 0.8)))
+        title = max(8, int(round(px * 1.2)))
+        note = max(6, int(round(px * 0.7)))
+        return tick, title, note
     if width < 280:
         return 9, 11, 9
     if width < 480:
@@ -444,11 +734,13 @@ def _draw_2d(spec, blobs, x, y, w, h, commands, labs, theme, fonts) -> None:
     box = _box_2d(spec, x, y, w, h, labs, fonts)
     scales = spec.get("scales") or {}
     window = _view_window(spec, box[2], box[3])
+    surface = theme.get("surface") or "#0b1020"
     grid = theme.get("grid") or "#1c2742"
     axis = theme.get("axis") or "#2e3a5c"
     muted = theme.get("muted") or "#898781"
     ink2 = theme.get("ink2") or "#c3c2b7"
     ink = theme.get("ink") or "#ffffff"
+    frame = str(theme.get("frame") or "box")
     tick_size, title_size, _note = fonts
 
     def px(u, v):
@@ -457,24 +749,27 @@ def _draw_2d(spec, blobs, x, y, w, h, commands, labs, theme, fonts) -> None:
         sy = box[1] + (top - v) / (top - bottom) * box[3]
         return sx, sy
 
-    for value, _lab in _ticks(scales.get("x") or {}):
-        u = _unit(scales.get("x") or {}, value)
-        if u < window[0] - 0.02 or u > window[1] + 0.02:
-            continue
-        x0, _y0 = px(u, 0)
-        commands.append(("line", x0, box[1], x0, box[1] + box[3], grid, 1, 1.0))
-    for value, _lab in _ticks(scales.get("y") or {}):
-        v = _unit(scales.get("y") or {}, value)
-        if v < window[2] - 0.02 or v > window[3] + 0.02:
-            continue
-        _x0, y0 = px(0, v)
-        commands.append(("line", box[0], y0, box[0] + box[2], y0, grid, 1, 1.0))
+    # A grid painted in the page colour is invisible, and at print
+    # resolution the antialiased edge still shows. Skip it.
+    if _rgb(grid) != _rgb(surface):
+        for value, _lab in _ticks(scales.get("x") or {}):
+            u = _unit(scales.get("x") or {}, value)
+            if u < window[0] - 0.02 or u > window[1] + 0.02:
+                continue
+            x0, _y0 = px(u, 0)
+            commands.append(("line", x0, box[1], x0, box[1] + box[3], grid, 1, 1.0))
+        for value, _lab in _ticks(scales.get("y") or {}):
+            v = _unit(scales.get("y") or {}, value)
+            if v < window[2] - 0.02 or v > window[3] + 0.02:
+                continue
+            _x0, y0 = px(0, v)
+            commands.append(("line", box[0], y0, box[0] + box[2], y0, grid, 1, 1.0))
 
     gz = bool(spec.get("gz"))
     for layer in spec.get("layers") or []:
         _draw_layer_2d(layer, spec, blobs, gz, px, commands)
 
-    commands.append(("rect", box[0], box[1], box[2], box[3], None, axis, 1, 1.0))
+    _draw_frame(commands, box, axis, frame)
     for value, lab in _ticks(scales.get("x") or {}):
         u = _unit(scales.get("x") or {}, value)
         if u < window[0] - 0.02 or u > window[1] + 0.02:
@@ -531,6 +826,17 @@ def _draw_2d(spec, blobs, x, y, w, h, commands, labs, theme, fonts) -> None:
             "text", x + 12, y + 6, labs["title"], title_size, ink,
             "start", "top", 0, 600,
         ))
+
+
+def _draw_frame(commands, box, axis, frame: str) -> None:
+    x, y, w, h = box
+    if frame == "none" or w <= 0 or h <= 0:
+        return
+    if frame == "axes":
+        commands.append(("line", x, y, x, y + h, axis, 1, 1.0))
+        commands.append(("line", x, y + h, x + w, y + h, axis, 1, 1.0))
+        return
+    commands.append(("rect", x, y, w, h, None, axis, 1, 1.0))
 
 
 def _draw_layer_2d(layer, spec, blobs, gz, px, commands) -> None:
@@ -748,11 +1054,12 @@ def _draw_3d(spec, blobs, x, y, w, h, commands, labs, theme, fonts) -> None:
     triangles.sort(key=lambda item: -item[0])
     for _depth, poly, color, alpha in triangles:
         commands.append(("polygon", poly, color, None, 0, alpha))
-    for a, b in edges:
-        pa, pb = corners[a], corners[b]
-        if pa is None or pb is None:
-            continue
-        commands.append(("line", pa[0], pa[1], pb[0], pb[1], axis_color, 1, 1.0))
+    if str(theme.get("frame") or "box") != "none":
+        for a, b in edges:
+            pa, pb = corners[a], corners[b]
+            if pa is None or pb is None:
+                continue
+            commands.append(("line", pa[0], pa[1], pb[0], pb[1], axis_color, 1, 1.0))
     for projected, color, width, alpha in lines:
         commands.append(("polyline", projected, color, width, alpha))
     points.sort(key=lambda item: -item[0])
@@ -827,6 +1134,8 @@ def _draw_legend(spec, commands, box, theme, fonts, color_label: str = "") -> No
     ink2 = theme.get("ink2") or "#c3c2b7"
     surface = theme.get("surface") or "#0b1020"
     grid = theme.get("grid") or "#1c2742"
+    if _rgb(grid) == _rgb(surface):
+        grid = theme.get("muted") or "#898781"
     tick = fonts[0]
     row_h = _line_height(tick) + 4
     rows = []
@@ -1180,21 +1489,32 @@ def _text_width(text: str, size: float) -> int:
     return sum(item[1] for item in pieces) + gaps
 
 
-def _svg_text(commands, width: int, height: int) -> str:
+def _svg_text(
+    commands,
+    width: int,
+    height: int,
+    *,
+    svg_width: str | None = None,
+    svg_height: str | None = None,
+    family: str | None = None,
+) -> str:
+    shown_w = str(width) if svg_width is None else svg_width
+    shown_h = str(height) if svg_height is None else svg_height
+    family_name = family or _DEFAULT_FAMILY
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         (
-            f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{shown_w}" height="{shown_h}" '
             f'viewBox="0 0 {width} {height}" overflow="hidden">'
         ),
     ]
     for cmd in commands:
-        parts.append(_svg_cmd(cmd))
+        parts.append(_svg_cmd(cmd, family_name))
     parts.append("</svg>")
     return "".join(parts)
 
 
-def _svg_cmd(cmd) -> str:
+def _svg_cmd(cmd, family: str = _DEFAULT_FAMILY) -> str:
     op = cmd[0]
     if op == "rect":
         _op, x, y, w, h, fill, stroke, sw, alpha = cmd
@@ -1265,10 +1585,10 @@ def _svg_cmd(cmd) -> str:
             return ""
         dominant = {"top": "hanging", "middle": "middle", "alphabetic": "alphabetic"}[baseline]
         transform = f' transform="rotate({int(rotate)} {_num(x)} {_num(y)})"' if rotate else ""
-        family = 'font-family="system-ui,-apple-system,Segoe UI,sans-serif"'
+        family_attr = f"font-family={quoteattr(family)}"
         return (
-            f'<text x="{_num(x)}" y="{_num(y)}" fill="{fill}" font-size="{int(size)}" '
-            f'{family} font-weight="{int(weight)}" text-anchor="{anchor}" '
+            f'<text x="{_num(x)}" y="{_num(y)}" fill="{fill}" font-size="{int(round(float(size)))}" '
+            f'{family_attr} font-weight="{int(weight)}" text-anchor="{anchor}" '
             f'dominant-baseline="{dominant}"{transform}>{escape(str(text))}</text>'
         )
     return ""

@@ -25,7 +25,10 @@ from plot3 import (
     ggsave,
     labs,
     slider,
+    theme_bw,
+    theme_classic,
     theme_light,
+    theme_minimal,
     transition_time,
 )
 
@@ -54,12 +57,46 @@ def _read_png(path: Path) -> np.ndarray:
     stride = width * 3
     rows = []
     cursor = 0
+    prev = bytearray(stride)
     for _ in range(height):
-        assert raw[cursor] == 0
+        filt = raw[cursor]
         cursor += 1
-        rows.append(np.frombuffer(raw[cursor:cursor + stride], dtype=np.uint8).copy())
+        row = bytearray(raw[cursor:cursor + stride])
         cursor += stride
+        if filt == 1:
+            for i in range(stride):
+                left = row[i - 3] if i >= 3 else 0
+                row[i] = (row[i] + left) & 255
+        elif filt == 2:
+            for i in range(stride):
+                row[i] = (row[i] + prev[i]) & 255
+        elif filt == 3:
+            for i in range(stride):
+                left = row[i - 3] if i >= 3 else 0
+                row[i] = (row[i] + ((left + prev[i]) // 2)) & 255
+        elif filt == 4:
+            for i in range(stride):
+                left = row[i - 3] if i >= 3 else 0
+                up = prev[i]
+                upper_left = prev[i - 3] if i >= 3 else 0
+                row[i] = (row[i] + _paeth(left, up, upper_left)) & 255
+        else:
+            assert filt == 0
+        prev = row
+        rows.append(np.frombuffer(row, dtype=np.uint8).copy())
     return np.vstack(rows).reshape(height, width, 3)
+
+
+def _paeth(left: int, up: int, upper_left: int) -> int:
+    estimate = left + up - upper_left
+    dl = abs(estimate - left)
+    du = abs(estimate - up)
+    dul = abs(estimate - upper_left)
+    if dl <= du and dl <= dul:
+        return left
+    if du <= dul:
+        return up
+    return upper_left
 
 
 def _polyline_points(svg: str) -> list[tuple[float, float]]:
@@ -80,7 +117,7 @@ def test_html_save_is_unchanged_and_other_suffixes_stay_html(tmp_path, capsys):
     assert text.lower().startswith("<!doctype html>")
     assert "saved" in capsys.readouterr().out
 
-    other = tmp_path / "fig.pdf"
+    other = tmp_path / "fig.txt"
     fig.save(other)
     assert other.read_text(encoding="utf-8").lower().startswith("<!doctype html>")
 
@@ -112,6 +149,7 @@ def test_svg_scatter_has_circles_axes_and_theme(tmp_path):
     assert ">b</text>" in svg
     assert ">x</text>" in svg
     assert ">y</text>" in svg
+    assert 'font-family="Helvetica, Arial, sans-serif"' in svg
 
 
 def test_function_curve_is_a_parabola(tmp_path):
@@ -321,3 +359,125 @@ def test_width_is_pixels_not_inches():
         _pixels(0, "width")
     with pytest.raises(TypeError, match="pixel count"):
         _pixels("7in", "height")
+
+
+def _curve():
+    return ggplot() + geom_function("y = x", xlim=(0, 1), n=4)
+
+
+def test_publication_themes_are_white_and_the_default_stays_dark(tmp_path):
+    dark = _curve()
+    assert dark.theme_name == "dark"
+    bw = dark + theme_bw()
+    classic = dark + theme_classic()
+    minimal = dark + theme_minimal()
+    assert bw.theme_name == "bw"
+    assert classic.theme_name == "classic"
+    assert minimal.theme_name == "minimal"
+    # Adding another theme replaces the font choice from the previous one.
+    sized = bw + theme_bw(base_size=11, base_family="Arial")
+    assert sized.theme_base_size == 11
+    assert sized.theme_family == "Arial"
+    assert (sized + theme_classic()).theme_family is None
+    sized_svg = tmp_path / "sized.svg"
+    ggsave(sized_svg, sized, width=420, height=280)
+    sized_text = sized_svg.read_text(encoding="utf-8")
+    # 11 pt base: axis text is 0.8× and the title is 1.2×, in CSS pixels.
+    assert 'font-family="Arial"' in sized_text
+    assert 'font-size="18"' in sized_text
+    assert 'font-size="12"' in sized_text
+
+    bw_svg = tmp_path / "bw.svg"
+    classic_svg = tmp_path / "classic.svg"
+    minimal_svg = tmp_path / "minimal.svg"
+    ggsave(bw_svg, bw, width=420, height=280)
+    ggsave(classic_svg, classic, width=420, height=280)
+    ggsave(minimal_svg, minimal, width=420, height=280)
+    bw_text = bw_svg.read_text(encoding="utf-8")
+    classic_text = classic_svg.read_text(encoding="utf-8")
+    minimal_text = minimal_svg.read_text(encoding="utf-8")
+    assert 'fill="#ffffff"' in bw_text
+    assert 'stroke="#ebebeb"' in bw_text
+    assert 'stroke="#333333"' in bw_text
+    # Classic keeps the two axis lines and drops the grey grid.
+    assert classic_text.count("<line ") == 2
+    assert 'stroke="#000000"' in classic_text
+    assert 'stroke="#ebebeb"' not in classic_text
+    assert 'stroke="#ebebeb"' in minimal_text
+    assert 'stroke="#000000"' not in minimal_text
+    assert 'stroke="#333333"' not in minimal_text
+
+
+def test_inches_and_dpi_set_the_png_page(tmp_path, monkeypatch, capsys):
+    from plot3 import static
+
+    monkeypatch.setattr(static, "_load_cairosvg", lambda: None)
+    fig = _curve() + theme_bw()
+    path = tmp_path / "journal.png"
+    ggsave(path, fig, width=7, height=4, units="in", dpi=300)
+    rgb = _read_png(path)
+    assert rgb.shape == (1200, 2100, 3)
+    assert tuple(rgb[0, 0]) == (255, 255, 255)
+    assert "plot3[export]" in capsys.readouterr().out
+
+    cm = tmp_path / "cm.png"
+    ggsave(cm, fig, width=2.54, height=2.54, units="cm", dpi=100)
+    assert _read_png(cm).shape == (100, 100, 3)
+
+
+def test_svg_uses_physical_size_family_and_point_size(tmp_path):
+    fig = _curve() + theme_bw(base_family="Helvetica") + labs(y="$x^2$")
+    path = tmp_path / "page.svg"
+    ggsave(path, fig, width=7, height=4, units="in", dpi=300, fontsize=20, family="Arial")
+    svg = path.read_text(encoding="utf-8")
+    assert 'width="7in"' in svg
+    assert 'height="4in"' in svg
+    assert 'viewBox="0 0 672 384"' in svg
+    assert 'font-family="Arial"' in svg
+    # 20 pt → 20 * 96/72 px; title is 1.2× that, axis text is 0.8×.
+    assert 'font-size="32"' in svg
+    assert 'font-size="21"' in svg
+    assert "x²" in svg
+    assert "$" not in svg
+
+
+def test_pdf_without_cairosvg_names_the_extra(tmp_path, monkeypatch):
+    from plot3 import static
+
+    monkeypatch.setattr(static, "_load_cairosvg", lambda: None)
+    with pytest.raises(RuntimeError, match=r"plot3\[export\]"):
+        ggsave(tmp_path / "fig.pdf", _curve())
+    assert not (tmp_path / "fig.pdf").exists()
+
+
+def test_units_and_dpi_are_not_silently_dropped():
+    fig = _curve()
+    with pytest.raises(ValueError, match="units"):
+        ggsave("fig.png", fig, units="pt")
+    with pytest.raises(TypeError, match="units='in'"):
+        ggsave("fig.png", fig, width="7in", units="in")
+    with pytest.raises(ValueError, match="dpi applies"):
+        ggsave("fig.png", fig, width=800, dpi=300)
+
+
+def test_cairosvg_png_and_pdf_match_the_svg(tmp_path):
+    pytest.importorskip("cairosvg")
+    fig = _curve() + theme_bw() + labs(title="Hello", y="y")
+    png = tmp_path / "fig.png"
+    pdf = tmp_path / "fig.pdf"
+    svg = tmp_path / "fig.svg"
+    ggsave(png, fig, width=3.5, height=2.5, units="in", dpi=300)
+    ggsave(pdf, fig, width=3.5, height=2.5, units="in")
+    ggsave(svg, fig, width=3.5, height=2.5, units="in")
+    rgb = _read_png(png)
+    assert rgb.shape == (750, 1050, 3)
+    assert tuple(int(v) for v in rgb[0, 0]) == (255, 255, 255)
+    # Antialiased Helvetica has greys. The bitmap fallback has only flat colours.
+    title = rgb[8:70, 20:280]
+    assert len(np.unique(title.reshape(-1, 3), axis=0)) > 4
+    assert pdf.read_bytes().startswith(b"%PDF")
+    text = svg.read_text(encoding="utf-8")
+    assert 'width="3.5in"' in text
+    assert 'viewBox="0 0 336 240"' in text
+    assert ">Hello</text>" in text
+    assert ">y</text>" in text

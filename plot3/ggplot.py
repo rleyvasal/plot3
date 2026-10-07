@@ -164,6 +164,9 @@ class ggplot:
         self.layers: list[_Geom] = []
         self.labs: dict = {}
         self.theme_name = "dark"
+        # Font for ggsave. None keeps the size ladder and Helvetica/Arial.
+        self.theme_family: str | None = None
+        self.theme_base_size: float | None = None
         self.cscale: scale_colour_continuous | None = None
         self.facet: facet_wrap | None = None
         self.coord: coord_3d | coord_equal | coord_polar | None = None
@@ -286,6 +289,8 @@ class ggplot:
             g.labs.update(other)
         elif isinstance(other, _Theme):
             g.theme_name = other.name
+            g.theme_family = other.base_family
+            g.theme_base_size = other.base_size
         elif isinstance(other, scale_colour_continuous):
             g.cscale = other
         elif isinstance(other, facet_wrap):
@@ -412,18 +417,39 @@ class ggplot:
 
         return build_doc(self)
 
-    def save(self, path: str | Path, *, width=None, height=None) -> str:
+    def save(
+        self,
+        path: str | Path,
+        *,
+        width=None,
+        height=None,
+        units: str = "px",
+        dpi: float | None = None,
+        family: str | None = None,
+        fontsize: float | None = None,
+    ) -> str:
         """Write this figure.
 
-        ``.png`` and ``.svg`` write a static image. Any other suffix writes
-        the standalone HTML viewer. ``width`` and ``height`` are pixel sizes
-        and apply to png and svg.
+        ``.png``, ``.svg``, and ``.pdf`` write a static image. Any other
+        suffix writes the standalone HTML viewer. ``width`` and ``height``
+        are pixels unless ``units`` is ``"in"``, ``"cm"``, or ``"mm"``.
+        ``dpi`` is the PNG resolution for a physical size (default 300).
+        PDF needs the optional ``plot3[export]`` extra.
         """
         suffix = Path(path).suffix.lower()
-        if suffix in {".png", ".svg"}:
+        if suffix in {".png", ".svg", ".pdf"}:
             from plot3.static import save_static
 
-            return save_static(self, path, width=width, height=height)
+            return save_static(
+                self,
+                path,
+                width=width,
+                height=height,
+                units=units,
+                dpi=dpi,
+                family=family,
+                fontsize=fontsize,
+            )
         path = str(path)
         doc = self.html()
         with open(path, "w", encoding="utf-8") as f:
@@ -551,16 +577,44 @@ def autohide(on: bool = True) -> None:
     AUTOHIDE = bool(on)
 
 
-def ggsave(filename, plot: ggplot | None = None, *, width=None, height=None, **_kw) -> str:
+def ggsave(
+    filename,
+    plot: ggplot | None = None,
+    *,
+    width=None,
+    height=None,
+    units: str = "px",
+    dpi: float | None = None,
+    family: str | None = None,
+    fontsize: float | None = None,
+) -> str:
     """Save ``plot``.
 
     ``ggsave("fig.png", p)`` and ``ggsave("fig.svg", p)`` write a static
-    image. Any other suffix, including ``.html``, writes the standalone
-    viewer. ``width`` and ``height`` are pixels for png and svg. The plot
-    and the filename can be passed in either order.
+    image. ``ggsave("fig.pdf", p)`` writes a PDF when ``plot3[export]`` is
+    installed. Any other suffix, including ``.html``, writes the standalone
+    viewer. The plot and the filename can be passed in either order.
+
+    ``width`` and ``height`` are pixels by default, so ``width=640`` stays
+    640 pixels. A journal size uses physical units::
+
+        ggsave("fig.png", p, width=7, height=4, units="in", dpi=300)
+
+    ``dpi`` applies only with ``units`` of ``"in"``, ``"cm"``, or ``"mm"``
+    (default 300). ``family`` and ``fontsize`` override the theme font for
+    this file. ``fontsize`` is in points. ``$...$`` labels are saved as
+    Unicode, the same text the SVG draws.
     """
     if isinstance(filename, ggplot) and plot is not None and not isinstance(plot, ggplot):
         filename, plot = plot, filename  # tolerate swapped args
     if not isinstance(plot, ggplot):
         raise ValueError("ggsave(filename, plot) needs the plot")
-    return plot.save(filename, width=width, height=height)
+    return plot.save(
+        filename,
+        width=width,
+        height=height,
+        units=units,
+        dpi=dpi,
+        family=family,
+        fontsize=fontsize,
+    )

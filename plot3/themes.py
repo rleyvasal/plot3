@@ -27,15 +27,38 @@ _TURBO = ["#30123b", "#4143a7", "#4771e9", "#3e9bfe", "#22c5e2", "#1ae4b6",
           "#f05b12", "#d63506", "#af1801", "#7a0403"]
 _CONT_PALETTES = {"viridis": _VIRIDIS, "magma": _MAGMA, "turbo": _TURBO}
 
+# frame is how static export draws the panel: "box" (full rectangle),
+# "axes" (left and bottom only), or "none". The viewer ignores it and
+# strokes T.axis around the panel, so a white axis colour hides that box.
 _THEMES = {
     "light": dict(
         surface="#fcfcfb", ink="#0b0b0b", ink2="#52514e", muted="#898781",
         grid="#e1e0d9", axis="#c3c2b7", cat=_CAT_LIGHT, seq=_SEQ,
+        frame="box",
     ),
     "dark": dict(
         surface="#0b1020", ink="#ffffff", ink2="#c3c2b7", muted="#898781",
         grid="#1c2742", axis="#2e3a5c", cat=_CAT_DARK,
         seq=list(reversed(_SEQ)),
+        frame="box",
+    ),
+    # ggplot2 theme_bw: white page, grey major grid, dark panel border.
+    "bw": dict(
+        surface="#ffffff", ink="#000000", ink2="#222222", muted="#4d4d4d",
+        grid="#ebebeb", axis="#333333", cat=_CAT_LIGHT, seq=_SEQ,
+        frame="box",
+    ),
+    # ggplot2 theme_classic: white page, no grid, black axis lines.
+    "classic": dict(
+        surface="#ffffff", ink="#000000", ink2="#000000", muted="#4d4d4d",
+        grid="#ffffff", axis="#000000", cat=_CAT_LIGHT, seq=_SEQ,
+        frame="axes",
+    ),
+    # ggplot2 theme_minimal: white page, light grid, no axis box.
+    "minimal": dict(
+        surface="#ffffff", ink="#000000", ink2="#222222", muted="#4d4d4d",
+        grid="#ebebeb", axis="#ffffff", cat=_CAT_LIGHT, seq=_SEQ,
+        frame="none",
     ),
 }
 

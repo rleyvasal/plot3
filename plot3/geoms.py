@@ -6,7 +6,7 @@ import math
 
 import numpy as np
 
-from plot3.themes import _CONT_PALETTES
+from plot3.themes import _CONT_PALETTES, _THEMES
 
 
 def _as_column_name(value):
@@ -1073,14 +1073,67 @@ class transition_states:
 
 
 class _Theme:
-    def __init__(self, name: str):
+    """A named theme plus the font used by ``ggsave``.
+
+    ``base_size`` is in points, as in ggplot2. ``base_family`` is a CSS
+    font-family list. Both apply when the figure is saved to PNG, SVG, or
+    PDF. The interactive viewer keeps its own type.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        base_size: float | None = None,
+        base_family: str | None = None,
+    ):
+        if name not in _THEMES:
+            known = ", ".join(sorted(_THEMES))
+            raise ValueError(f"unknown theme {name!r}. Known themes: {known}")
         self.name = name
+        self.base_size = _theme_points(base_size)
+        self.base_family = None if base_family in (None, "") else str(base_family)
 
 
-def theme_dark() -> _Theme:
-    return _Theme("dark")
+def _theme_points(value) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise TypeError("base_size must be a font size in points, for example base_size=11")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            "base_size must be a font size in points, for example base_size=11"
+        ) from exc
+    if not math.isfinite(number) or number < 1 or number > 96:
+        raise ValueError("base_size must be between 1 and 96 points")
+    return number
 
 
-def theme_light() -> _Theme:
-    return _Theme("light")
+def _theme(name: str, base_size=None, base_family=None) -> _Theme:
+    return _Theme(name, base_size=base_size, base_family=base_family)
+
+
+def theme_dark(base_size=None, base_family=None) -> _Theme:
+    return _theme("dark", base_size, base_family)
+
+
+def theme_light(base_size=None, base_family=None) -> _Theme:
+    return _theme("light", base_size, base_family)
+
+
+def theme_bw(base_size=None, base_family=None) -> _Theme:
+    """White page, grey grid, and a dark panel border."""
+    return _theme("bw", base_size, base_family)
+
+
+def theme_classic(base_size=None, base_family=None) -> _Theme:
+    """White page, no grid, and black axis lines."""
+    return _theme("classic", base_size, base_family)
+
+
+def theme_minimal(base_size=None, base_family=None) -> _Theme:
+    """White page, light grid, and no panel box."""
+    return _theme("minimal", base_size, base_family)
 
