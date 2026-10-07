@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from plot3.themes import _CONT_PALETTES
@@ -176,6 +178,32 @@ class coord_3d:
         }
 
 
+class coord_equal:
+    """Lock 2D axis units so shapes are not stretched to the panel.
+
+    ``ratio`` is the ggplot2 ``coord_fixed`` ratio: one unit on x has the
+    same on-screen length as ``ratio`` units on y. ``coord_equal()`` is
+    ``ratio=1``. The panel keeps its size; the camera shows extra range on
+    the looser axis instead of stretching the data.
+
+    Implicit-only figures (a circle, for example) use this automatically.
+    """
+
+    def __init__(self, ratio: float = 1.0):
+        try:
+            value = float(ratio)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "coord_equal() ratio must be a positive number"
+            ) from exc
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError("coord_equal() ratio must be a positive number")
+        self.ratio = value
+
+    def to_spec(self) -> dict:
+        return {"aspect": "equal", "ratio": self.ratio}
+
+
 class geom_surface(_Geom):
     """3D surface from a regular x–y grid (height in ``z``).
 
@@ -290,6 +318,9 @@ class geom_function(_Geom):
     the domain and ``ylim`` clips the view. On a surface, ``xlim`` and
     ``ylim`` are the domain and ``zlim`` clips the view. ``n`` is the sample
     count (default 501 on a curve, 80 per axis on a surface or implicit curve).
+    An implicit curve that covers only part of that window is resampled
+    around the contour so the line stays smooth. A figure made only of
+    implicit equations uses equal axis units, so a circle stays round.
     """
 
     kind = "function"

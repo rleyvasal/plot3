@@ -21,6 +21,12 @@ from plot3.table import has_column, numeric_array
 _DEFAULT_DOMAIN = (-10.0, 10.0)
 _N_CURVE = 501
 _N_GRID = 80
+# The view fits the contour. A unit circle on the default (-10, 10) grid is
+# only a few dozen chords, so refit the grid around the zero set until the
+# contour fills it (or the cells are already fine).
+_CONTOUR_FILL = 0.72
+_CONTOUR_CELLS = 140
+_CONTOUR_REFITS = 2
 
 
 def data_domains(figure: Any, data: Any) -> dict[str, tuple[float, float]]:
@@ -455,11 +461,22 @@ def _expand_implicit(
     count = _sample_count(geom, grid=True)
     (xlo, xhi), _x_source = _domain_for(geom, "x", domains)
     (ylo, yhi), _y_source = _domain_for(geom, "y", domains)
-    xs = _linspace(xlo, xhi, count)
-    ys = _linspace(ylo, yhi, count)
-    xx, yy = np.meshgrid(xs, ys)
-    field = _call_formula(formula, {axes.x: xx, axes.y: yy})
-    polylines = _marching_squares(xs, ys, field, level=0.0)
+    polylines: list[list[tuple[float, float]]] = []
+    # Up to two refits. Stop once the contour fills the grid, and keep the
+    # last curve found if a tighter window misses it.
+    for _attempt in range(_CONTOUR_REFITS + 1):
+        xs = _linspace(xlo, xhi, count)
+        ys = _linspace(ylo, yhi, count)
+        xx, yy = np.meshgrid(xs, ys)
+        field = _call_formula(formula, {axes.x: xx, axes.y: yy})
+        found = _marching_squares(xs, ys, field, level=0.0)
+        if not found:
+            break
+        polylines = found
+        window = _tighter_contour_window(xs, ys, polylines, xlo, xhi, ylo, yhi)
+        if window is None:
+            break
+        xlo, xhi, ylo, yhi = window
     if not polylines:
         raise ExprError(
             "geom_function() found no curve where the equation is zero "
@@ -493,9 +510,58 @@ def _expand_implicit(
     out.sort_x = False
     out._groups = groups
     out._replace_mapping = True
+    out._implicit = True
     out._legend_label = formula.label
     out._axis_labels = {"x": axes.x, "y": axes.y}
     return out
+
+
+def _tighter_contour_window(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    polylines: list[list[tuple[float, float]]],
+    xlo: float,
+    xhi: float,
+    ylo: float,
+    yhi: float,
+) -> tuple[float, float, float, float] | None:
+    """Return a smaller sample window around the contour, or None to keep it.
+
+    Padding stays inside the current window and is at least one cell, so the
+    next pass still has grid cells on both sides of the curve.
+    """
+    points = [pt for poly in polylines if len(poly) >= 2 for pt in poly]
+    if len(points) < 2:
+        return None
+    arr = np.asarray(points, dtype=np.float64)
+    xmin, ymin = (float(v) for v in arr.min(axis=0))
+    xmax, ymax = (float(v) for v in arr.max(axis=0))
+    dx = float(xs[-1] - xs[0]) / max(len(xs) - 1, 1)
+    dy = float(ys[-1] - ys[0]) / max(len(ys) - 1, 1)
+    if dx <= 0.0 or dy <= 0.0:
+        return None
+    span_x = max(xmax - xmin, dx)
+    span_y = max(ymax - ymin, dy)
+    win_x = float(xhi - xlo)
+    win_y = float(yhi - ylo)
+    if win_x <= 0.0 or win_y <= 0.0:
+        return None
+    fills = span_x >= _CONTOUR_FILL * win_x and span_y >= _CONTOUR_FILL * win_y
+    cells_across = min(span_x / dx, span_y / dy)
+    if fills or cells_across >= _CONTOUR_CELLS:
+        return None
+    pad_x = max(dx, 0.12 * span_x)
+    pad_y = max(dy, 0.12 * span_y)
+    nlo = max(float(xlo), xmin - pad_x)
+    nhi = min(float(xhi), xmax + pad_x)
+    mlo = max(float(ylo), ymin - pad_y)
+    mhi = min(float(yhi), ymax + pad_y)
+    if nhi - nlo <= dx or mhi - mlo <= dy:
+        return None
+    shrunk = (nhi - nlo) < 0.85 * win_x or (mhi - mlo) < 0.85 * win_y
+    if not shrunk:
+        return None
+    return nlo, nhi, mlo, mhi
 
 
 def _marching_squares(

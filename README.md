@@ -226,6 +226,7 @@ preserves data order while `geom_line` sorts by x, `ggsave("fig.html", p)`.
 | `geom_isosurface(levels=, n=, …)` | Density isosurfaces from 3D points (levels relative to peak) |
 | `stat_density_3d(n=)` | Optional density-grid settings for `geom_isosurface` |
 | `coord_3d(aspect=, size_mode=, max_points=)` | 3D aspect (`data`/`equal`), point size mode, optional subsample |
+| `coord_equal(ratio=1)` | 2D lock: one x unit has the same length as `ratio` y units. Implicit-only figures use this automatically |
 | `geom_line(linewidth=)` / `geom_path()` | line sorts by x; path keeps data order; work in 3D too |
 | `geom_function("y = 2x + 2")` | curve, implicit contour, or `z = f(x, y)` surface; `ggplot()` needs no data |
 | `geom_col(width=)` | bars from `y` heights (ggplot2 `geom_col`) |
@@ -265,7 +266,11 @@ as `t` and y as `v`). A coefficient such as `a` must be passed at the end
 (`a=2`).
 
 `xlim` / `ylim` / `zlim` set the domain or clip the view. A curve uses `n=501`
-samples; a surface or implicit curve uses `n=80` per axis.
+samples; a surface or implicit curve uses `n=80` per axis. An implicit curve
+that covers only part of the window is resampled around the contour, so
+`x^2 + y^2 = 1` draws a smooth circle on the default domain. A figure made
+only of implicit equations also uses `coord_equal()`, so that circle is round
+in a wide panel. Add `coord_equal()` to any other 2D plot for the same lock.
 
 ## Package layout
 

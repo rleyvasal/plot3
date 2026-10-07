@@ -226,6 +226,108 @@ near high curvature is a later step.
 6. Notebook transformer in `masking.py` for `geom_function` (expression argument only).
 7. Optional sympy duck-typing (`.free_symbols` + `lambdify`); README examples.
 
+## Contour performance
+
+Implicit curves use marching squares in `plot3/function.py` (`_marching_squares`). Today it is a
+pure-Python loop over every grid cell, about 2.3 µs per cell:
+
+| Grid | Cells | Time per pass |
+|---|---|---|
+| 80 × 80 (default) | 6,241 | 17 ms |
+| 200 × 200 | 39,601 | 95 ms |
+| 400 × 400 | 159,201 | 370 ms |
+| 800 × 800 | 638,401 | 1,450 ms |
+
+The refit can run up to 3 passes, so larger grids or finer refinement quickly become slow.
+
+Why not PyTorch, JAX or CuPy: they are built for GPUs and gradients. They are large to install,
+slow to import, and at these sizes moving data to the GPU costs more than the work. Chaining
+segments into lines is sequential, which GPUs handle poorly. plot3 stays on NumPy, which it
+already requires.
+
+### Phase A: vectorised NumPy marching squares (default, no new dependency)
+
+1. **Classify all cells at once:** `inside = field >= level`; 4-bit case per cell
+   `b0 | b1<<1 | b2<<2 | b3<<3`; active cells are not case 0/15 and have finite corners.
+2. **Edge crossings once per grid edge:** horizontal edges `(ny, nx-1)`, vertical edges
+   `(ny-1, nx)`, interpolated in one NumPy expression; each edge gets an integer ID.
+3. **Lookup table:** 16 cases → pairs of edge IDs; saddles (cases 5 and 10) resolved by the
+   cell-centre value, same rule as today.
+4. **Chain by edge ID** instead of `round(point, 8)` float keys. Exact matching; fixes missed or
+   wrong joins at very small or very large scales. The Python loop runs over segments only
+   (curve length), not grid cells.
+5. **Tests:** compare against the current implementation on a circle, saddles (`x y = 0`,
+   `x y = 0.01`), several components, NaN holes (`log(x) + y = 0`), and open curves touching the
+   boundary. Same point sets; polyline order and start point may differ.
+
+Target: 800 × 800 in under about 50 ms.
+
+### Phase B: optional `contourpy` fast path
+
+`contourpy` is the C++ contouring engine behind matplotlib's `contour()`. Anyone with matplotlib
+already has it. plot3 uses it when present and falls back to Phase A otherwise. Nobody is forced
+to install anything.
+
+Depends on Phase A: the fallback must already be fast and correct.
+
+**Design**
+
+- One internal entry point, `_contour_lines(xs, ys, field, level) -> list[polyline]`, used by
+  `_expand_implicit`. Two private backends behind it: `_contour_numpy` and `_contour_contourpy`.
+- **Lazy import.** Import `contourpy` the first time an implicit curve is drawn, and cache the
+  result (module or `None`). `import plot3` must never import it, so startup time is unchanged.
+- **Backend choice:** `auto` (default: contourpy if importable, else numpy), `numpy`, or
+  `contourpy` (error if not installed). Set with the environment variable
+  `PLOT3_CONTOUR_BACKEND`. No `geom_function` parameter: this is an implementation detail, not
+  part of the plotting grammar.
+- **Call:** `contourpy.contour_generator(xs, ys, np.ma.masked_invalid(field),
+  line_type=LineType.Separate)` then `.lines(0.0)`. Masking covers both NaN and ±inf, matching
+  today's "skip non-finite cells" rule.
+- **Output normalisation:** convert each `(N, 2)` array to the existing polyline format. Closed
+  loops repeat the first point at the end, which matches the current convention; verify this in
+  a test rather than assuming it.
+- **Safety net:** if contourpy raises an unexpected error, fall back to NumPy and warn once
+  (`plot3: contourpy failed (...), using the NumPy contour backend`). Explicitly requested
+  `contourpy` re-raises instead.
+- **Version floor:** `contourpy>=1.0`. Check the version at import; an older one counts as not
+  installed in `auto` mode.
+
+**Known difference:** contourpy may resolve saddle cells differently from Phase A, so at an
+exact saddle the two backends can connect the four branches in a different pairing. Both are
+valid contours of the same field. Tests compare point sets, not connectivity, at saddles.
+
+**Packaging**
+
+```toml
+[project.optional-dependencies]
+fast = ["contourpy>=1.0"]
+dev  = ["pytest>=7.0", "polars>=1.0", "contourpy>=1.0"]
+```
+
+README: `pip install plot3[fast]` for faster implicit curves; matplotlib users already have it.
+
+**Tests**
+
+- Parametrise every implicit-curve test over both backends; the contourpy case uses
+  `pytest.importorskip("contourpy")`.
+- Equivalence: both backends interpolate linearly along cell edges, so crossing points should
+  match to about 1e-12 away from saddles.
+- Selection: `auto` picks contourpy when importable and numpy when the import is blocked
+  (monkeypatch `sys.modules["contourpy"] = None`); `contourpy` with it missing raises a clear
+  error; a bad env value raises a clear error.
+- `import plot3` does not import contourpy (check `sys.modules`).
+- Benchmark guard on 400 × 400 for each backend.
+- CI runs the suite twice: once with contourpy installed, once without.
+
+### Order
+
+1. Commit the current refit fix.
+2. Phase A: vectorised NumPy marching squares, same behaviour.
+3. Retune the default implicit grid size; decide whether the refit is still needed.
+4. Refine only the cells the curve passes through (fixes a small loop next to a long line).
+5. Phase B: optional contourpy backend.
+6. `coord_equal()` for 2D, and equal aspect by default when every layer is implicit.
+
 ## Later ideas
 
 - Parametric curves: `geom_function(x="cos(t)", y="sin(t)")`.

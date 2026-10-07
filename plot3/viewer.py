@@ -258,6 +258,40 @@ if (!S.is3d) {
   const M = { l: 58, r: 12, t: 30, b: 40 };
   let W = 100, H = 100;
   const cam = new THREE.OrthographicCamera(-0.03, 1.03, 1.03, -0.03, -10, 10);
+  // Equal aspect: one data unit has the same length on x and y. The panel
+  // stays the cell's shape; the camera shows extra range on the looser axis.
+  const coord2d = S.coord || { aspect: 'data', ratio: 1 };
+  const equalAspect = coord2d.aspect === 'equal';
+  const equalRatio = coord2d.ratio > 0 ? coord2d.ratio : 1;
+  let equalZoom = 1;
+  let equalCx = 0.5;
+  let equalCy = 0.5;
+
+  function equalBase() {
+    // Nx / Ny so pixels per x unit = ratio * pixels per y unit.
+    const target = (W / Math.max(H, 1)) * (spanOf('y') / spanOf('x')) / equalRatio;
+    const pad = 0.03;
+    const need = 1 + 2 * pad;
+    let Nx = need, Ny = need;
+    if (Nx / Ny < target) Nx = Ny * target;
+    else Ny = Nx / target;
+    return { Nx: Nx, Ny: Ny };
+  }
+  function applyEqual() {
+    const base = equalBase();
+    const Nx = base.Nx * equalZoom;
+    const Ny = base.Ny * equalZoom;
+    cam.left = equalCx - Nx / 2;
+    cam.right = equalCx + Nx / 2;
+    cam.bottom = equalCy - Ny / 2;
+    cam.top = equalCy + Ny / 2;
+  }
+  function readEqualFromCam() {
+    const base = equalBase();
+    equalCx = (cam.left + cam.right) / 2;
+    equalCy = (cam.bottom + cam.top) / 2;
+    equalZoom = base.Nx > 0 ? (cam.right - cam.left) / base.Nx : 1;
+  }
 
   for (const L of S.layers) {
     const n = L.n;
@@ -534,6 +568,7 @@ if (!S.is3d) {
   function layout() {
     W = Math.max(50, figEl.clientWidth - M.l - M.r);
     H = Math.max(50, figEl.clientHeight - M.t - M.b);
+    if (equalAspect) applyEqual();
     host.style.left = M.l + 'px'; host.style.top = M.t + 'px';
     renderer.setSize(W, H);
     svg.setAttribute('width', figEl.clientWidth);
@@ -558,6 +593,20 @@ if (!S.is3d) {
   const el = renderer.domElement;
   el.style.touchAction = 'none';
   function clampView() {
+    if (equalAspect) {
+      readEqualFromCam();
+      if (equalZoom > 2.4) equalZoom = 2.4;
+      if (equalZoom < 0.01) equalZoom = 0.01;
+      const base = equalBase();
+      const Nx = base.Nx * equalZoom;
+      const Ny = base.Ny * equalZoom;
+      // Keep a slice of the data range on screen. Spans stay locked together.
+      const slack = 0.15;
+      equalCx = Math.min((1 - slack) + Nx / 2, Math.max(slack - Nx / 2, equalCx));
+      equalCy = Math.min((1 - slack) + Ny / 2, Math.max(slack - Ny / 2, equalCy));
+      applyEqual();
+      return;
+    }
     const MAX = 2.4, LO = -0.7, HI = 1.7;
     for (const [a, b] of [['left', 'right'], ['bottom', 'top']]) {
       let span = cam[b] - cam[a];
@@ -618,7 +667,12 @@ if (!S.is3d) {
     draw();
   }, { passive: false });
   el.addEventListener('dblclick', () => {
-    cam.left = -0.03; cam.right = 1.03; cam.bottom = -0.03; cam.top = 1.03;
+    if (equalAspect) {
+      equalZoom = 1; equalCx = 0.5; equalCy = 0.5;
+      applyEqual();
+    } else {
+      cam.left = -0.03; cam.right = 1.03; cam.bottom = -0.03; cam.top = 1.03;
+    }
     draw();
   });
 

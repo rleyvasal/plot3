@@ -13,6 +13,7 @@ from plot3.geoms import (
     _Geom,
     aes,
     coord_3d,
+    coord_equal,
     facet_wrap,
     labs,
     scale_colour_continuous,
@@ -145,7 +146,7 @@ class ggplot:
         self.theme_name = "dark"
         self.cscale: scale_colour_continuous | None = None
         self.facet: facet_wrap | None = None
-        self.coord: coord_3d | None = None
+        self.coord: coord_3d | coord_equal | None = None
         self.stat_density_3d: stat_density_3d | None = None
         self.height = height if isinstance(height, str) else f"{int(height)}px"
         self.quantize = bool(quantize)
@@ -249,7 +250,7 @@ class ggplot:
             g.cscale = other
         elif isinstance(other, facet_wrap):
             g.facet = other
-        elif isinstance(other, coord_3d):
+        elif isinstance(other, (coord_3d, coord_equal)):
             g.coord = other
         elif isinstance(other, stat_density_3d):
             g.stat_density_3d = other

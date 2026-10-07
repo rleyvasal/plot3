@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from plot3 import aes, geom_function, geom_point, ggplot
+from plot3 import aes, coord_equal, geom_function, geom_point, ggplot
 from plot3.build import build_spec, expand_stat_geom
 
 
@@ -128,6 +128,78 @@ def test_implicit_circle_and_rearranged_line():
     line = _layer("y = 2x + 2y", xlim=(-2, 2), ylim=(-4, 4), n=31)
     pts = line.data_override
     assert np.median(np.abs(pts["y"] + 2 * pts["x"])) < 0.15
+
+
+def _equal_spans(width, height, x_span, y_span, ratio=1.0, pad=0.03):
+    """Camera spans (normalized) that the 2D viewer uses for coord_equal."""
+    target = (width / height) * (y_span / x_span) / ratio
+    need = 1 + 2 * pad
+    nx = ny = need
+    if nx / ny < target:
+        nx = ny * target
+    else:
+        ny = nx / target
+    return nx, ny
+
+
+def test_coord_equal_locks_units_and_implicit_figures_use_it():
+    circle, _ = build_spec(ggplot() + geom_function("x^2 + y^2 = 1"))
+    assert circle["coord"] == {"aspect": "equal", "ratio": 1.0}
+    # Wide panel, equal data spans: x shows more range so the circle stays round.
+    nx, ny = _equal_spans(900, 400, 2.0, 2.0)
+    assert nx / ny == pytest.approx(900 / 400)
+    assert 900 / (nx * 2.0) == pytest.approx(400 / (ny * 2.0))
+    # ratio=2: one x unit is as long on screen as two y units.
+    nx, ny = _equal_spans(800, 800, 4.0, 2.0, ratio=2.0)
+    px_x = 800 / (nx * 4.0)
+    px_y = 800 / (ny * 2.0)
+    assert px_x == pytest.approx(2 * px_y)
+
+    free, _ = build_spec(ggplot() + geom_function("y = x", xlim=(0, 1), n=4))
+    assert free["coord"] is None
+
+    forced, _ = build_spec(
+        ggplot() + geom_function("y = x", xlim=(0, 1), n=4) + coord_equal(ratio=2)
+    )
+    assert forced["coord"] == {"aspect": "equal", "ratio": 2.0}
+
+    df = pd.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0]})
+    mixed, _ = build_spec(
+        ggplot(df, aes(x="x", y="y"))
+        + geom_point()
+        + geom_function("x^2 + y^2 = 1")
+    )
+    assert mixed["coord"] is None
+
+    with pytest.raises(ValueError, match="positive number"):
+        coord_equal(0)
+    cloud = pd.DataFrame({"x": [0.0], "y": [0.0], "z": [0.0]})
+    with pytest.raises(ValueError, match="coord_equal"):
+        build_spec(
+            ggplot(cloud, aes(x="x", y="y", z="z")) + geom_point() + coord_equal()
+        )
+
+
+def test_default_circle_is_a_smooth_loop():
+    # No limits: the sample window starts at (-10, 10) and must tighten,
+    # otherwise the unit circle is a few dozen straight chords.
+    circle = _layer("x^2 + y^2 = 1")
+    pts = circle.data_override
+    x = pts["x"].to_numpy()
+    y = pts["y"].to_numpy()
+    assert len(circle._groups) == 1
+    start, count = circle._groups[0]
+    assert count == len(pts)
+    assert np.hypot(x[0] - x[-1], y[0] - y[-1]) < 1e-6
+    radius = np.hypot(x, y)
+    assert np.median(np.abs(radius - 1)) < 0.01
+    steps = np.abs(np.diff(np.unwrap(np.arctan2(y[start:start + count], x[start:start + count]))))
+    assert len(pts) > 120
+    assert float(np.max(steps)) < np.radians(4.0)
+
+    line = _layer("y = 2x + 2y")
+    pts = line.data_override
+    assert np.median(np.abs(pts["y"] + 2 * pts["x"])) < 0.05
 
 
 def test_keyword_formula_uses_that_name_as_the_output():

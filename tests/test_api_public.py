@@ -24,6 +24,7 @@ REQUIRED = {
     "stat_density_3d",
     "facet_wrap",
     "coord_3d",
+    "coord_equal",
     "labs",
     "scale_colour_continuous",
     "scale_colour_viridis_c",

@@ -11,7 +11,14 @@ import pandas as pd
 import copy
 
 from plot3.encode import encode_norm, pack_u16, pack_u32
-from plot3.geoms import _Geom, aes, geom_col, scale_colour_continuous
+from plot3.geoms import (
+    _Geom,
+    aes,
+    coord_3d,
+    coord_equal,
+    geom_col,
+    scale_colour_continuous,
+)
 from plot3.scales import Scale, col_values, resolution
 from plot3.stats3d import isosurface_levels, regular_grid_mesh
 from plot3.table import (
@@ -699,6 +706,38 @@ def _axis_label(g, base_map: dict, resolved, axis: str, is3d: bool) -> str:
     return axis
 
 
+def _coord_spec(coord, is3d: bool, resolved) -> dict | None:
+    """Coordinate spec for the viewer.
+
+    3D keeps ``coord_3d``. 2D uses ``coord_equal`` when asked, and also when
+    every layer is an implicit equation, so a circle is round in a wide panel.
+    """
+    if is3d:
+        if isinstance(coord, coord_equal):
+            raise ValueError(
+                "coord_equal() is for 2D figures; use coord_3d(aspect='equal')"
+            )
+        if coord is not None:
+            return coord.to_spec()
+        return {"aspect": "data", "sizeMode": "scene", "maxPoints": None}
+    if isinstance(coord, coord_3d):
+        raise ValueError(
+            "coord_3d() requires a 3D figure (map aes(z=...) on layers)"
+        )
+    if isinstance(coord, coord_equal):
+        return coord.to_spec()
+    if coord is not None:
+        raise ValueError(
+            "coord_3d() requires a 3D figure (map aes(z=...) on layers)"
+        )
+    implicit_only = bool(resolved) and all(
+        getattr(geom, "_implicit", False) for geom, _mapped in resolved
+    )
+    if implicit_only:
+        return {"aspect": "equal", "ratio": 1.0}
+    return None
+
+
 def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if not g.layers:
         raise ValueError("add a geom: ggplot(df, aes(...)) + geom_point()")
@@ -1261,18 +1300,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             legend = entries
 
     base_map = dict(g.mapping)
-    if is3d:
-        coord_spec = (
-            coord.to_spec()
-            if coord is not None
-            else {"aspect": "data", "sizeMode": "scene", "maxPoints": None}
-        )
-    else:
-        coord_spec = None
-        if coord is not None:
-            raise ValueError(
-                "coord_3d() requires a 3D figure (map aes(z=...) on layers)"
-            )
+    coord_spec = _coord_spec(coord, is3d, resolved)
 
     spec = {
         "v": 1,

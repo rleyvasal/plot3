@@ -6,6 +6,7 @@ from plot3.__version__ import __version__
 from plot3.geoms import (
     aes,
     coord_3d,
+    coord_equal,
     facet_wrap,
     geom_bar,
     geom_boxplot,
@@ -73,6 +74,7 @@ __all__ = [
     "geom_violin",
     "facet_wrap",
     "coord_3d",
+    "coord_equal",
     "labs",
     "scale_colour_continuous",
     "scale_color_continuous",
