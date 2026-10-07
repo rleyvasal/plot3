@@ -282,17 +282,35 @@ def test_unsupported_layer_kind():
         static._draw_spec(spec, {}, 0, 0, 200, 150, [], border=False)
 
 
-def test_viewer_html_has_hover_save_buttons():
+def test_viewer_html_has_save_menu():
     df = pd.DataFrame({"x": [1.0], "y": [1.0]})
     html = (ggplot(df, aes(x="x", y="y")) + geom_point()).html()
     fig = html.split('id="fig"', 1)[1].split('id="player"', 1)[0]
     assert 'id="modebar"' in fig
-    assert 'id="save-png"' in fig
-    assert 'id="save-svg"' in fig
-    assert "Save as PNG" in fig
-    assert "Save as SVG" in fig
+    assert 'id="save-btn"' in fig
+    assert 'aria-haspopup="menu"' in fig
+    assert 'aria-expanded="false"' in fig
+    assert 'role="menu"' in fig
+    assert 'role="menuitem"' in fig
+    assert 'data-act="html"' in fig
+    assert 'data-act="svg"' in fig
+    assert 'data-act="png"' in fig
+    assert 'data-act="video"' in fig
+    assert 'data-act="copy"' in fig
+    assert "Interactive figure" in fig
+    assert "Vector, for papers" in fig
+    assert "Image (2× sharp)" in fig
+    assert "Copy PNG to clipboard" in fig
+    assert 'id="save-png"' not in html
+    assert 'id="save-svg"' not in html
+    assert 'id="play-rec"' not in html
+    assert "Vector axes" in html
+    assert "showSaveFilePicker" in html
+    assert "Downloads are blocked here" in html
     assert "preserveDrawingBuffer: true" in html
     assert "#fig:hover #modebar" in html
+    assert "@media (hover:none)" in html
+    assert "const PRISTINE" in html
 
 
 def test_width_is_pixels_not_inches():

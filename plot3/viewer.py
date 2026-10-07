@@ -9,7 +9,7 @@ _DOC_TEMPLATE = """<!doctype html>
 html,body{margin:0;height:100%;overflow:hidden;
   font:12px system-ui,-apple-system,"Segoe UI",sans-serif}
 body{display:flex;flex-direction:column}
-#fig{position:relative;width:100%;flex:1;min-height:0}
+#fig{position:relative;width:100%;flex:1;min-height:0;z-index:1}
 #note{display:none;flex:none;padding:2px 14px 8px;font-size:11px;line-height:1.4}
 #title{position:absolute;left:14px;top:8px;max-width:calc(100% - 120px);
   font-size:14px;font-weight:600;z-index:4}
@@ -20,18 +20,28 @@ body{display:flex;flex-direction:column}
 #axes{position:absolute;inset:0;pointer-events:none;z-index:2}
 #legend{position:absolute;right:10px;top:36px;z-index:4;padding:6px 9px;
   border-radius:6px;font-size:11px;line-height:1.7}
-#modebar{position:absolute;top:6px;right:6px;z-index:6;display:flex;
-  opacity:0;transition:opacity .12s ease;border-radius:4px;user-select:none;
-  box-shadow:0 1px 2px rgba(0,0,0,.25)}
-#modebar button{font:600 11px/1.2 system-ui,-apple-system,"Segoe UI",sans-serif;
-  padding:4px 7px;margin:0;border:0;background:transparent;color:inherit;
-  cursor:pointer;white-space:nowrap}
-#modebar button:first-child{border-radius:3px 0 0 3px}
-#modebar button:last-child{border-radius:0 3px 3px 0}
-#modebar button:hover{background:rgba(128,128,128,.18)}
-#modebar button:focus-visible{outline:2px solid currentColor;outline-offset:-2px}
-#fig:hover #modebar,#modebar:focus-within{opacity:1}
+#modebar{position:absolute;top:6px;right:6px;z-index:6;
+  opacity:0;transition:opacity .12s ease;user-select:none}
+#fig:hover #modebar,#modebar:focus-within,#modebar.open{opacity:1}
 @media (hover:none){#modebar{opacity:1}}
+#save-btn{font:600 12px/1.2 system-ui,-apple-system,"Segoe UI",sans-serif;
+  padding:4px 8px;border-radius:4px;cursor:pointer;color:inherit;
+  box-shadow:0 1px 2px rgba(0,0,0,.25)}
+#save-menu{position:absolute;right:0;top:calc(100% + 4px);min-width:232px;
+  padding:4px;border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+#modebar.open-up #save-menu{top:auto;bottom:calc(100% + 4px)}
+#save-menu[hidden]{display:none}
+#save-menu button{display:flex;align-items:baseline;justify-content:space-between;
+  gap:12px;width:100%;text-align:left;padding:6px 8px;border:0;border-radius:4px;
+  background:transparent;color:inherit;cursor:pointer;white-space:nowrap;
+  font:12px/1.35 system-ui,-apple-system,"Segoe UI",sans-serif}
+#save-menu button[hidden]{display:none}
+#save-menu .save-k{font-weight:650;min-width:4.2em}
+#save-menu .save-d{opacity:.72;font-weight:400}
+#save-menu .save-sep{height:1px;margin:4px 6px;background:currentColor;opacity:.25}
+#save-menu button.save-status{display:block;white-space:normal;font-weight:500;text-align:left}
+#save-btn:hover,#save-menu button:hover,#save-menu button:focus{background:rgba(128,128,128,.18)}
+#save-btn:focus-visible,#save-menu button:focus-visible{outline:2px solid currentColor;outline-offset:-2px}
 #legend .sw{display:inline-block;width:9px;height:9px;border-radius:5px;
   margin-right:6px;vertical-align:-1px}
 #legend .lg-e{cursor:pointer;user-select:none}
@@ -63,8 +73,15 @@ body{display:flex;flex-direction:column}
   <div id="tip"></div>
   <div id="hint"></div>
   <div id="modebar">
-    <button type="button" id="save-png" aria-label="Save as PNG" title="Save as PNG">PNG</button>
-    <button type="button" id="save-svg" aria-label="Save as SVG" title="Save as SVG">SVG</button>
+    <button type="button" id="save-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="save-menu">⤓ Save</button>
+    <div id="save-menu" role="menu" aria-label="Save" hidden>
+      <button type="button" role="menuitem" data-act="html"><span class="save-k">HTML</span><span class="save-d">Interactive figure</span></button>
+      <button type="button" role="menuitem" data-act="svg"><span class="save-k">SVG</span><span class="save-d">Vector, for papers</span></button>
+      <button type="button" role="menuitem" data-act="png"><span class="save-k">PNG</span><span class="save-d">Image (2× sharp)</span></button>
+      <div class="save-sep" role="separator"></div>
+      <button type="button" role="menuitem" data-act="video" hidden><span class="save-k">Video</span><span class="save-d">WebM (animations)</span></button>
+      <button type="button" role="menuitem" data-act="copy">Copy PNG to clipboard</button>
+    </div>
   </div>
 </div>
 <div id="player">
@@ -72,7 +89,6 @@ body{display:flex;flex-direction:column}
   <input id="play-range" type="range" min="0" max="1000" value="1000" aria-label="Frame">
   <span id="play-readout"></span>
   <label>Speed <input id="play-speed" type="range" min="0.25" max="4" step="0.25" value="1" aria-label="Speed"></label>
-  <button type="button" id="play-rec" style="display:none">Record</button>
 </div>
 <div id="note"></div>
 __PAYLOADS__
@@ -83,6 +99,21 @@ import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 
+// Captured before the viewer touches the DOM. Saving the live tree would
+// duplicate the canvas and the legend when the file is opened again.
+const PRISTINE = '<!doctype html>' + document.documentElement.outerHTML;
+function readSavedState() {
+  const node = document.getElementById('plot3-state');
+  if (!node) return null;
+  try {
+    const data = JSON.parse(node.textContent || '');
+    if (!data || typeof data !== 'object') return null;
+    return data;
+  } catch (err) {
+    return null;
+  }
+}
+const SAVED = readSavedState();
 const S = __SPEC__;
 const T = S.theme;
 document.body.style.background = T.surface;
@@ -398,7 +429,7 @@ tip.style.background = T.surface;
 tip.style.border = '1px solid ' + T.axis;
 tip.style.color = T.ink;
 
-// preserveDrawingBuffer keeps the frame readable for the hover save buttons.
+// preserveDrawingBuffer keeps the frame readable for the Save menu.
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setClearColor(0x000000, 0);
@@ -1028,7 +1059,6 @@ function installSliders(renderFrame) {
   document.getElementById('play-btn').style.display = 'none';
   document.getElementById('play-range').style.display = 'none';
   document.getElementById('play-readout').style.display = 'none';
-  document.getElementById('play-rec').style.display = 'none';
   const speed = document.getElementById('play-speed');
   if (speed && speed.parentElement) speed.parentElement.style.display = 'none';
   const readouts = [];
@@ -1040,7 +1070,8 @@ function installSliders(renderFrame) {
     input.type = 'range';
     input.min = '0';
     input.max = '1000';
-    input.value = '0';
+    const savedU = SAVED && SAVED.sliders ? SAVED.sliders[p.name] : null;
+    input.value = (savedU == null || !isFinite(+savedU)) ? '0' : String(savedU);
     input.id = 'slider-' + p.name;
     input.setAttribute('aria-label', p.name);
     const out = document.createElement('span');
@@ -1104,21 +1135,21 @@ function installPlayer(renderFrame) {
   // A paused chart shows the last keyframe. Playback starts at the first one,
   // so the opening frame is not immediately wrapped away.
   if (playing) playT = 0;
+  if (SAVED && typeof SAVED.playT === 'number' && isFinite(SAVED.playT)) {
+    playT = Math.max(0, Math.min(nF - 1, SAVED.playT));
+    playing = false;
+  }
   const player = document.getElementById('player');
   const btn = document.getElementById('play-btn');
   const range = document.getElementById('play-range');
   const readout = document.getElementById('play-readout');
   const speed = document.getElementById('play-speed');
-  const recBtn = document.getElementById('play-rec');
   const yearEl = document.getElementById('year');
   player.style.display = 'flex';
   player.style.color = T.ink2;
   btn.style.background = T.surface;
   btn.style.color = T.ink;
   btn.style.border = '1px solid ' + T.axis;
-  recBtn.style.background = T.surface;
-  recBtn.style.color = T.ink;
-  recBtn.style.border = '1px solid ' + T.axis;
   yearEl.style.display = 'block';
   yearEl.style.color = T.ink;
   const titleTemplate = (S.labs && S.labs.title) || '';
@@ -1195,37 +1226,37 @@ function installPlayer(renderFrame) {
       paint();
     }
   });
-  if (recBtn && typeof MediaRecorder !== 'undefined' && renderer.domElement.captureStream) {
-    recBtn.style.display = 'inline-block';
-    recBtn.addEventListener('click', () => {
-      if (recording) return;
-      let mime = 'video/webm';
-      if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) mime = 'video/webm;codecs=vp9';
-      else if (!MediaRecorder.isTypeSupported('video/webm')) return;
-      const stream = renderer.domElement.captureStream(30);
-      const rec = new MediaRecorder(stream, { mimeType: mime });
-      const chunks = [];
-      rec.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
-      rec.onstop = () => {
-        recording = false;
-        recBtn.textContent = 'Record';
-        const blob = new Blob(chunks, { type: 'video/webm' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'plot3.webm';
-        a.click();
-        URL.revokeObjectURL(url);
-      };
-      mediaRec = rec;
-      recording = true;
-      playing = true;
-      playT = 0;
-      recBtn.textContent = 'Recording';
-      rec.start();
-      paint();
-    });
-  }
+  window.__plot3.startRecording = () => new Promise((resolve, reject) => {
+    if (recording) { reject(new Error('Already recording')); return; }
+    if (typeof MediaRecorder === 'undefined' || !renderer.domElement.captureStream) {
+      reject(new Error('Video recording is not available in this browser'));
+      return;
+    }
+    let mime = 'video/webm';
+    if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) mime = 'video/webm;codecs=vp9';
+    else if (!MediaRecorder.isTypeSupported('video/webm')) {
+      reject(new Error('WebM recording is not available in this browser'));
+      return;
+    }
+    const stream = renderer.domElement.captureStream(30);
+    const rec = new MediaRecorder(stream, { mimeType: mime });
+    const chunks = [];
+    rec.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+    rec.onstop = () => {
+      recording = false;
+      resolve(new Blob(chunks, { type: 'video/webm' }));
+    };
+    rec.onerror = () => {
+      recording = false;
+      reject(new Error('Video recording failed'));
+    };
+    mediaRec = rec;
+    recording = true;
+    playing = true;
+    playT = 0;
+    rec.start();
+    paint();
+  });
   let last = 0;
   function loop(now) {
     if (!last) last = now;
@@ -1570,6 +1601,13 @@ if (!S.is3d) {
     s += `<rect x="${M.l}" y="${M.t}" width="${W}" height="${H}" fill="none" stroke="${T.axis}"/>`;
     s += `<text x="${M.l+W/2}" y="${M.t+H+30}" fill="${T.ink2}" text-anchor="middle">${plot3Esc(withFrame(S.labs.x))}</text>`;
     s += `<text x="14" y="${M.t+H/2}" fill="${T.ink2}" text-anchor="middle" transform="rotate(-90 14 ${M.t+H/2})">${plot3Esc(withFrame(S.labs.y))}</text>`;
+    const anns = S.ann || [];
+    for (let i = 0; i < anns.length; i++) {
+      const ann = anns[i];
+      const X = px(ann.x), Y = py(ann.y);
+      if (X < M.l - 2 || X > M.l + W + 2 || Y < M.t - 2 || Y > M.t + H + 2) continue;
+      s += '<text x="' + X + '" y="' + Y + '" fill="' + T.ink + '" text-anchor="middle" font-size="13" font-weight="600">' + plot3Esc(ann.text) + '</text>';
+    }
     svg.innerHTML = s;
   }
 
@@ -2061,6 +2099,17 @@ if (!S.is3d) {
   controls.target.copy(ctr);
   controls.enableDamping = true;
   controls.update();
+  window.__plot3.camera = cam;
+  window.__plot3.controls = controls;
+  if (SAVED && SAVED.camera) {
+    const shot = SAVED.camera;
+    if (shot.position && shot.position.length === 3)
+      cam.position.set(+shot.position[0], +shot.position[1], +shot.position[2]);
+    if (shot.target && shot.target.length === 3)
+      controls.target.set(+shot.target[0], +shot.target[1], +shot.target[2]);
+    cam.updateProjectionMatrix();
+    controls.update();
+  }
 
   // ── 3D hover: nearest point (screen-space) for point layers ────────────
   const tip3 = document.getElementById('tip');
@@ -2219,26 +2268,31 @@ if (!S.is3d) {
   };
 }
 
-// Hover save. PNG is the picture on screen. SVG keeps the axis overlay as
+// Save menu. PNG is the picture on screen. SVG keeps the axis overlay as
 // vectors and embeds the WebGL layer, which is already a raster.
 function installSave() {
   const bar = document.getElementById('modebar');
-  const pngBtn = document.getElementById('save-png');
-  const svgBtn = document.getElementById('save-svg');
-  if (!bar || !pngBtn || !svgBtn) return;
-  bar.style.background = T.surface;
-  bar.style.color = T.ink;
-  bar.style.border = '1px solid ' + T.axis;
-  svgBtn.style.boxShadow = 'inset 1px 0 0 ' + T.axis;
+  const btn = document.getElementById('save-btn');
+  const menu = document.getElementById('save-menu');
+  if (!bar || !btn || !menu) return;
+  btn.style.background = T.surface;
+  btn.style.color = T.ink;
+  btn.style.border = '1px solid ' + T.axis;
+  menu.style.background = T.surface;
+  menu.style.color = T.ink;
+  menu.style.border = '1px solid ' + T.axis;
+  const svgHint = menu.querySelector('[data-act="svg"] .save-d');
+  if (svgHint && S.is3d) svgHint.textContent = 'Vector axes';
+  const videoItem = menu.querySelector('[data-act="video"]');
+  const canRecord = !!(S.transition && S.transition.nFrames > 1
+    && typeof MediaRecorder !== 'undefined' && renderer.domElement.captureStream);
+  if (videoItem) videoItem.hidden = !canRecord;
   bar.addEventListener('pointerdown', (ev) => ev.stopPropagation());
 
-  function fileStem() {
-    let raw = (S.labs && S.labs.title) ? String(S.labs.title) : '';
-    if (!raw) return 'plot3';
-    if (frameLabel && raw.indexOf('{frame_time}') >= 0)
-      raw = raw.split('{frame_time}').join(frameLabel);
+  function slug(raw, limit) {
     let stem = '';
-    for (let i = 0; i < raw.length && stem.length < 60; i++) {
+    const cap = limit || 60;
+    for (let i = 0; i < raw.length && stem.length < cap; i++) {
       const c = raw.charAt(i);
       const ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
         (c >= '0' && c <= '9') || c === '.' || c === '_' || c === '-';
@@ -2247,6 +2301,17 @@ function installSave() {
     }
     while (stem.charAt(0) === '_') stem = stem.slice(1);
     while (stem && stem.charAt(stem.length - 1) === '_') stem = stem.slice(0, -1);
+    return stem;
+  }
+  function fileStem() {
+    let raw = (S.labs && S.labs.title) ? String(S.labs.title) : '';
+    const hasToken = raw.indexOf('{frame_time}') >= 0;
+    if (frameLabel && hasToken) raw = raw.split('{frame_time}').join(frameLabel);
+    let stem = slug(raw, 60) || 'plot3';
+    if (frameLabel && !hasToken && (S.transition || S.slider)) {
+      const extra = slug(String(frameLabel), 40);
+      if (extra) stem = slug(stem + '_' + extra, 80) || stem;
+    }
     return stem || 'plot3';
   }
   function num(v) { return String(Math.round(Number(v) * 100) / 100); }
@@ -2401,8 +2466,8 @@ function installSave() {
       ctx.restore();
     }
   }
-  function pickDpr(w, h) {
-    let dpr = Math.min(window.devicePixelRatio || 1, 3);
+  function pickDpr(w, h, prefer) {
+    let dpr = prefer == null ? Math.min(window.devicePixelRatio || 1, 3) : prefer;
     const maxSide = 4096;
     if (w * dpr > maxSide) dpr = maxSide / w;
     if (h * dpr > maxSide) dpr = Math.min(dpr, maxSide / h);
@@ -2417,6 +2482,26 @@ function installSave() {
     return { canvas: c, ctx: ctx };
   }
   function compose(kind) {
+    const gl = renderer.domElement;
+    const bufW = Math.max(1, gl.clientWidth);
+    const bufH = Math.max(1, gl.clientHeight);
+    const prevRatio = renderer.getPixelRatio();
+    const boost = kind === 'png' && bufW > 1 && bufH > 1;
+    if (boost) {
+      renderer.setPixelRatio(2);
+      renderer.setSize(bufW, bufH, false);
+    }
+    try {
+      return composeView(kind);
+    } finally {
+      if (boost) {
+        renderer.setPixelRatio(prevRatio);
+        renderer.setSize(bufW, bufH, false);
+        renderNow();
+      }
+    }
+  }
+  function composeView(kind) {
     renderNow();
     const figR = figEl.getBoundingClientRect();
     const cssW = Math.max(1, figR.width);
@@ -2427,7 +2512,7 @@ function installSave() {
     if (noteEl && getComputedStyle(noteEl).display !== 'none' && (noteEl.textContent || '').trim())
       noteH = noteEl.offsetHeight || 0;
     const totalH = cssH + noteH;
-    const dpr = pickDpr(cssW, totalH);
+    const dpr = pickDpr(cssW, totalH, kind === 'png' ? 2 : null);
     const hostR = host.getBoundingClientRect();
     const hx = hostR.left - figR.left, hy = hostR.top - figR.top;
     const shot = layerCanvas(cssW, totalH, dpr);
@@ -2507,28 +2592,219 @@ function installSave() {
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 2000);
   }
-  function download(kind, btn) {
-    const prev = btn.textContent;
-    btn.disabled = true;
+  function downloadsAllowed() {
     try {
-      const stem = fileStem();
-      if (kind === 'svg') {
-        const text = compose('svg');
-        downloadBlob(new Blob([text], { type: 'image/svg+xml;charset=utf-8' }), stem + '.svg');
-      } else {
-        downloadBlob(dataURLToBlob(compose('png')), stem + '.png');
+      const sb = window.frameElement && window.frameElement.sandbox;
+      return !sb || sb.length === 0 || sb.contains('allow-downloads');
+    } catch (err) { return true; }
+  }
+  async function saveFile(blob, name, mime, ext) {
+    if (window.showSaveFilePicker) {
+      try {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: name,
+          types: [{ description: ext.toUpperCase() + ' file', accept: { [mime]: ['.' + ext] } }],
+        });
+        const out = await handle.createWritable();
+        await out.write(blob);
+        await out.close();
+        return 'saved';
+      } catch (err) {
+        if (err.name === 'AbortError') return 'cancelled';
       }
+    }
+    if (downloadsAllowed()) { downloadBlob(blob, name); return 'downloaded'; }
+    throw new Error('downloads blocked');
+  }
+  function stateJSON() {
+    const state = {};
+    if (S.transition) state.playT = playT;
+    if (S.slider && S.slider.params) {
+      const sliders = {};
+      for (let i = 0; i < S.slider.params.length; i++) {
+        const name = S.slider.params[i].name;
+        const node = document.getElementById('slider-' + name);
+        if (node) sliders[name] = +node.value;
+      }
+      state.sliders = sliders;
+    }
+    const cam = window.__plot3.camera;
+    const controls = window.__plot3.controls;
+    if (cam && controls) {
+      state.camera = {
+        position: [cam.position.x, cam.position.y, cam.position.z],
+        target: [controls.target.x, controls.target.y, controls.target.z],
+      };
+    }
+    return JSON.stringify(state).split('<').join('\\\\' + 'u003c');
+  }
+  function htmlDocument() {
+    // Split the tags so the source itself does not contain them. PRISTINE
+    // includes this script, and a contiguous match would rewrite the module.
+    const open = '<script type="application/json" id="' + 'plot3-state">';
+    const close = '<' + '/script>';
+    const tag = open + stateJSON() + close;
+    let doc = PRISTINE;
+    const at = doc.indexOf(open);
+    if (at >= 0) {
+      const end = doc.indexOf(close, at);
+      if (end >= 0) return doc.slice(0, at) + tag + doc.slice(end + close.length);
+    }
+    const closeBody = '<' + '/body>';
+    const bodyAt = doc.lastIndexOf(closeBody);
+    if (bodyAt >= 0) return doc.slice(0, bodyAt) + tag + doc.slice(bodyAt);
+    return doc + tag;
+  }
+  const BLOCKED = "Downloads are blocked here. Use Copy PNG, or in Python: ggsave('plot.png', fig).";
+  function remember(item) {
+    if (!item.dataset.labelHtml) item.dataset.labelHtml = item.innerHTML;
+  }
+  function restoreItem(item) {
+    if (item._saveTimer) { clearTimeout(item._saveTimer); item._saveTimer = 0; }
+    if (item.dataset.labelHtml) item.innerHTML = item.dataset.labelHtml;
+    item.classList.remove('save-status');
+    item.disabled = false;
+  }
+  function showStatus(item, text) {
+    if (item._saveTimer) { clearTimeout(item._saveTimer); item._saveTimer = 0; }
+    remember(item);
+    item.textContent = text;
+    item.classList.add('save-status');
+  }
+  function flashSaved(item) {
+    showStatus(item, 'Saved ✓');
+    item._saveTimer = setTimeout(() => restoreItem(item), 1600);
+  }
+  function menuItems() {
+    return Array.prototype.filter.call(
+      menu.querySelectorAll('[role="menuitem"]'),
+      (el) => !el.hidden);
+  }
+  function placeMenu() {
+    // The button is at the top of the figure. Opening upward when the plot
+    // is short clips the menu off the iframe. Pick the side that shows more
+    // of it, which is upward only when the button sits low in the window.
+    const btnR = btn.getBoundingClientRect();
+    const menuH = menu.offsetHeight || 220;
+    const spaceBelow = window.innerHeight - btnR.bottom;
+    const spaceAbove = btnR.top;
+    const visibleBelow = Math.min(menuH, Math.max(0, spaceBelow));
+    const visibleAbove = Math.min(menuH, Math.max(0, spaceAbove));
+    bar.classList.toggle('open-up', visibleAbove > visibleBelow);
+  }
+  function closeMenu(focusBtn) {
+    menu.hidden = true;
+    btn.setAttribute('aria-expanded', 'false');
+    bar.classList.remove('open');
+    menuItems().forEach(restoreItem);
+    if (focusBtn) btn.focus();
+  }
+  function openMenu(focusIndex) {
+    menu.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+    bar.classList.add('open');
+    placeMenu();
+    const items = menuItems();
+    if (!items.length) return;
+    const idx = focusIndex == null ? 0 : Math.max(0, Math.min(items.length - 1, focusIndex));
+    items[idx].focus();
+  }
+  async function runSave(item) {
+    if (!item || item.dataset.busy === '1') return;
+    const act = item.getAttribute('data-act');
+    item.dataset.busy = '1';
+    item.disabled = true;
+    showStatus(item, act === 'video' ? 'Recording…' : 'Saving…');
+    try {
+      if (act === 'video') {
+        const blob = await window.__plot3.startRecording();
+        showStatus(item, 'Saving…');
+        const how = await saveFile(blob, fileStem() + '.webm', 'video/webm', 'webm');
+        window.__plot3.saveError = '';
+        if (how === 'cancelled') restoreItem(item);
+        else flashSaved(item);
+        return;
+      }
+      const stem = fileStem();
+      let blob, name, mime, ext;
+      if (act === 'png' || act === 'copy') {
+        blob = dataURLToBlob(compose('png'));
+        name = stem + '.png'; mime = 'image/png'; ext = 'png';
+      } else if (act === 'svg') {
+        blob = new Blob([compose('svg')], { type: 'image/svg+xml;charset=utf-8' });
+        name = stem + '.svg'; mime = 'image/svg+xml'; ext = 'svg';
+      } else {
+        blob = new Blob([htmlDocument()], { type: 'text/html;charset=utf-8' });
+        name = stem + '.html'; mime = 'text/html'; ext = 'html';
+      }
+      if (act === 'copy') {
+        if (!navigator.clipboard || !navigator.clipboard.write || typeof ClipboardItem === 'undefined')
+          throw new Error('Clipboard image copy is not available in this browser');
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        window.__plot3.saveError = '';
+        flashSaved(item);
+        return;
+      }
+      const how = await saveFile(blob, name, mime, ext);
       window.__plot3.saveError = '';
+      if (how === 'cancelled') restoreItem(item);
+      else flashSaved(item);
     } catch (err) {
-      window.__plot3.saveError = String(err && err.message ? err.message : err);
+      const blocked = err && err.message === 'downloads blocked';
+      const msg = blocked ? BLOCKED : String(err && err.message ? err.message : err);
+      window.__plot3.saveError = msg;
+      showStatus(item, msg);
+      item.disabled = false;
       console.error(err);
     } finally {
-      btn.disabled = false;
-      btn.textContent = prev;
+      item.dataset.busy = '0';
     }
   }
-  pngBtn.addEventListener('click', () => download('png', pngBtn));
-  svgBtn.addEventListener('click', () => download('svg', svgBtn));
+  btn.addEventListener('click', () => {
+    if (menu.hidden) openMenu(0);
+    else closeMenu(false);
+  });
+  menu.querySelectorAll('[role="menuitem"]').forEach((item) => {
+    item.addEventListener('click', () => runSave(item));
+  });
+  document.addEventListener('pointerdown', (ev) => {
+    if (menu.hidden || bar.contains(ev.target)) return;
+    closeMenu(false);
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && !menu.hidden) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      closeMenu(true);
+      return;
+    }
+    const items = menuItems();
+    if (menu.hidden) {
+      if (!bar.contains(ev.target)) return;
+      if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        openMenu(ev.key === 'ArrowUp' ? items.length - 1 : 0);
+      }
+      return;
+    }
+    if (!bar.contains(ev.target)) return;
+    const cur = items.indexOf(document.activeElement);
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (!items.length) return;
+      const dir = ev.key === 'ArrowDown' ? 1 : -1;
+      const next = items[(cur + dir + items.length) % items.length];
+      next.focus();
+    } else if (ev.key === 'Home' && items.length) {
+      ev.preventDefault();
+      items[0].focus();
+    } else if (ev.key === 'End' && items.length) {
+      ev.preventDefault();
+      items[items.length - 1].focus();
+    }
+  });
+  window.__plot3.saveError = '';
   window.__plot3.snapshot = (kind) => compose(kind || 'png');
 }
 installSave();

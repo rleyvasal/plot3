@@ -227,8 +227,10 @@ def test_unsupported_command_names_itself():
         parse_formula(r"\sum x")
     with pytest.raises(ExprError, match=r"\\lim isn't supported in geom_function"):
         parse_formula(r"\lim_{x \to 0} x")
-    with pytest.raises(ExprError, match=r"\\begin isn't supported in geom_function"):
+    with pytest.raises(ExprError, match=r"expected &"):
         parse_formula(r"\begin{cases} x \end{cases}")
+    with pytest.raises(ExprError, match=r"\\begin\{matrix\} isn't supported"):
+        parse_formula(r"\begin{matrix} x \end{matrix}")
 
 
 def test_dollars_and_a_supplied_e_keep_their_meaning():

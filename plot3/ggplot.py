@@ -12,8 +12,11 @@ from pathlib import Path
 from plot3.geoms import (
     _Geom,
     aes,
+    area,
     coord_3d,
     coord_equal,
+    coord_polar,
+    derivative,
     facet_wrap,
     labs,
     scale_colour_continuous,
@@ -21,6 +24,7 @@ from plot3.geoms import (
     scale_y_log10,
     stat_density_3d,
     slider,
+    tangent,
     transition_states,
     transition_time,
     _Theme,
@@ -162,7 +166,9 @@ class ggplot:
         self.theme_name = "dark"
         self.cscale: scale_colour_continuous | None = None
         self.facet: facet_wrap | None = None
-        self.coord: coord_3d | coord_equal | None = None
+        self.coord: coord_3d | coord_equal | coord_polar | None = None
+        # (layer index, area | tangent | derivative) attached to a geom_function.
+        self._addons: list = []
         self.stat_density_3d: stat_density_3d | None = None
         self.scale_x: scale_x_log10 | None = None
         self.scale_y: scale_y_log10 | None = None
@@ -246,6 +252,7 @@ class ggplot:
         g.facet = self.facet
         g.coord = self.coord
         g.stat_density_3d = self.stat_density_3d
+        g._addons = list(getattr(self, "_addons", ()) or ())
         g._payload = None
         g.data = self._as_table(data)
         g.backend = self._detect_backend(g.data)
@@ -258,10 +265,23 @@ class ggplot:
         g.facet = self.facet
         g.coord = self.coord
         g.stat_density_3d = self.stat_density_3d
+        g._addons = list(getattr(self, "_addons", ()) or ())
         # Grammar changes invalidate a frozen payload.
         g._payload = None
         if isinstance(other, _Geom):
             g.layers.append(other)
+        elif isinstance(other, (area, tangent, derivative)):
+            if not g.layers or getattr(g.layers[-1], "kind", None) != "function":
+                example = {
+                    "area": "area(0, 2)",
+                    "tangent": "tangent(at=1)",
+                    "derivative": "derivative()",
+                }[type(other).__name__]
+                raise TypeError(
+                    f"{type(other).__name__}() follows geom_function(). "
+                    f'For example ggplot() + geom_function("y = x^2") + {example}'
+                )
+            g._addons.append((len(g.layers) - 1, other))
         elif isinstance(other, labs):
             g.labs.update(other)
         elif isinstance(other, _Theme):
@@ -270,7 +290,7 @@ class ggplot:
             g.cscale = other
         elif isinstance(other, facet_wrap):
             g.facet = other
-        elif isinstance(other, (coord_3d, coord_equal)):
+        elif isinstance(other, (coord_3d, coord_equal, coord_polar)):
             g.coord = other
         elif isinstance(other, stat_density_3d):
             g.stat_density_3d = other
@@ -507,12 +527,14 @@ class ggplot:
             title = self.labs.get("title", "plot3 figure")
             surface = _THEMES[self.theme_name]["surface"]
         # sandbox must allow scripts or the three.js viewer never starts.
+        # allow-downloads: without it, Chrome and Firefox ignore <a download>
+        # and raise nothing. clipboard-write lets Copy PNG work in the frame.
         # A wrapping div keeps the string from starting with ``<iframe``,
         # which is what makes IPython suggest display.IFrame.
         return (
             f'<div class="plot3-fig"><iframe srcdoc="{_htmlesc.escape(doc, quote=True)}" '
-            f'sandbox="allow-scripts allow-same-origin allow-pointer-lock" '
-            f'allow="fullscreen" '
+            f'sandbox="allow-scripts allow-same-origin allow-pointer-lock allow-downloads" '
+            f'allow="fullscreen; clipboard-write" '
             f'style="width:100%;height:{self.height};border:0;'
             f'border-radius:6px;background:{surface}" '
             f'title="{_htmlesc.escape(str(title))}"></iframe></div>'

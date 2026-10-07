@@ -96,8 +96,15 @@ _PASSTHROUGH_KW = frozenset(
         "target",
         "up",
         "position",
+        "mark",
+        "at",
+        "stream",
+        "tlim",
+        "baseline",
     }
 )
+
+_FORMULA_CALLS = frozenset({"geom_function", "geom_vector_field"})
 
 _BT_RE = re.compile(r"`([^`\n]+)`")
 
@@ -108,7 +115,7 @@ def rewrite_formula_carets(source: str) -> str:
     ``2*x^3`` and ``(2*x)^3`` are the same tree once Python has parsed ``^``
     as xor, so the rewrite has to happen on the text.
     """
-    if "^" not in source or "geom_function" not in source:
+    if "^" not in source or not any(name in source for name in _FORMULA_CALLS):
         return source
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
@@ -122,7 +129,7 @@ def rewrite_formula_carets(source: str) -> str:
     armed = False  # just saw the name geom_function
     for tok in tokens:
         if depth == 0:
-            if tok.type == tokenize.NAME and tok.string == "geom_function":
+            if tok.type == tokenize.NAME and tok.string in _FORMULA_CALLS:
                 armed = True
                 continue
             if armed and tok.type == tokenize.OP and tok.string == "(":
@@ -260,7 +267,7 @@ class Plot3MaskTransformer(ast.NodeTransformer):
             return self.generic_visit(node)
 
         name = node.func.id
-        if name == "geom_function":
+        if name in _FORMULA_CALLS:
             return self._visit_geom_function(node)
         if name not in _SELECTOR_FUNCS:
             return self.generic_visit(node)
@@ -331,12 +338,20 @@ class Plot3MaskTransformer(ast.NodeTransformer):
         return self.generic_visit(node)
 
     def _visit_geom_function(self, node: ast.Call) -> ast.AST:
-        """Stringify the formula argument only (``y=``, ``z=``, ``f=``, or first).
+        """Stringify formula arguments (``x=``, ``y=``, ``z=``, ``f=``, ``dx=``, ``dy=``).
 
-        ``a=``, ``xlim=``, ``n=`` and other keywords stay Python so they
-        evaluate normally. ``^`` is already ``**`` if the text hook ran.
+        A parametric curve and a vector field quote every formula keyword.
+        A number such as ``z=1`` stays Python, so it is a coefficient and
+        not a second formula. ``a=``, ``xlim=``, ``n=``, ``mark=``, and
+        ``tlim=`` stay Python too. ``^`` is already ``**`` if the text hook ran.
         """
         known = self._known()
+        call_name = node.func.id if isinstance(node.func, ast.Name) else ""
+        axis_names = (
+            {"dx", "dy", "dz"}
+            if call_name == "geom_vector_field"
+            else {"x", "y", "z", "f"}
+        )
         formula_done = False
         new_args: list[ast.AST] = []
         for index, arg in enumerate(node.args):
@@ -345,17 +360,34 @@ class Plot3MaskTransformer(ast.NodeTransformer):
                 formula_done = True
             else:
                 new_args.append(self.visit(arg))
+        expr_axes: list[ast.keyword] = []
+        numeric_axes: list[ast.keyword] = []
+        for kw in node.keywords:
+            if kw.arg in axis_names and _is_number_const(kw.value):
+                numeric_axes.append(kw)
+            elif kw.arg in axis_names and _is_formula_expr(kw.value, known):
+                expr_axes.append(kw)
+        # geom_function(y=2) is a constant formula. z=1 next to a real
+        # formula is a coefficient, so it stays a number.
+        quote_numeric = (
+            call_name == "geom_function"
+            and not formula_done
+            and not expr_axes
+            and len(numeric_axes) == 1
+        )
+        quoted = {id(kw) for kw in expr_axes}
+        if quote_numeric:
+            quoted.add(id(numeric_axes[0]))
         new_kws: list[ast.keyword] = []
         for kw in node.keywords:
-            if (
-                not formula_done
-                and kw.arg in {"y", "z", "f"}
-                and _is_formula_expr(kw.value, known)
-            ):
+            if kw.arg == "mark" and _mark_is_bare(kw.value):
+                new_kws.append(
+                    ast.keyword(arg="mark", value=_quote_mark(kw.value))
+                )
+            elif id(kw) in quoted:
                 new_kws.append(
                     ast.keyword(arg=kw.arg, value=_formula_string(kw.value))
                 )
-                formula_done = True
             else:
                 new_kws.append(
                     ast.keyword(arg=kw.arg, value=self.visit(kw.value))
@@ -363,6 +395,38 @@ class Plot3MaskTransformer(ast.NodeTransformer):
         node.args = new_args
         node.keywords = new_kws
         return node
+
+
+def _is_number_const(node: ast.AST) -> bool:
+    """True for ``1`` and ``-1``, which are coefficients rather than formulas."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        node = node.operand
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, (int, float))
+        and not isinstance(node.value, bool)
+    )
+
+
+def _mark_is_bare(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return True
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return bool(node.elts) and all(isinstance(elt, ast.Name) for elt in node.elts)
+    return False
+
+
+def _quote_mark(node: ast.AST) -> ast.AST:
+    if isinstance(node, ast.Name):
+        return ast.copy_location(ast.Constant(value=node.id), node)
+    elts = [
+        ast.copy_location(ast.Constant(value=elt.id), elt)
+        if isinstance(elt, ast.Name)
+        else elt
+        for elt in node.elts
+    ]
+    copied = ast.List(elts=elts, ctx=ast.Load()) if isinstance(node, ast.List) else ast.Tuple(elts=elts, ctx=ast.Load())
+    return ast.copy_location(copied, node)
 
 
 def _is_formula_expr(node: ast.AST, known: set[str]) -> bool:

@@ -108,6 +108,9 @@ def _tokenize(source: str) -> list[tuple[str, str]]:
         if char == "\\":
             name, index = _command_at(source, index)
             if name in _SPACING:
+                # A row break in \begin{cases}. Other spacing commands stay blank.
+                if name == "\\":
+                    tokens.append(("op", "\\\\"))
                 continue
             tokens.append(("cmd", name))
             continue
@@ -130,7 +133,7 @@ def _tokenize(source: str) -> list[tuple[str, str]]:
             tokens.append(("op", "//"))
             index += 2
             continue
-        if char in "+-*/^=_,()[]{}|":
+        if char in "+-*/^=_,()[]{}|&<>":
             tokens.append(("op", char))
             index += 1
             continue
@@ -164,13 +167,46 @@ class _Parser:
     def parse(self) -> str:
         if not self.tokens:
             raise ValueError("syntax error at end of formula")
-        left = self._expr()
+        left = self._relation()
         if self._eat_op("="):
-            right = self._expr()
+            right = self._relation()
             self._finish()
             return f"{left} = {right}"
         self._finish()
         return left
+
+    def _relation(self) -> str:
+        left = self._expr()
+        rel = self._eat_relation()
+        if rel is None:
+            return left
+        right = self._expr()
+        return f"({left}){rel}({right})"
+
+    def _eat_relation(self) -> str | None:
+        if self._eat_op("<"):
+            if self._eat_op("="):
+                return "<="
+            return "<"
+        if self._eat_op(">"):
+            if self._eat_op("="):
+                return ">="
+            return ">"
+        mapping = {
+            "le": "<=",
+            "leq": "<=",
+            "ge": ">=",
+            "geq": ">=",
+            "lt": "<",
+            "gt": ">",
+            "ne": "!=",
+            "neq": "!=",
+        }
+        tok = self._peek()
+        if tok is not None and tok[0] == "cmd" and tok[1] in mapping:
+            self.index += 1
+            return mapping[tok[1]]
+        return None
 
     def _finish(self) -> None:
         tok = self._peek()
@@ -225,7 +261,10 @@ class _Parser:
         if val in _VALUE_CMDS or val in _GREEK:
             return True
         # An unknown command is a factor so the error can name it.
-        if val in {"cdot", "times", "bmod", "right", "rvert", "rfloor", "rceil", "end"}:
+        if val in {
+            "cdot", "times", "bmod", "right", "rvert", "rfloor", "rceil", "end",
+            "le", "leq", "ge", "geq", "lt", "gt", "ne", "neq",
+        }:
             return False
         return True
 
@@ -315,6 +354,8 @@ class _Parser:
         if val in _GREEK:
             self.index += 1
             return self._subscript(_GREEK[val])
+        if val == "begin":
+            return self._cases()
         if val == "left":
             return self._left()
         if val in {"lvert", "vert", "|"}:
@@ -326,6 +367,62 @@ class _Parser:
         if val == "{":
             return self._group("}")
         self._bad(tok)
+
+    def _env_name(self) -> str:
+        chars: list[str] = []
+        while True:
+            tok = self._peek()
+            if tok is None or tok[0] != "name":
+                break
+            chars.append(tok[1])
+            self.index += 1
+        if not chars:
+            raise ValueError("syntax error at '\\begin'")
+        return "".join(chars)
+
+    def _cases(self) -> str:
+        """\\begin{cases} value & condition \\\\ ... \\end{cases} → where()."""
+        self.index += 1
+        self._expect_op("{")
+        env = self._env_name()
+        self._expect_op("}")
+        if env != "cases":
+            raise ValueError(
+                f"\\begin{{{env}}} isn't supported in geom_function"
+            )
+        rows: list[tuple[str, str]] = []
+        if self._peek() == ("cmd", "end"):
+            raise ValueError("\\begin{cases} needs at least one row")
+        while self._peek() != ("cmd", "end"):
+            if self._peek() is None:
+                raise ValueError("\\begin{cases} is missing \\end{cases}")
+            value = self._expr()
+            if not self._eat_op("&"):
+                raise ValueError("syntax error in \\begin{cases}: expected &")
+            cond = self._relation()
+            rows.append((cond, value))
+            if self._eat_op("\\\\"):
+                continue
+            if self._peek() == ("cmd", "end"):
+                break
+            raise ValueError(
+                "syntax error in \\begin{cases}: expected \\\\ or \\end{cases}"
+            )
+        if not rows:
+            raise ValueError("\\begin{cases} needs at least one row")
+        if not self._eat_cmd("end"):
+            raise ValueError("\\begin{cases} is missing \\end{cases}")
+        self._expect_op("{")
+        end_env = self._env_name()
+        self._expect_op("}")
+        if end_env != env:
+            raise ValueError(
+                f"\\end{{{end_env}}} doesn't match \\begin{{{env}}}"
+            )
+        expr = "nan"
+        for cond, value in reversed(rows):
+            expr = f"where({cond}, {value}, {expr})"
+        return expr
 
     def _group(self, closer: str) -> str:
         self.index += 1

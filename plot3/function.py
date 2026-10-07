@@ -70,8 +70,10 @@ def expand_function(
     domains: dict[str, tuple[float, float]] | None = None,
     transition: Any = None,
     slider: Any = None,
-) -> _Geom:
-    """Turn ``geom_function`` into a line, path, or surface layer."""
+    coord: Any = None,
+    addons: list | None = None,
+) -> list:
+    """Turn ``geom_function`` into one or more line, area, or point layers."""
     del base_mapping, data  # the formula carries its own samples
     formula: Formula = geom.formula
     domains = domains or {}
@@ -87,14 +89,61 @@ def expand_function(
     # A coefficient passed as a keyword (a=2) already sits in the namespace.
     # Naming it on a slider or transition sweeps that value instead.
     covered = any(name in pending or name in namespace for name in ranges)
+    # Imported here: calculus imports this module at load time.
+    from plot3.calculus import animation_blocked, attach_calculus, expand_special
+
+    extras = list(addons or ())
+    blocked = animation_blocked(formula, geom, coord, extras)
+    if ranges and blocked:
+        raise ValueError(blocked)
+    special = expand_special(geom, formula, domains, coord)
+    if special is not None:
+        if extras or tuple(getattr(geom, "marks", ()) or ()):
+            _reject_curve_extras(geom, extras)
+        _link_colors(special)
+        return special
     axes = _assign_axes(formula)
     if ranges and (pending or covered):
-        return _expand_animated(geom, formula, axes, domains, sweep)
+        return [_expand_animated(geom, formula, axes, domains, sweep)]
     if axes.kind == "surface":
-        return _expand_surface(geom, formula, axes, domains)
-    if axes.kind == "implicit":
-        return _expand_implicit(geom, formula, axes, domains)
-    return _expand_curve(geom, formula, axes, domains)
+        primary = _expand_surface(geom, formula, axes, domains)
+    elif axes.kind == "implicit":
+        primary = _expand_implicit(geom, formula, axes, domains)
+    else:
+        primary = _expand_curve(geom, formula, axes, domains)
+    layers = attach_calculus(primary, geom, formula, domains, extras)
+    _link_colors(layers)
+    return layers
+
+
+def _reject_curve_extras(geom, addons) -> None:
+    """Parametric, polar, and inequality layers stay a single curve."""
+    if tuple(getattr(geom, "marks", ()) or ()):
+        raise ExprError(
+            "mark='roots' and mark='extrema' are for a curve y = f(x)"
+        )
+    name = type(addons[0]).__name__
+    raise ExprError(
+        f"{name}() is for a curve y = f(x). "
+        f'For example geom_function("y = x^2") + {name}(...)'
+    )
+
+
+def _link_colors(layers: list) -> None:
+    """Point a fill at the curve it belongs to, so each curve keeps its colour."""
+    primary = next(
+        (layer for layer in layers if getattr(layer, "_formula_primary", False)),
+        None,
+    )
+    if primary is None:
+        return
+    token = f"formula-{id(primary)}"
+    primary._color_key = token
+    for layer in layers:
+        if layer is primary:
+            continue
+        if getattr(layer, "_inherit_color", False) and not getattr(layer, "_inherit_from", None):
+            layer._inherit_from = token
 
 
 class _Axes:
@@ -313,7 +362,11 @@ def _clip_series(
         lock: tuple[float, float] | None = (lo, hi)
     else:
         lo, hi, blew_up = _robust_window(values[finite])
-        if blew_up:
+        # A pole is a thin spike. A piecewise curve (flat, then a parabola)
+        # puts a large share of its samples outside that window; keep them.
+        outside = finite & ((values < lo) | (values > hi))
+        thin = float(np.count_nonzero(outside)) < 0.2 * float(np.count_nonzero(finite))
+        if blew_up and thin:
             keep = finite & (values >= lo) & (values <= hi)
             note = _clip_note(note_name or view_axis, lo, hi, param=view_axis)
         else:
@@ -387,6 +440,7 @@ def _stamp_formula(out, geom, formula: Formula) -> None:
         out._tip_latex = formula.caption_latex or formula.latex or ""
         out._tip_pretty = formula.caption_pretty or formula.pretty or out._legend_label
     out._is_formula = True
+    out._formula_primary = True
 
 
 def _robust_window(values: np.ndarray) -> tuple[float, float, bool]:

@@ -215,6 +215,17 @@ class coord_equal:
         return {"aspect": "equal", "ratio": self.ratio}
 
 
+class coord_polar:
+    """Draw ``r = f(theta)`` with equal units on x and y.
+
+    The angle runs from 0 to ``2π`` unless the layer sets ``tlim``.
+    A cardioid is ``geom_function("r = 1 + cos(theta)") + coord_polar()``.
+    """
+
+    def to_spec(self) -> dict:
+        return {"aspect": "equal", "ratio": 1.0}
+
+
 class geom_surface(_Geom):
     """3D surface from a regular x–y grid (height in ``z``).
 
@@ -311,6 +322,49 @@ class geom_line(geom_path):
     sort_x = True  # ggplot2 geom_line: connect in order of x
 
 
+_MARK_NAMES = ("roots", "extrema", "intersections")
+
+
+def _mark_tuple(mark) -> tuple[str, ...]:
+    """``"roots"``, ``"roots, extrema"``, or a sequence of those names."""
+    if mark is None:
+        return ()
+    if isinstance(mark, str):
+        parts = [part.strip() for part in mark.split(",")]
+        parts = [part for part in parts if part]
+    elif isinstance(mark, (list, tuple)):
+        parts = []
+        for item in mark:
+            if not isinstance(item, str):
+                raise ValueError(
+                    "mark must be 'roots', 'extrema', or 'intersections'"
+                )
+            text = item.strip()
+            if text:
+                parts.append(text)
+    else:
+        raise ValueError("mark must be 'roots', 'extrema', or 'intersections'")
+    if not parts or any(part not in _MARK_NAMES for part in parts):
+        raise ValueError("mark must be 'roots', 'extrema', or 'intersections'")
+    ordered: list[str] = []
+    for part in parts:
+        if part not in ordered:
+            ordered.append(part)
+    return tuple(ordered)
+
+
+def _assignment_text(name: str, value) -> str | None:
+    """A formula string for this axis, or None when ``value`` is not text."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        raise ValueError(f"geom_function() {name}= is empty")
+    if "=" not in text:
+        text = f"{name} = {text}"
+    return text
+
+
 class geom_function(_Geom):
     """Draw a formula or callable as a curve or surface.
 
@@ -351,6 +405,19 @@ class geom_function(_Geom):
     smooth. A figure made only of implicit equations uses equal axis units,
     so a circle stays round. A formula surface uses equal aspect (a cube)
     unless you pass ``coord_3d``.
+
+    A parametric curve assigns two or three of x, y, and z, either in one
+    string or as keywords. ``tlim`` is the parameter interval (otherwise
+    ``xlim``, otherwise −10 to 10)::
+
+        geom_function("x = cos(t), y = sin(t)")
+        geom_function(x="cos(t)", y="sin(t)", z="t")
+
+    ``mark`` is ``"roots"``, ``"extrema"``, ``"intersections"``, or a
+    combination. ``area(0, 2)``, ``tangent(at=1)``, and ``derivative()``
+    attach to the curve that came before them. ``"y > x^2"`` shades the
+    side where the inequality holds. ``where(x < 0, 0, x^2)`` and a LaTeX
+    ``cases`` environment are piecewise.
     """
 
     kind = "function"
@@ -360,12 +427,14 @@ class geom_function(_Geom):
         expr=None,
         mapping=None,
         *,
+        x=None,
         y=None,
         z=None,
         f=None,
         xlim=None,
         ylim=None,
         zlim=None,
+        tlim=None,
         n=None,
         linewidth=None,
         wireframe: bool = False,
@@ -373,6 +442,7 @@ class geom_function(_Geom):
         colour=None,
         alpha=None,
         label=None,
+        mark=None,
         **params,
     ):
         from plot3.expr import parse_formula
@@ -381,33 +451,36 @@ class geom_function(_Geom):
             mapping, color=color, colour=colour, alpha=alpha, **params
         )
         bound = dict(params)
-        formula = expr
-        lhs_name = None
-        if formula is not None:
-            if y is not None:
-                bound["y"] = y
-            if z is not None:
-                bound["z"] = z
-            if f is not None:
-                bound["f"] = f
-        elif y is not None:
-            formula = y
-            lhs_name = "y"
-        elif z is not None:
-            formula = z
-            lhs_name = "z"
-        elif f is not None:
+        pieces: list[str] = []
+        for name, value in (("x", x), ("y", y), ("z", z), ("f", f)):
+            piece = _assignment_text(name, value)
+            if piece is not None:
+                pieces.append(piece)
+            elif value is not None and expr is not None:
+                if isinstance(value, str):
+                    raise ValueError(
+                        "geom_function() takes one formula. "
+                        'Use geom_function(x="cos(t)", y="sin(t)") '
+                        "with no positional formula, or pass numbers such as a=1."
+                    )
+                bound[name] = value
+            elif value is not None and not isinstance(value, str):
+                bound[name] = value
+        if expr is not None and pieces:
+            raise ValueError(
+                "geom_function() takes one formula. "
+                'Use geom_function(x="cos(t)", y="sin(t)") '
+                "with no positional formula, or pass numbers such as a=1."
+            )
+        if expr is not None:
+            formula = expr
+        elif len(pieces) >= 2:
+            formula = ", ".join(pieces)
+        elif len(pieces) == 1:
+            formula = pieces[0]
+        elif callable(f):
             formula = f
-            lhs_name = "f"
-        # Notebook form ``geom_function(y = 2*x + 2)`` arrives as the keyword
-        # value only. Put that name back on the left of the formula.
-        if (
-            lhs_name
-            and isinstance(formula, str)
-            and "=" not in formula
-        ):
-            formula = f"{lhs_name} = {formula}"
-        if formula is None:
+        else:
             raise ValueError(
                 'geom_function() needs a formula, for example '
                 'geom_function("y = 2x + 2")'
@@ -418,11 +491,159 @@ class geom_function(_Geom):
         self.xlim = xlim
         self.ylim = ylim
         self.zlim = zlim
+        self.tlim = tlim
         self.n = None if n is None else int(n)
         self.linewidth = None if linewidth is None else float(linewidth)
         self.wireframe = bool(wireframe)
         self.label = None if label is None else str(label)
+        self.marks = _mark_tuple(mark)
         self.params = bound
+
+
+class area:
+    """Shade ``y = f(x)`` from ``lo`` to ``hi`` and label the integral.
+
+    Add it after the curve. Limits swap when ``hi < lo``. ``baseline``
+    is the lower edge (default 0)::
+
+        ggplot() + geom_function("y = x^2") + area(0, 2)
+    """
+
+    def __init__(self, lo, hi, *, baseline=0):
+        try:
+            left = float(lo)
+            right = float(hi)
+            base = float(baseline)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "area() needs numeric limits, for example area(0, 2)"
+            ) from exc
+        if not all(math.isfinite(value) for value in (left, right, base)):
+            raise ValueError(
+                "area() needs numeric limits, for example area(0, 2)"
+            )
+        if right < left:
+            left, right = right, left
+        self.lo = left
+        self.hi = right
+        self.baseline = base
+
+
+class tangent:
+    """Tangent line to the preceding ``geom_function`` curve at ``x = at``."""
+
+    def __init__(self, at):
+        try:
+            value = float(at)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "tangent() needs a number, for example tangent(at=1)"
+            ) from exc
+        if not math.isfinite(value):
+            raise ValueError(
+                "tangent() needs a number, for example tangent(at=1)"
+            )
+        self.at = value
+
+
+class derivative:
+    """Draw ``f'`` of the preceding ``geom_function`` curve."""
+
+    def __init__(self):
+        return None
+
+
+def _field_piece(name: str, value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError(f"geom_vector_field() {name}= is empty")
+        if "=" not in text:
+            text = f"{name} = {text}"
+        return text
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"geom_vector_field() {name}= must be a formula or a number"
+        )
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(
+            f"geom_vector_field() {name}= must be a formula or a number"
+        )
+    return f"{name} = {number}"
+
+
+class geom_vector_field(_Geom):
+    """Arrows or streamlines for a planar field.
+
+    ``dx`` and ``dy`` are formulas in ``x`` and ``y``. The default window
+    is −2 to 2 with an 11 by 11 grid, so a rotation field stays readable.
+    ``stream=True`` draws unit-speed streamlines instead of arrows::
+
+        ggplot() + geom_vector_field("dx = -y, dy = x")
+    """
+
+    kind = "vector"
+
+    def __init__(
+        self,
+        expr=None,
+        mapping=None,
+        *,
+        dx=None,
+        dy=None,
+        dz=None,
+        xlim=(-2, 2),
+        ylim=(-2, 2),
+        zlim=None,
+        n=11,
+        stream: bool = False,
+        linewidth=None,
+        color=None,
+        colour=None,
+        alpha=None,
+        label=None,
+        **params,
+    ):
+        from plot3.expr import parse_formula
+
+        super().__init__(mapping, color=color, colour=colour, alpha=alpha)
+        if expr is not None and any(value is not None for value in (dx, dy, dz)):
+            raise ValueError(
+                'geom_vector_field() takes one formula, for example '
+                'geom_vector_field("dx = -y, dy = x")'
+            )
+        if expr is not None:
+            formula = expr
+        else:
+            parts = [
+                piece
+                for piece in (
+                    _field_piece("dx", dx),
+                    _field_piece("dy", dy),
+                    _field_piece("dz", dz),
+                )
+                if piece is not None
+            ]
+            if len(parts) < 2:
+                raise ValueError(
+                    'geom_vector_field() needs dx and dy, for example '
+                    '"dx = -y, dy = x"'
+                )
+            formula = ", ".join(parts)
+        self.formula = parse_formula(
+            formula, dict(params), defer_missing=True, role="field"
+        )
+        self.xlim = xlim
+        self.ylim = ylim
+        self.zlim = zlim
+        self.n = 11 if n is None else int(n)
+        self.stream = bool(stream)
+        self.linewidth = None if linewidth is None else float(linewidth)
+        self.label = None if label is None else str(label)
+        self.params = dict(params)
 
 
 class geom_col(_Geom):

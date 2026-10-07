@@ -249,6 +249,8 @@ def _render(node: ast.AST, substitute: dict[str, float] | None) -> _Piece:
         return _unary(node, substitute)
     if isinstance(node, ast.BinOp):
         return _binop(node, substitute)
+    if isinstance(node, ast.Compare):
+        return _compare(node, substitute)
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
         return _call(node, substitute)
     return _Piece("?", "?", _ATOM, "other")
@@ -389,8 +391,52 @@ def _spaced(node: ast.BinOp, latex_op: str, pretty_op: str, substitute) -> _Piec
     )
 
 
+_CMP_MARK = {
+    ast.Lt: ("<", "<"),
+    ast.LtE: ("\\le", "≤"),
+    ast.Gt: (">", ">"),
+    ast.GtE: ("\\ge", "≥"),
+    ast.Eq: ("=", "="),
+    ast.NotEq: ("\\ne", "≠"),
+}
+
+
+def _compare(node: ast.Compare, substitute) -> _Piece:
+    if len(node.ops) != 1 or type(node.ops[0]) not in _CMP_MARK:
+        return _Piece("?", "?", _ATOM, "other")
+    mark_l, mark_p = _CMP_MARK[type(node.ops[0])]
+    left = render(node.left, _ADD, substitute)
+    right = render(node.comparators[0], _ADD + 1, substitute)
+    return _Piece(
+        f"{left.latex} {mark_l} {right.latex}",
+        f"{left.pretty} {mark_p} {right.pretty}",
+        _ADD,
+        "other",
+    )
+
+
+def _where(node: ast.Call, substitute) -> _Piece:
+    cond = render(node.args[0], 0, substitute)
+    yes = render(node.args[1], 0, substitute)
+    no = render(node.args[2], 0, substitute)
+    if isinstance(node.args[2], ast.Call) and getattr(node.args[2].func, "id", "") == "where":
+        latex = (
+            f"\\begin{{cases}} {yes.latex} & {cond.latex} \\\\ "
+            f"{no.latex} \\end{{cases}}"
+        )
+    else:
+        latex = (
+            f"\\begin{{cases}} {yes.latex} & {cond.latex} \\\\ "
+            f"{no.latex} & \\text{{otherwise}} \\end{{cases}}"
+        )
+    pretty = f"({yes.pretty} if {cond.pretty}, else {no.pretty})"
+    return _Piece(latex, pretty, _ATOM, "call")
+
+
 def _call(node: ast.Call, substitute) -> _Piece:
     name = node.func.id
+    if name == "where" and len(node.args) == 3:
+        return _where(node, substitute)
     if name == "sqrt":
         return _sqrt(node.args, substitute)
     if name == "cbrt":

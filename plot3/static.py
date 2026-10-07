@@ -134,6 +134,7 @@ _FONT: dict[str, tuple[int, ...]] = {
     "θ": _glyph("..#..", ".#.#.", "#...#", "#####", "#...#", ".#.#.", "..#.."),
     "μ": _glyph(".....", ".....", "#...#", "#...#", "#...#", "##..#", "#.##."),
     "σ": _glyph(".....", ".....", ".####", "#....", "#...#", "#...#", ".###."),
+    "∫": _glyph("..##.", ".#...", ".#...", "..#..", "...#.", "...#.", ".##.."),
 }
 
 _FOLD = str.maketrans({
@@ -506,6 +507,24 @@ def _draw_2d(spec, blobs, x, y, w, h, commands, labs, theme, fonts) -> None:
         commands.append((
             "text", x + 8 + _line_height(tick_size) / 2, box[1] + box[3] / 2,
             labs["y"], tick_size, ink2, "middle", "middle", -90, 400,
+        ))
+    for ann in spec.get("ann") or []:
+        text = str(ann.get("text") or "")
+        if not text:
+            continue
+        try:
+            u = _unit(scales.get("x") or {}, float(ann["x"]))
+            v = _unit(scales.get("y") or {}, float(ann["y"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+        if u < window[0] - 0.02 or u > window[1] + 0.02:
+            continue
+        if v < window[2] - 0.02 or v > window[3] + 0.02:
+            continue
+        sx, sy = px(u, v)
+        commands.append((
+            "text", sx, sy, text, max(tick_size, 13), ink,
+            "middle", "middle", 0, 600,
         ))
     if labs.get("title"):
         commands.append((

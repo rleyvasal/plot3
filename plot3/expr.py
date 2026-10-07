@@ -32,6 +32,15 @@ _PLOT_LETTERS = set("xyztuvwrs")
 
 _BINOPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow)
 _UNARY = (ast.UAdd, ast.USub)
+_CMPOPS = (ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Eq, ast.NotEq)
+_CMP_TEXT = {
+    ast.Lt: "<",
+    ast.LtE: "<=",
+    ast.Gt: ">",
+    ast.GtE: ">=",
+    ast.Eq: "==",
+    ast.NotEq: "!=",
+}
 
 
 class ExprError(ValueError):
@@ -77,6 +86,8 @@ def math_namespace() -> dict[str, Any]:
         "ceil": np.ceil,
         "pi": float(np.pi),
         "e": float(np.e),
+        "nan": float("nan"),
+        "where": np.where,
     }
 
 
@@ -89,10 +100,14 @@ _MATH_CONSTS = {name for name, value in _MATH.items() if not callable(value)}
 class Formula:
     """A checked formula ready to sample.
 
-    ``mode`` is ``explicit`` (``y = f(x)``), ``implicit`` (``F = 0``), or
-    ``callable`` (a Python function). ``variables`` are the free plot
-    variables in appearance order. ``namespace`` holds constants, numeric
-    parameters, and callables — not the sampled arrays.
+    ``mode`` is ``explicit`` (``y = f(x)``), ``implicit`` (``F = 0``),
+    ``callable`` (a Python function), ``parametric`` (``x = cos(t), y = sin(t)``),
+    ``inequality`` (``y > x^2``), or ``field`` (``dx = -y, dy = x``).
+    ``variables`` are the free plot variables in appearance order.
+    ``namespace`` holds constants, numeric parameters, and callables — not
+    the sampled arrays. ``relation`` is ``>``, ``>=``, ``<``, or ``<=`` for
+    an inequality. ``components`` are the named pieces of a parametric
+    curve or a vector field.
     """
 
     label: str
@@ -112,6 +127,11 @@ class Formula:
     # Coefficients such as ``a`` in ``y = a x^2``. Empty unless parsing was
     # asked to wait: a following transition_time or slider may bind them.
     pending: tuple[str, ...] = ()
+    relation: str = ""
+    components: tuple[tuple[str, Any], ...] = ()
+    parameter: str = ""
+    # Right-hand side (or inequality boundary) for a symbolic derivative.
+    body: Any = None
 
     def _repr_latex_(self) -> str:
         """Notebook display of the parsed formula, not the raw input text."""
@@ -124,6 +144,7 @@ def parse_formula(
     params: dict[str, Any] | None = None,
     *,
     defer_missing: bool = False,
+    role: str = "curve",
 ) -> Formula:
     """Turn a string, callable, or sympy-like object into a :class:`Formula`.
 
@@ -134,7 +155,7 @@ def parse_formula(
     """
     bound = dict(params or {})
     if isinstance(expr, str):
-        return _parse_math(expr, bound, defer_missing=defer_missing)
+        return _parse_math(expr, bound, defer_missing=defer_missing, role=role)
     if callable(expr):
         return _parse_callable(expr)
     if getattr(expr, "free_symbols", None) is not None:
@@ -269,6 +290,7 @@ def _parse_math(
     _sink: dict[str, ast.AST] | None = None,
     *,
     defer_missing: bool = False,
+    role: str = "curve",
 ) -> Formula:
     try:
         reject_eaten_backslashes(source)
@@ -297,6 +319,20 @@ def _parse_math(
             plain = latex_to_source(user_latex, e_is_constant="e" not in numbers)
         except ValueError as exc:
             raise ExprError(str(exc)) from exc
+    pieces = _split_top(plain, ",")
+    if len(pieces) >= 2 and all(_has_top_equals(piece) for piece in pieces):
+        return _parse_components(
+            pieces,
+            original,
+            user_latex,
+            numbers,
+            callables,
+            func_names,
+            value_names,
+            defer_missing=defer_missing,
+            role=role,
+            sink=_sink,
+        )
     lhs_src, rhs_src, _ignored = _normalize(plain, func_names, value_names)
     rhs_tree = _parse_side(rhs_src, original)
     lhs_tree = _parse_side(lhs_src, original) if lhs_src is not None else None
@@ -353,6 +389,19 @@ def _parse_math(
                 continue
             raise ExprError(_missing_param_message(name))
         free.append(name)
+
+    if lhs_tree is None and isinstance(rhs_tree, ast.Compare):
+        return _parse_inequality(
+            rhs_tree,
+            original,
+            user_latex,
+            numbers,
+            callables,
+            namespace,
+            pending,
+            defer_missing=defer_missing,
+            sink=_sink,
+        )
 
     if lhs_tree is None:
         mode = "explicit"
@@ -413,8 +462,662 @@ def _parse_math(
         variables=tuple(free),
         namespace=namespace,
         pending=tuple(pending),
+        body=code_tree,
         **texts,
     )
+
+
+def _split_top(source: str, sep: str) -> list[str]:
+    """Split on ``sep`` that is not inside brackets."""
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(source):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(0, depth - 1)
+        elif char == sep and depth == 0:
+            piece = source[start:index].strip()
+            if piece:
+                parts.append(piece)
+            start = index + 1
+    tail = source[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _has_top_equals(source: str) -> bool:
+    """True when ``source`` has one assignment ``=``, ignoring ``<=`` and ``==``."""
+    depth = 0
+    count = 0
+    index = 0
+    while index < len(source):
+        char = source[index]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(0, depth - 1)
+        elif char == "=" and depth == 0:
+            prev = source[index - 1] if index else ""
+            nxt = source[index + 1] if index + 1 < len(source) else ""
+            if prev in "<>!" or nxt == "=":
+                index += 1
+                continue
+            count += 1
+        index += 1
+    return count == 1
+
+
+def _bind_namespace(
+    numbers: dict[str, float], callables: dict[str, Callable[..., Any]]
+) -> dict[str, Any]:
+    namespace: dict[str, Any] = {}
+    for name, fn in _MATH.items():
+        if name in _MATH_FUNCS:
+            namespace[name] = fn
+    for name, value in numbers.items():
+        if name in _MATH_FUNCS:
+            raise ExprError(
+                f"'{name}' is a math function; pass a callable to replace it"
+            )
+        namespace[name] = float(value)
+    for name, value in _MATH.items():
+        if name in _MATH_CONSTS and name not in numbers:
+            namespace[name] = value
+    for name, fn in callables.items():
+        namespace[name] = _wrap_user_callable(name, fn)
+    return namespace
+
+
+def _classify_names(
+    ordered: list[str],
+    numbers: dict[str, float],
+    callables: dict[str, Callable[..., Any]],
+    defer_missing: bool,
+    skip: set[str],
+) -> tuple[list[str], list[str]]:
+    free: list[str] = []
+    pending: list[str] = []
+    for name in ordered:
+        if name in skip or name in free or name in pending:
+            continue
+        if name in numbers or name in _MATH_CONSTS:
+            continue
+        if name in callables or name in _MATH_FUNCS:
+            raise ExprError(f"'{name}' is a function; call it as {name}(...)")
+        hint = _juxtaposition_hint(name)
+        if hint is not None:
+            raise ExprError(f"unknown name {name!r}: did you mean {hint}?")
+        if len(name) == 1 and name not in _PLOT_LETTERS:
+            if defer_missing:
+                pending.append(name)
+                continue
+            raise ExprError(_missing_param_message(name))
+        free.append(name)
+    return free, pending
+
+
+def _compile_tree(tree: ast.AST):
+    expr = ast.fix_missing_locations(ast.Expression(body=tree))
+    return compile(expr, "<geom_function>", "eval")
+
+
+def _pack_texts(latex: str, pretty: str, numbers: dict[str, float]) -> dict[str, str]:
+    caption_l, caption_p = latex, pretty
+    if numbers:
+        bits = [f"{name} = {_fmt_num(value)}" for name, value in numbers.items()]
+        caption_l = latex + " \\quad (" + ",\\ ".join(bits) + ")"
+        caption_p = pretty + "  (" + ", ".join(bits) + ")"
+    return {
+        "latex": latex,
+        "pretty": pretty,
+        "legend_latex": latex,
+        "legend_pretty": pretty,
+        "caption_latex": caption_l,
+        "caption_pretty": caption_p,
+    }
+
+
+def _parse_components(
+    pieces: list[str],
+    original: str,
+    user_latex: str | None,
+    numbers: dict[str, float],
+    callables: dict[str, Callable[..., Any]],
+    func_names: set[str],
+    value_names: set[str],
+    *,
+    defer_missing: bool,
+    role: str,
+    sink: dict[str, ast.AST] | None,
+) -> Formula:
+    named: list[tuple[str, ast.AST]] = []
+    for piece in pieces:
+        lhs_src, rhs_src, _ignored = _normalize(piece, func_names, value_names)
+        if lhs_src is None:
+            raise ExprError(
+                'each piece needs a name on the left, for example '
+                '"x = cos(t), y = sin(t)"'
+            )
+        lhs_tree = _parse_side(lhs_src, original)
+        rhs_tree = _parse_side(rhs_src, original)
+        _validate(lhs_tree, func_names)
+        _validate(rhs_tree, func_names)
+        if not isinstance(lhs_tree, ast.Name):
+            raise ExprError(
+                'each piece needs a name on the left, for example '
+                '"x = cos(t), y = sin(t)"'
+            )
+        named.append((lhs_tree.id, rhs_tree))
+    lhs_names = [name for name, _tree in named]
+    if len(set(lhs_names)) != len(lhs_names):
+        raise ExprError("each output can be assigned only once")
+    ordered: list[str] = []
+    for _name, tree in named:
+        for found in _value_names(tree):
+            if found not in ordered:
+                ordered.append(found)
+    free, pending = _classify_names(
+        ordered, numbers, callables, defer_missing, set(lhs_names)
+    )
+    namespace = _bind_namespace(numbers, callables)
+    fieldish = all(name in {"dx", "dy", "dz"} for name in lhs_names)
+    if fieldish:
+        if role != "field":
+            raise ExprError(
+                'this is a vector field. Use geom_vector_field("dx = -y, dy = x")'
+            )
+        return _finish_field(
+            named, original, user_latex, numbers, namespace, free, pending, sink
+        )
+    if role == "field":
+        raise ExprError(
+            'geom_vector_field() needs dx and dy, for example "dx = -y, dy = x"'
+        )
+    return _finish_parametric(
+        named, original, user_latex, numbers, namespace, free, pending, sink
+    )
+
+
+def _finish_parametric(
+    named, original, user_latex, numbers, namespace, free, pending, sink
+) -> Formula:
+    if len(free) != 1:
+        listed = ", ".join(free) if free else "none"
+        raise ExprError(
+            f"a parametric curve needs one parameter, got ({listed}). "
+            'For example geom_function("x = cos(t), y = sin(t)")'
+        )
+    if not {"x", "y"} <= {name for name, _tree in named}:
+        raise ExprError(
+            'a parametric curve needs x and y, for example '
+            '"x = cos(t), y = sin(t)"'
+        )
+    latex_bits = []
+    pretty_bits = []
+    compiled = []
+    for name, tree in named:
+        bit = formula_texts(
+            ast.Name(id=name, ctx=ast.Load()),
+            tree,
+            mode="explicit",
+            dependent=name,
+            parameters=numbers,
+        )
+        latex_bits.append(bit["latex"])
+        pretty_bits.append(bit["pretty"])
+        compiled.append((name, _compile_tree(tree)))
+    texts = _pack_texts(", ".join(latex_bits), ", ".join(pretty_bits), {})
+    # Parameters are already inside each piece's caption. Keep one joint caption.
+    if numbers:
+        texts = _pack_texts(texts["latex"], texts["pretty"], numbers)
+    if user_latex is not None:
+        texts = _keep_user_latex(texts, user_latex)
+    if sink is not None:
+        sink["tree"] = named[0][1]
+    return Formula(
+        label=original,
+        mode="parametric",
+        code=compiled[0][1],
+        dependent=None,
+        variables=tuple(free),
+        namespace=namespace,
+        pending=tuple(pending),
+        components=tuple(compiled),
+        parameter=free[0],
+        **texts,
+    )
+
+
+def _finish_field(
+    named, original, user_latex, numbers, namespace, free, pending, sink
+) -> Formula:
+    names = {name for name, _tree in named}
+    if "dz" in names:
+        raise ExprError("geom_vector_field() draws a plane field of dx and dy")
+    if names != {"dx", "dy"}:
+        raise ExprError(
+            'geom_vector_field() needs dx and dy, for example "dx = -y, dy = x"'
+        )
+    if len(free) > 2:
+        listed = ", ".join(free)
+        raise ExprError(
+            f"too many free variables ({listed}): at most 2. "
+            f"Pass parameters as keywords, e.g. {free[-1]}=1"
+        )
+    by_name = {name: tree for name, tree in named}
+    compiled = tuple(
+        (name, _compile_tree(by_name[name])) for name in ("dx", "dy")
+    )
+    latex_bits = []
+    pretty_bits = []
+    for name in ("dx", "dy"):
+        bit = formula_texts(
+            ast.Name(id=name, ctx=ast.Load()),
+            by_name[name],
+            mode="explicit",
+            dependent=name,
+            parameters=numbers,
+        )
+        latex_bits.append(bit["latex"])
+        pretty_bits.append(bit["pretty"])
+    texts = _pack_texts(", ".join(latex_bits), ", ".join(pretty_bits), numbers)
+    if user_latex is not None:
+        texts = _keep_user_latex(texts, user_latex)
+    if sink is not None:
+        sink["tree"] = by_name["dx"]
+    return Formula(
+        label=original,
+        mode="field",
+        code=compiled[0][1],
+        dependent=None,
+        variables=tuple(free),
+        namespace=namespace,
+        pending=tuple(pending),
+        components=compiled,
+        **texts,
+    )
+
+
+def _flip_relation(relation: str) -> str:
+    return {">": "<", ">=": "<=", "<": ">", "<=": ">="}[relation]
+
+
+def _relation_marks(relation: str) -> tuple[str, str]:
+    return {
+        ">": (">", ">"),
+        ">=": ("\\ge", "≥"),
+        "<": ("<", "<"),
+        "<=": ("\\le", "≤"),
+    }[relation]
+
+
+def _parse_inequality(
+    tree: ast.Compare,
+    original: str,
+    user_latex: str | None,
+    numbers: dict[str, float],
+    callables: dict[str, Callable[..., Any]],
+    namespace: dict[str, Any],
+    pending: list[str],
+    *,
+    defer_missing: bool,
+    sink: dict[str, ast.AST] | None,
+) -> Formula:
+    del defer_missing
+    relation = _CMP_TEXT[type(tree.ops[0])]
+    if relation in {"==", "!="}:
+        raise ExprError(
+            "use = for an equation. Shade a region with >, <, >=, or <="
+        )
+    left, right = tree.left, tree.comparators[0]
+
+    def axis_name(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Name) and node.id in {"x", "y"}:
+            return node.id
+        return None
+
+    left_axis = axis_name(left)
+    right_axis = axis_name(right)
+    boundary: ast.AST | None = None
+    dependent: str | None = None
+    if left_axis and left_axis not in _value_names(right):
+        dependent = left_axis
+        boundary = right
+    elif right_axis and right_axis not in _value_names(left):
+        dependent = right_axis
+        boundary = left
+        relation = _flip_relation(relation)
+    if boundary is not None and dependent is not None:
+        ordered = []
+        for found in _value_names(boundary):
+            if found not in ordered:
+                ordered.append(found)
+        free, boundary_pending = _classify_names(
+            ordered, numbers, callables, True, set()
+        )
+        # A coefficient on the boundary was already recorded, or just now.
+        pending_names = list(dict.fromkeys([*pending, *boundary_pending]))
+        free = [
+            name
+            for name in free
+            if name not in pending_names and name != dependent
+        ]
+        if len(free) > 1:
+            listed = ", ".join(free)
+            raise ExprError(
+                f"too many free variables ({listed}): at most 2. "
+                f"Pass parameters as keywords, e.g. {free[-1]}=1"
+            )
+        raw = formula_texts(
+            ast.Name(id=dependent, ctx=ast.Load()),
+            boundary,
+            mode="explicit",
+            dependent=dependent,
+            parameters=numbers,
+        )
+        mark_l, mark_p = _relation_marks(relation)
+        texts = _pack_texts(
+            raw["latex"].replace(" = ", f" {mark_l} ", 1),
+            raw["pretty"].replace(" = ", f" {mark_p} ", 1),
+            {},
+        )
+        texts["caption_latex"] = raw["caption_latex"].replace(" = ", f" {mark_l} ", 1)
+        texts["caption_pretty"] = raw["caption_pretty"].replace(" = ", f" {mark_p} ", 1)
+        texts["legend_latex"] = texts["latex"]
+        texts["legend_pretty"] = texts["pretty"]
+        if user_latex is not None:
+            texts = _keep_user_latex(texts, user_latex)
+        if sink is not None:
+            sink["tree"] = boundary
+        return Formula(
+            label=original,
+            mode="inequality",
+            code=_compile_tree(boundary),
+            dependent=dependent,
+            variables=tuple(free),
+            namespace=namespace,
+            pending=tuple(pending_names),
+            relation=relation,
+            body=boundary,
+            **texts,
+        )
+    ordered = []
+    for found in _value_names(left) + _value_names(right):
+        if found not in ordered:
+            ordered.append(found)
+    free, region_pending = _classify_names(
+        ordered, numbers, callables, True, set()
+    )
+    pending_names = list(dict.fromkeys([*pending, *region_pending]))
+    free = [name for name in free if name not in pending_names]
+    if len(free) != 2:
+        listed = ", ".join(free) if free else "none"
+        raise ExprError(
+            "shade y > f(x), or a region in x and y such as "
+            f"x^2 + y^2 < 1 (got {listed})"
+        )
+    if relation in {">", ">="}:
+        signed = ast.BinOp(left=left, op=ast.Sub(), right=right)
+    else:
+        signed = ast.BinOp(left=right, op=ast.Sub(), right=left)
+    texts = _pack_texts(original, original, numbers)
+    if user_latex is not None:
+        texts = _keep_user_latex(texts, user_latex)
+    if sink is not None:
+        sink["tree"] = signed
+    return Formula(
+        label=original,
+        mode="inequality",
+        code=_compile_tree(signed),
+        dependent=None,
+        variables=tuple(free),
+        namespace=namespace,
+        pending=tuple(pending_names),
+        relation=relation,
+        body=signed,
+        **texts,
+    )
+
+
+def differentiate(formula: Formula, var: str) -> ast.AST | None:
+    """Symbolic derivative of an explicit formula, or None if it is not one."""
+    tree = getattr(formula, "body", None)
+    if tree is None or formula.mode not in {"explicit", "inequality"}:
+        return None
+    if formula.mode == "inequality" and not formula.dependent:
+        return None
+    try:
+        return _simplify(_diff(tree, var))
+    except ExprError:
+        return None
+
+
+def _diff(node: ast.AST, var: str) -> ast.AST:
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return ast.Constant(value=0.0)
+    if isinstance(node, ast.Name):
+        return ast.Constant(value=1.0 if node.id == var else 0.0)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.UAdd):
+        return _diff(node.operand, var)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        return ast.UnaryOp(op=ast.USub(), operand=_diff(node.operand, var))
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return ast.BinOp(left=_diff(node.left, var), op=ast.Add(), right=_diff(node.right, var))
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Sub):
+        return ast.BinOp(left=_diff(node.left, var), op=ast.Sub(), right=_diff(node.right, var))
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+        return ast.BinOp(
+            left=ast.BinOp(
+                left=_diff(node.left, var), op=ast.Mult(), right=node.right
+            ),
+            op=ast.Add(),
+            right=ast.BinOp(
+                left=node.left, op=ast.Mult(), right=_diff(node.right, var)
+            ),
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        numer = ast.BinOp(
+            left=ast.BinOp(
+                left=_diff(node.left, var), op=ast.Mult(), right=node.right
+            ),
+            op=ast.Sub(),
+            right=ast.BinOp(
+                left=node.left, op=ast.Mult(), right=_diff(node.right, var)
+            ),
+        )
+        denom = ast.BinOp(left=node.right, op=ast.Pow(), right=ast.Constant(value=2))
+        return ast.BinOp(left=numer, op=ast.Div(), right=denom)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow):
+        return _diff_pow(node, var)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        return _diff_call(node, var)
+    raise ExprError("no symbolic derivative")
+
+
+def _diff_pow(node: ast.BinOp, var: str) -> ast.AST:
+    base, exp = node.left, node.right
+    if isinstance(exp, ast.Constant) and isinstance(exp.value, (int, float)):
+        power = ast.BinOp(
+            left=base,
+            op=ast.Pow(),
+            right=ast.Constant(value=exp.value - 1),
+        )
+        return ast.BinOp(
+            left=ast.BinOp(
+                left=ast.Constant(value=exp.value), op=ast.Mult(), right=power
+            ),
+            op=ast.Mult(),
+            right=_diff(base, var),
+        )
+    # a^u and the general case share u^v * (v' ln u + v u' / u).
+    log_base = ast.Call(func=ast.Name(id="log", ctx=ast.Load()), args=[base], keywords=[])
+    left = ast.BinOp(left=_diff(exp, var), op=ast.Mult(), right=log_base)
+    right = ast.BinOp(
+        left=exp,
+        op=ast.Mult(),
+        right=ast.BinOp(left=_diff(base, var), op=ast.Div(), right=base),
+    )
+    factor = ast.BinOp(left=left, op=ast.Add(), right=right)
+    return ast.BinOp(left=node, op=ast.Mult(), right=factor)
+
+
+def _diff_call(node: ast.Call, var: str) -> ast.AST:
+    name = node.func.id
+    if len(node.args) != 1:
+        raise ExprError("no symbolic derivative")
+    arg = node.args[0]
+    inner = _diff(arg, var)
+    if name == "sin":
+        outer = ast.Call(func=ast.Name(id="cos", ctx=ast.Load()), args=[arg], keywords=[])
+    elif name == "cos":
+        outer = ast.UnaryOp(
+            op=ast.USub(),
+            operand=ast.Call(
+                func=ast.Name(id="sin", ctx=ast.Load()), args=[arg], keywords=[]
+            ),
+        )
+    elif name == "tan":
+        outer = ast.BinOp(
+            left=ast.Constant(value=1),
+            op=ast.Div(),
+            right=ast.BinOp(
+                left=ast.Call(
+                    func=ast.Name(id="cos", ctx=ast.Load()), args=[arg], keywords=[]
+                ),
+                op=ast.Pow(),
+                right=ast.Constant(value=2),
+            ),
+        )
+    elif name == "exp":
+        outer = ast.Call(func=ast.Name(id="exp", ctx=ast.Load()), args=[arg], keywords=[])
+    elif name in {"log", "ln", "log10"}:
+        denom = arg
+        if name == "log10":
+            denom = ast.BinOp(
+                left=arg,
+                op=ast.Mult(),
+                right=ast.Call(
+                    func=ast.Name(id="log", ctx=ast.Load()),
+                    args=[ast.Constant(value=10)],
+                    keywords=[],
+                ),
+            )
+        outer = ast.BinOp(left=ast.Constant(value=1), op=ast.Div(), right=denom)
+    elif name == "sqrt":
+        outer = ast.BinOp(
+            left=ast.Constant(value=1),
+            op=ast.Div(),
+            right=ast.BinOp(
+                left=ast.Constant(value=2), op=ast.Mult(), right=node
+            ),
+        )
+    elif name == "asin":
+        outer = ast.BinOp(
+            left=ast.Constant(value=1),
+            op=ast.Div(),
+            right=ast.Call(
+                func=ast.Name(id="sqrt", ctx=ast.Load()),
+                args=[
+                    ast.BinOp(
+                        left=ast.Constant(value=1),
+                        op=ast.Sub(),
+                        right=ast.BinOp(left=arg, op=ast.Pow(), right=ast.Constant(value=2)),
+                    )
+                ],
+                keywords=[],
+            ),
+        )
+    elif name == "acos":
+        positive = _diff_call(
+            ast.Call(func=ast.Name(id="asin", ctx=ast.Load()), args=[arg], keywords=[]),
+            var,
+        )
+        return ast.UnaryOp(op=ast.USub(), operand=positive)
+    elif name == "atan":
+        outer = ast.BinOp(
+            left=ast.Constant(value=1),
+            op=ast.Div(),
+            right=ast.BinOp(
+                left=ast.Constant(value=1),
+                op=ast.Add(),
+                right=ast.BinOp(left=arg, op=ast.Pow(), right=ast.Constant(value=2)),
+            ),
+        )
+    else:
+        raise ExprError("no symbolic derivative")
+    return ast.BinOp(left=outer, op=ast.Mult(), right=inner)
+
+
+def _is_number_node(node: ast.AST, value: float | None = None) -> bool:
+    if not isinstance(node, ast.Constant) or isinstance(node.value, bool):
+        return False
+    if not isinstance(node.value, (int, float)):
+        return False
+    if value is None:
+        return True
+    return float(node.value) == float(value)
+
+
+def _simplify(node: ast.AST) -> ast.AST:
+    """Fold constants and drop factors of 0 and 1. The tree stays exact."""
+    if isinstance(node, ast.UnaryOp):
+        operand = _simplify(node.operand)
+        if isinstance(node.op, ast.UAdd):
+            return operand
+        if isinstance(node.op, ast.USub):
+            if isinstance(operand, ast.UnaryOp) and isinstance(operand.op, ast.USub):
+                return operand.operand
+            if _is_number_node(operand):
+                return ast.Constant(value=-float(operand.value))
+            return ast.UnaryOp(op=ast.USub(), operand=operand)
+        return node
+    if isinstance(node, ast.BinOp):
+        left = _simplify(node.left)
+        right = _simplify(node.right)
+        if isinstance(node.op, ast.Add):
+            if _is_number_node(left, 0):
+                return right
+            if _is_number_node(right, 0):
+                return left
+            if _is_number_node(left) and _is_number_node(right):
+                return ast.Constant(value=float(left.value) + float(right.value))
+        if isinstance(node.op, ast.Sub):
+            if _is_number_node(right, 0):
+                return left
+            if _is_number_node(left) and _is_number_node(right):
+                return ast.Constant(value=float(left.value) - float(right.value))
+        if isinstance(node.op, ast.Mult):
+            if _is_number_node(left, 0) or _is_number_node(right, 0):
+                return ast.Constant(value=0.0)
+            if _is_number_node(left, 1):
+                return right
+            if _is_number_node(right, 1):
+                return left
+            if _is_number_node(left) and _is_number_node(right):
+                return ast.Constant(value=float(left.value) * float(right.value))
+        if isinstance(node.op, ast.Div):
+            if _is_number_node(left, 0):
+                return ast.Constant(value=0.0)
+            if _is_number_node(right, 1):
+                return left
+        if isinstance(node.op, ast.Pow):
+            if _is_number_node(right, 1):
+                return left
+            if _is_number_node(right, 0):
+                return ast.Constant(value=1.0)
+            if _is_number_node(left) and _is_number_node(right):
+                return ast.Constant(value=float(left.value) ** float(right.value))
+        return ast.BinOp(left=left, op=node.op, right=right)
+    if isinstance(node, ast.Call):
+        return ast.Call(
+            func=node.func,
+            args=[_simplify(arg) for arg in node.args],
+            keywords=[],
+        )
+    return node
 
 
 def _keep_user_latex(texts: dict[str, str], user_latex: str) -> dict[str, str]:
@@ -579,6 +1282,16 @@ def _validate(tree: ast.AST, func_names: set[str]) -> None:
                     f"unknown function {fname!r}: pass it as "
                     f"geom_function(..., {fname}={fname})"
                 )
+            if fname == "where" and len(node.args) != 3:
+                raise ExprError(
+                    "where() needs 3 arguments: where(x < 0, 0, x^2)"
+                )
+            continue
+        if isinstance(node, ast.Compare):
+            if len(node.ops) != 1 or not isinstance(node.ops[0], _CMPOPS):
+                raise ExprError("only one comparison is allowed")
+            continue
+        if isinstance(node, _CMPOPS):
             continue
         raise ExprError(f"not allowed in a formula: {type(node).__name__}")
 
@@ -623,10 +1336,6 @@ def _normalize(
         ):
             continue
         if tok.type == tokenize.ERRORTOKEN:
-            raise ExprError(
-                f"syntax error at {tok.string!r} (column {tok.start[1] + 1})"
-            )
-        if tok.string in {"==", "!=", "<=", ">=", "<", ">"}:
             raise ExprError(
                 f"syntax error at {tok.string!r} (column {tok.start[1] + 1})"
             )

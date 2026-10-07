@@ -17,6 +17,7 @@ from plot3.geoms import (
     aes,
     coord_3d,
     coord_equal,
+    coord_polar,
     geom_col,
     scale_colour_continuous,
 )
@@ -298,7 +299,9 @@ def expand_stat_geom(
     domains: dict | None = None,
     transition=None,
     slider=None,
-) -> _Geom:
+    coord=None,
+    addons=None,
+):
     """Turn statistical geoms into concrete drawable layers.
 
     Stats run against the native table backend (pandas / polars / tidy→polars).
@@ -306,13 +309,23 @@ def expand_stat_geom(
     ``data_override`` are plain pandas (already computed, render-ready).
     Identity geoms (point / line / …) are returned unchanged and materialise
     columns at the render boundary.
+
+    A formula with an integral, tangent, or inequality returns a list of
+    layers. A plain curve still returns one geom.
     """
-    if getattr(geom, "kind", None) == "function":
+    kind = getattr(geom, "kind", None)
+    if kind == "function":
         from plot3.function import expand_function
 
-        return expand_function(
-            geom, base_mapping, data, domains, transition, slider
+        layers = expand_function(
+            geom, base_mapping, data, domains, transition, slider, coord, addons
         )
+        return layers[0] if len(layers) == 1 else layers
+    if kind == "vector":
+        from plot3.calculus import expand_vector_field
+
+        layers = expand_vector_field(geom, transition, slider)
+        return layers[0] if len(layers) == 1 else layers
     mapping = dict(base_mapping)
     mapping.update(geom.mapping)
     if geom.kind == "bar":
@@ -725,6 +738,12 @@ def _coord_spec(coord, is3d: bool, resolved) -> dict | None:
             raise ValueError(
                 "coord_equal() is for 2D figures; use coord_3d(aspect='equal')"
             )
+        if isinstance(coord, coord_polar):
+            raise ValueError(
+                "coord_polar() is for 2D figures. "
+                'For example ggplot() + geom_function("r = 1 + cos(theta)") '
+                "+ coord_polar()"
+            )
         if coord is not None:
             return coord.to_spec()
         # A formula's axes are different quantities (t vs x); true proportions
@@ -736,6 +755,8 @@ def _coord_spec(coord, is3d: bool, resolved) -> dict | None:
         raise ValueError(
             "coord_3d() requires a 3D figure (map aes(z=...) on layers)"
         )
+    if isinstance(coord, coord_polar):
+        return coord.to_spec()
     if isinstance(coord, coord_equal):
         return coord.to_spec()
     if coord is not None:
@@ -991,8 +1012,12 @@ def _slider_meta(slider) -> dict:
 def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if not g.layers:
         raise ValueError("add a geom: ggplot(df, aes(...)) + geom_point()")
-    # Function layers sample their own grid, so a figure may have no data frame.
-    needs_data = any(getattr(layer, "kind", None) != "function" for layer in g.layers)
+    # Function layers and vector fields sample their own grid, so a figure
+    # may have no data frame.
+    needs_data = any(
+        getattr(layer, "kind", None) not in {"function", "vector"}
+        for layer in g.layers
+    )
     if g.data is None and needs_data:
         raise ValueError(
             "ggplot has no data; use ggplot(df, aes(...)) or "
@@ -1037,10 +1062,28 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         from plot3.function import data_domains
 
         domains = data_domains(g, data)
-    expanded = [
-        expand_stat_geom(geom, g.mapping, data, domains, transition, slider)
-        for geom in layers_in
-    ]
+    addon_map: dict[int, list] = {}
+    for index, addon in getattr(g, "_addons", None) or []:
+        addon_map.setdefault(int(index), []).append(addon)
+    expanded = []
+    for index, geom in enumerate(layers_in):
+        result = expand_stat_geom(
+            geom,
+            g.mapping,
+            data,
+            domains,
+            transition,
+            slider,
+            coord,
+            addon_map.get(index),
+        )
+        if isinstance(result, list):
+            expanded.extend(result)
+        else:
+            expanded.append(result)
+    from plot3.calculus import mark_intersections
+
+    expanded = mark_intersections(expanded)
     resolved = []  # per layer: (geom, mapping)
     for geom in expanded:
         # Function layers carry their own columns; don't inherit colour/group.
@@ -1628,12 +1671,29 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
 
     # Pass 2 — encode payloads per layer (quantized against the shared scales)
     # Distinct default colours so several formulas can share a legend.
+    # A fill or a tangent point then copies the layer it belongs to.
     palette = theme["cat"]
     color_slot = 0
     for geom, _mapped in resolved:
         if getattr(geom, "_legend_label", None) and geom.const_color is None:
             geom.const_color = palette[color_slot % len(palette)]
             color_slot += 1
+    labeled: dict[str, str] = {}
+    for geom, _mapped in resolved:
+        if geom.const_color is None:
+            continue
+        key = getattr(geom, "_color_key", None)
+        label = getattr(geom, "_legend_label", None)
+        if key and key not in labeled:
+            labeled[key] = geom.const_color
+        if label and label not in labeled:
+            labeled[label] = geom.const_color
+    for geom, _mapped in resolved:
+        if geom.const_color is not None:
+            continue
+        source = getattr(geom, "_inherit_from", None)
+        if source and source in labeled:
+            geom.const_color = labeled[source]
 
     payloads: list[tuple[str, str]] = []
     layer_specs = []
@@ -1837,10 +1897,13 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 spec_l["alpha"] = 0.4 if geom.kind == "area" else 0.45
             if geom.kind == "area":
                 scy = scales["y"]
+                baseline = getattr(geom, "_baseline", None)
+                if baseline is None:
+                    baseline = 0.0
                 if scy.kind == "num":
                     y_span = max(scy.hi - scy.lo, 1e-12)
                     spec_l["y0"] = float(
-                        np.clip((0.0 - scy.lo) / y_span, 0.0, 1.0)
+                        np.clip((float(baseline) - scy.lo) / y_span, 0.0, 1.0)
                     )
                 else:
                     spec_l["y0"] = 0.0
@@ -2069,11 +2132,12 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         return plain
 
     formula_geoms = [
-        geom for geom, _mapped in resolved if getattr(geom, "_is_formula", False)
+        geom for geom, _mapped in resolved if getattr(geom, "_formula_primary", False)
     ]
     raw_title = g.labs.get("title") or ""
-    # One function and no title of your own: the formula is the title, and
-    # the single legend row would only repeat it.
+    # One function and no title of your own: the formula is the title.
+    # A shaded area, a tangent, or roots stay in the legend when they
+    # have a label of their own. The curve's row would only repeat the title.
     if not str(raw_title).strip() and len(formula_geoms) == 1:
         shown = formula_geoms[0]
         title = str(getattr(shown, "_legend_label", "") or "")
@@ -2082,8 +2146,13 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             labs_math["title"] = segments
         elif getattr(shown, "_legend_latex", None):
             labs_math["title"] = [{"text": title, "latex": str(shown._legend_latex)}]
-        if legend and len(legend) == 1 and legend[0].get("formula"):
-            legend = None
+        if legend:
+            legend = [
+                entry for entry in legend
+                if not (entry.get("formula") and entry.get("label") == title)
+            ]
+            if not legend:
+                legend = None
     else:
         title = _take("title", raw_title)
     if legend:
@@ -2095,6 +2164,17 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             text = str(note)
             if text and text not in notes:
                 notes.append(text)
+    annotations: list[dict] = []
+    for geom, _mapped in resolved:
+        for ann in getattr(geom, "_annotations", None) or ():
+            text = str(ann.get("text") or "")
+            if not text:
+                continue
+            annotations.append({
+                "x": float(ann["x"]),
+                "y": float(ann["y"]),
+                "text": text,
+            })
     if dropped_log:
         word = "value" if dropped_log == 1 else "values"
         notes.append(f"{dropped_log} non-positive {word} omitted on a log scale")
@@ -2143,6 +2223,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         "gz": 1 if g.compress else 0,
         "coord": coord_spec,
         "notes": notes,
+        "ann": annotations,
     }
     return spec, payloads
 
