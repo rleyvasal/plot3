@@ -20,6 +20,7 @@ from plot3.geoms import (
     scale_x_log10,
     scale_y_log10,
     stat_density_3d,
+    slider,
     transition_states,
     transition_time,
     _Theme,
@@ -166,6 +167,7 @@ class ggplot:
         self.scale_x: scale_x_log10 | None = None
         self.scale_y: scale_y_log10 | None = None
         self.transition: transition_time | transition_states | None = None
+        self.slider: slider | None = None
         self.height = height if isinstance(height, str) else f"{int(height)}px"
         self.quantize = bool(quantize)
         self.compress = bool(compress)
@@ -276,7 +278,19 @@ class ggplot:
             g.scale_x = other
         elif isinstance(other, scale_y_log10):
             g.scale_y = other
+        elif isinstance(other, slider):
+            if self.transition is not None:
+                raise ValueError(
+                    "slider() cannot be combined with transition_time() "
+                    "or transition_states()"
+                )
+            g.slider = other
         elif isinstance(other, (transition_time, transition_states)):
+            if self.slider is not None:
+                raise ValueError(
+                    "slider() cannot be combined with transition_time() "
+                    "or transition_states()"
+                )
             g.transition = other
         elif isinstance(other, aes):
             m = aes()

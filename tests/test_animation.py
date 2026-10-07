@@ -18,6 +18,7 @@ from plot3 import (
     labs,
     scale_x_log10,
     scale_y_log10,
+    slider,
     transition_states,
     transition_time,
 )
@@ -327,8 +328,9 @@ def test_unbound_coefficient_errors_at_build_time():
     layer = geom_function("y = a x^2")
     assert layer.formula.pending == ("a",)
     assert layer.formula.variables == ("x",)
-    with pytest.raises(ExprError, match=r"transition_time\(a=\(0, 3\)\)"):
+    with pytest.raises(ExprError, match=r"transition_time\(a=\(0, 3\)\)") as err:
         build_spec(ggplot() + layer)
+    assert "slider(a=(0, 3))" in str(err.value)
 
 
 def test_function_parameter_sweep_fixes_axes():
@@ -350,10 +352,14 @@ def test_function_parameter_sweep_fixes_axes():
     assert spec["scales"]["y"]["hi"] == pytest.approx(300)
     layer = spec["layers"][0]
     assert layer["frames"]["nFrames"] == 60
+    assert spec["slider"] is None
     y = _u16(_blob(payloads, layer["frames"]["y"]["id"]))
     mat = y.reshape(-1, 60)
     assert int(mat[:, 0].max()) == 0
     assert int(mat[:, -1].max()) == 65535
+    # No-JS fallback stays the last frame. Sliders use the first one.
+    static_y = _u16(_blob(payloads, layer["y"]["id"]))
+    assert np.array_equal(static_y, mat[:, -1])
 
 
 def test_function_sweep_uses_every_frame_for_the_scale():
@@ -452,3 +458,184 @@ def test_parameter_sweep_still_clips_poles():
     assert spec["notes"][0].startswith("y clipped to [")
     assert spec["scales"]["y"]["hi"] == pytest.approx(12.46, abs=0.1)
     assert spec["layers"][0]["frames"]["nFrames"] == 5
+
+
+def test_slider_requires_ranges_and_steps():
+    with pytest.raises(TypeError, match="parameter range"):
+        slider()
+    with pytest.raises(ValueError, match="at least 2"):
+        slider(a=(0, 1), steps=1)
+    with pytest.raises(TypeError, match=r"slider\(\) range"):
+        slider(a=3)
+    with pytest.raises(TypeError, match="steps="):
+        slider(a=(0, 1), steps=(0, 1))
+
+
+def test_slider_cannot_combine_with_a_transition():
+    with pytest.raises(ValueError, match="cannot be combined"):
+        ggplot() + slider(a=(0, 1)) + transition_time(a=(0, 1))
+    with pytest.raises(ValueError, match="cannot be combined"):
+        ggplot() + transition_time(a=(0, 1)) + slider(a=(0, 1))
+    with pytest.raises(ValueError, match="cannot be combined"):
+        ggplot() + slider(a=(0, 1)) + transition_states("year")
+    with pytest.raises(ValueError, match="cannot be combined"):
+        ggplot() + transition_states("year") + slider(a=(0, 1))
+
+
+def test_masking_keeps_slider_ranges_as_python():
+    import ast
+
+    src = "slider(a=(0, 2*pi), steps=10)"
+    out = ast.unparse(ast.parse(apply_masking(src, known=default_known_names())))
+    assert "2 * pi" in out or "2*pi" in out
+    assert "'pi'" not in out and '"pi"' not in out
+    assert "slider" in default_known_names()
+
+
+def test_slider_one_parameter_opens_at_the_low_end():
+    import json
+
+    from plot3 import geom_function
+    from plot3.payload import build_payload, validate_payload
+
+    fig = ggplot() + geom_function("y = a x^2") + slider(a=(0, 3))
+    spec, payloads = build_spec(fig)
+    json.dumps(spec)
+    assert spec["transition"] is None
+    knob = spec["slider"]
+    assert knob["nFrames"] == 25
+    assert knob["params"] == [
+        {"name": "a", "lo": 0.0, "hi": 3.0, "n": 25, "stride": 1}
+    ]
+    assert spec["scales"]["x"]["lo"] == pytest.approx(-10)
+    assert spec["scales"]["x"]["hi"] == pytest.approx(10)
+    assert spec["scales"]["y"]["lo"] == pytest.approx(0)
+    assert spec["scales"]["y"]["hi"] == pytest.approx(300)
+    layer = spec["layers"][0]
+    assert layer["frames"]["nFrames"] == 25
+    assert "mode" not in layer["frames"]
+    y = _u16(_blob(payloads, layer["frames"]["y"]["id"])).reshape(-1, 25)
+    assert int(y[:, 0].max()) == 0
+    assert int(y[:, -1].max()) == 65535
+    static_y = _u16(_blob(payloads, layer["y"]["id"]))
+    assert np.array_equal(static_y, y[:, 0])
+    payload = validate_payload(build_payload(fig))
+    assert payload["spec"]["slider"]["nFrames"] == 25
+    assert payload["spec"]["transition"] is None
+
+
+def test_slider_grid_is_independent_per_parameter():
+    import json
+
+    from plot3 import geom_function
+
+    spec, payloads = build_spec(
+        ggplot()
+        + geom_function("y = a sin(k x)")
+        + slider(a=(0, 3), k=(1, 5), steps=5)
+    )
+    json.dumps(spec)
+    knob = spec["slider"]
+    assert knob["nFrames"] == 25
+    assert [(p["name"], p["n"], p["stride"]) for p in knob["params"]] == [
+        ("a", 5, 5),
+        ("k", 5, 1),
+    ]
+    assert knob["params"][0]["lo"] == pytest.approx(0)
+    assert knob["params"][0]["hi"] == pytest.approx(3)
+    assert knob["params"][1]["lo"] == pytest.approx(1)
+    assert knob["params"][1]["hi"] == pytest.approx(5)
+    assert spec["scales"]["y"]["lo"] == pytest.approx(-3, abs=0.05)
+    assert spec["scales"]["y"]["hi"] == pytest.approx(3, abs=0.05)
+    layer = spec["layers"][0]
+    y = _u16(_blob(payloads, layer["frames"]["y"]["id"])).reshape(-1, 25)
+    # a = 0 along the whole k axis: a flat line.
+    assert int(y[:, 0].max()) - int(y[:, 0].min()) <= 1
+    assert int(y[:, 4].max()) - int(y[:, 4].min()) <= 1
+    slow = y[:, 20].astype(np.float64)
+    fast = y[:, 24].astype(np.float64)
+    assert int(slow.max()) > 60000 and int(slow.min()) < 5000
+    assert int(fast.max()) > 60000 and int(fast.min()) < 5000
+    assert np.corrcoef(slow, fast)[0, 1] < 0.95
+    x = _u16(_blob(payloads, layer["frames"]["x"]["id"])).reshape(-1, 25)
+    assert np.all(x == x[:, :1])
+
+
+def test_slider_overrides_a_bound_coefficient():
+    from plot3 import geom_function
+
+    spec, payloads = build_spec(
+        ggplot()
+        + geom_function("y = a x^2", a=2)
+        + slider(a=(0, 3), steps=3)
+    )
+    assert spec["slider"]["nFrames"] == 3
+    y = _u16(_blob(payloads, spec["layers"][0]["frames"]["y"]["id"]))
+    y = y.reshape(-1, 3)
+    # Frame 0 is a = 0, not the bound value 2.
+    assert int(y[:, 0].max()) == 0
+    assert int(y[:, -1].max()) == 65535
+    static_y = _u16(_blob(payloads, spec["layers"][0]["y"]["id"]))
+    assert np.array_equal(static_y, y[:, 0])
+
+
+def test_slider_rejects_parameters_that_are_not_coefficients():
+    from plot3 import geom_function
+
+    with pytest.raises(ValueError, match="not coefficients"):
+        build_spec(ggplot() + geom_function("y = x^2") + slider(a=(0, 1)))
+
+
+def test_slider_rejects_point_layers():
+    df = pd.DataFrame({"x": [1.0], "y": [1.0]})
+    with pytest.raises(ValueError, match="geom_function"):
+        build_spec(
+            ggplot(df, aes(x="x", y="y")) + geom_point() + slider(a=(0, 1))
+        )
+
+
+def test_implicit_slider_snaps_and_opens_on_the_first_frame():
+    from plot3 import geom_function
+
+    spec, payloads = build_spec(
+        ggplot()
+        + geom_function("x^2 + y^2 = a", n=20)
+        + slider(a=(1, 16), steps=3)
+    )
+    frames = spec["layers"][0]["frames"]
+    assert frames["mode"] == "step"
+    assert frames["nFrames"] == 3
+    counts = [span[1] for span in frames["spans"]]
+    assert all(count >= 2 for count in counts)
+    assert counts[0] < counts[-1]
+    fx = _u16(_blob(payloads, frames["x"]["id"]))
+    sx = _u16(_blob(payloads, spec["layers"][0]["x"]["id"]))
+    start, count = frames["spans"][0]
+    assert np.array_equal(sx, fx[start:start + count])
+
+
+def test_slider_surface_keeps_a_finite_wave():
+    from plot3 import geom_function
+
+    spec, _payloads = build_spec(
+        ggplot()
+        + geom_function("z = sin(a) sin(x) cos(y)", n=8)
+        + slider(a=(0, math.pi), steps=3)
+    )
+    assert spec["is3d"] is True
+    assert spec["layers"][0]["kind"] == "surface"
+    assert spec["layers"][0]["frames"]["nFrames"] == 3
+    assert not spec.get("notes")
+    assert spec["scales"]["z"]["lo"] == pytest.approx(-0.83, abs=0.05)
+    assert spec["scales"]["z"]["hi"] == pytest.approx(0.83, abs=0.05)
+
+
+def test_slider_refuses_a_grid_that_is_too_large():
+    from plot3 import geom_function
+
+    with pytest.raises(ValueError, match="smaller steps"):
+        build_spec(
+            ggplot()
+            + geom_function("z = a sin(x) cos(y)")
+            + slider(a=(0, 1), k=(1, 2), steps=25)
+        )

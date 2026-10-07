@@ -110,7 +110,7 @@ class Formula:
     caption_latex: str = ""
     caption_pretty: str = ""
     # Coefficients such as ``a`` in ``y = a x^2``. Empty unless parsing was
-    # asked to wait: a following ``transition_time(a=(0, 3))`` may bind them.
+    # asked to wait: a following transition_time or slider may bind them.
     pending: tuple[str, ...] = ()
 
     def _repr_latex_(self) -> str:
@@ -129,8 +129,8 @@ def parse_formula(
 
     ``defer_missing`` records unbound coefficients on ``Formula.pending``
     instead of raising. ``geom_function`` uses that so a later
-    ``transition_time(a=(0, 3))`` can still animate them. A direct
-    ``parse_formula`` call keeps raising immediately.
+    ``transition_time(a=(0, 3))`` or ``slider(a=(0, 3))`` can still bind
+    them. A direct ``parse_formula`` call keeps raising immediately.
     """
     bound = dict(params or {})
     if isinstance(expr, str):
@@ -484,7 +484,10 @@ def _missing_param_build_message(name: str) -> str:
     notebook still shows it on the cell that displays the plot.
     """
     found = _notebook_number(name)
-    animate = f", or animate it: + transition_time({name}=(0, 3))"
+    animate = (
+        f", or animate it: + transition_time({name}=(0, 3))"
+        f", or drag it: + slider({name}=(0, 3))"
+    )
     if found is not None:
         return (
             f"'{name}' has no value. Your notebook has {name} = {_fmt_num(found)}. "

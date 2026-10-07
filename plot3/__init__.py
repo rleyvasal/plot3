@@ -31,6 +31,7 @@ from plot3.geoms import (
     scale_y_log10,
     theme_dark,
     theme_light,
+    slider,
     transition_states,
     transition_time,
 )
@@ -88,6 +89,7 @@ __all__ = [
     "scale_y_log10",
     "transition_time",
     "transition_states",
+    "slider",
     "theme_dark",
     "theme_light",
     "ggsave",

@@ -47,6 +47,7 @@ _SELECTOR_FUNCS = frozenset(
         "facet_wrap",
         "transition_time",
         "transition_states",
+        "slider",
     }
 )
 
@@ -290,6 +291,15 @@ class Plot3MaskTransformer(ast.NodeTransformer):
                         ast.keyword(arg=kw.arg, value=self.visit(kw.value))
                     )
             node.keywords = new_kws
+            return node
+
+        if name == "slider":
+            # Ranges and ``steps=`` stay Python, so ``pi`` is not quoted.
+            node.args = [self.visit(a) for a in node.args]
+            node.keywords = [
+                ast.keyword(arg=kw.arg, value=self.visit(kw.value))
+                for kw in node.keywords
+            ]
             return node
 
         if name == "transition_states":

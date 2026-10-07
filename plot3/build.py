@@ -297,6 +297,7 @@ def expand_stat_geom(
     data,
     domains: dict | None = None,
     transition=None,
+    slider=None,
 ) -> _Geom:
     """Turn statistical geoms into concrete drawable layers.
 
@@ -309,7 +310,9 @@ def expand_stat_geom(
     if getattr(geom, "kind", None) == "function":
         from plot3.function import expand_function
 
-        return expand_function(geom, base_mapping, data, domains, transition)
+        return expand_function(
+            geom, base_mapping, data, domains, transition, slider
+        )
     mapping = dict(base_mapping)
     mapping.update(geom.mapping)
     if geom.kind == "bar":
@@ -963,6 +966,28 @@ def _range_transition_meta(transition) -> dict:
     }
 
 
+def _slider_meta(slider) -> dict:
+    """Independent ranges. The last keyword varies fastest (stride 1)."""
+    names = list(slider.ranges)
+    steps = int(slider.steps)
+    params: list[dict] = []
+    stride = 1
+    for name in reversed(names):
+        lo, hi = slider.ranges[name]
+        params.append(
+            {
+                "name": name,
+                "lo": float(lo),
+                "hi": float(hi),
+                "n": steps,
+                "stride": stride,
+            }
+        )
+        stride *= steps
+    params.reverse()
+    return {"nFrames": int(stride), "params": params}
+
+
 def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if not g.layers:
         raise ValueError("add a geom: ggplot(df, aes(...)) + geom_point()")
@@ -1001,13 +1026,19 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             geom = copy_geom_with_density_n(geom, density_stat.n)
         layers_in.append(geom)
     transition = getattr(g, "transition", None)
+    slider = getattr(g, "slider", None)
+    if slider is not None and transition is not None:
+        raise ValueError(
+            "slider() cannot be combined with transition_time() "
+            "or transition_states()"
+        )
     domains = None
     if any(getattr(layer, "kind", None) == "function" for layer in layers_in):
         from plot3.function import data_domains
 
         domains = data_domains(g, data)
     expanded = [
-        expand_stat_geom(geom, g.mapping, data, domains, transition)
+        expand_stat_geom(geom, g.mapping, data, domains, transition, slider)
         for geom in layers_in
     ]
     resolved = []  # per layer: (geom, mapping)
@@ -1077,6 +1108,32 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                     f"(this figure also has {extra})"
                 )
 
+    if slider is not None and getattr(slider, "ranges", None):
+        formula_layers = [
+            geom
+            for geom, _mapped in resolved
+            if getattr(geom, "_is_formula", False)
+        ]
+        if not formula_layers:
+            raise ValueError("slider() needs a geom_function layer")
+        extra = sorted(
+            {
+                geom.kind
+                for geom, _mapped in resolved
+                if not getattr(geom, "_is_formula", False)
+            }
+        )
+        if extra:
+            raise ValueError(
+                "slider() drives geom_function layers only "
+                f"(this figure also has {extra})"
+            )
+        if not any(getattr(geom, "_anim", None) for geom, _mapped in resolved):
+            raise ValueError(
+                "slider() parameters are not coefficients of a geom_function. "
+                'Leave them unbound: geom_function("y = a x^2") + slider(a=(0, 3))'
+            )
+
     axes = ["x", "y", "z"] if is3d else ["x", "y"]
     scales: dict[str, Scale] = {}
     color_scale = None  # ("num", lo, hi) | ("cat", cats)
@@ -1086,6 +1143,11 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     transition_meta: dict | None = None
     if transition is not None and getattr(transition, "ranges", None):
         transition_meta = _range_transition_meta(transition)
+    slider_meta = (
+        _slider_meta(slider)
+        if slider is not None and getattr(slider, "ranges", None)
+        else None
+    )
 
     def _axis_trans(axis: str) -> str | None:
         if axis == "x" and getattr(g, "scale_x", None) is not None:
@@ -1226,12 +1288,15 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             "nObj": int(sample.shape[0]),
         }
         vals = {"frames": frames}
+        # Sliders show every parameter at its low end. Transitions keep
+        # the last frame, which is what a paused chart already showed.
+        static_col = int(anim.get("static_col", -1))
         for axis_name, mat in channels.items():
             mat = np.asarray(mat, dtype=np.float64)
             flat = _absorb_position(axis_name, "num", mat.ravel(), [])
             stored = np.asarray(flat, dtype=np.float64).reshape(mat.shape)
             frames[axis_name] = stored
-            vals[axis_name] = stored[:, -1].copy()
+            vals[axis_name] = stored[:, static_col].copy()
         return vals
 
     # Pass 1 — per-layer values + global scale domains.
@@ -2073,6 +2138,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         "legend": legend,
         "sizeLegend": size_legend,
         "transition": transition_meta,
+        "slider": slider_meta,
         "layers": layer_specs,
         "gz": 1 if g.compress else 0,
         "coord": coord_spec,

@@ -26,9 +26,12 @@ body{display:flex;flex-direction:column}
 #legend .sz-block{margin-top:6px}
 #legend .bub{display:inline-block;border-radius:50%;box-sizing:border-box;flex:none;
   border:1px solid rgba(0,0,0,.35)}
-#player{display:none;flex:none;align-items:center;flex-wrap:wrap;gap:8px;padding:4px 10px 8px}
+#player{display:none;flex:none;align-items:center;flex-wrap:wrap;gap:8px;padding:4px 10px 8px;max-width:100%;box-sizing:border-box}
 #player button{font:inherit;padding:3px 10px;border-radius:5px;cursor:pointer}
 #player #play-range{flex:1;min-width:80px}
+#player .plot3-slider{display:flex;align-items:center;gap:6px;flex:1 1 240px;min-width:0;max-width:100%}
+#player .plot3-slider input[type=range]{flex:1;min-width:0}
+#player .plot3-slider-readout{font-variant-numeric:tabular-nums;white-space:nowrap}
 .plot3-math{white-space:nowrap}
 #tip{position:absolute;display:none;z-index:5;pointer-events:none;
   padding:4px 8px;border-radius:5px;font-size:11px;white-space:nowrap;
@@ -678,10 +681,7 @@ function writeSurfaceFrame(entry, t) {
     entry.wire.geometry = next;
   }
 }
-function writeStepFrame(entry, t) {
-  const sample = frameSample(t);
-  let f = sample.u >= 0.5 ? sample.f1 : sample.f0;
-  if (sample.f0 === sample.f1) f = sample.f0;
+function writeStepIndex(entry, f) {
   const bucket = entry.bucket;
   for (let i = 0; i < bucket.length; i++) {
     const on = i === f;
@@ -699,6 +699,128 @@ function writeStepFrame(entry, t) {
   for (let i = 0; i < count; i++) {
     L._x[i] = F.x.data[start + i];
     L._y[i] = F.y.data[start + i];
+  }
+}
+function writeStepFrame(entry, t) {
+  const sample = frameSample(t);
+  let f = sample.u >= 0.5 ? sample.f1 : sample.f0;
+  if (sample.f0 === sample.f1) f = sample.f0;
+  writeStepIndex(entry, f);
+}
+function sliderAxes() {
+  const params = (S.slider && S.slider.params) || [];
+  const axes = [];
+  for (let p = 0; p < params.length; p++) {
+    const spec = params[p];
+    const node = document.getElementById('slider-' + spec.name);
+    const u = node ? (+node.value) / 1000 : 0;
+    const n = spec.n;
+    const span = Math.max(0, n - 1);
+    const t = u * span;
+    let i0 = Math.floor(t);
+    if (i0 >= n - 1) i0 = n - 1;
+    if (i0 < 0) i0 = 0;
+    const i1 = Math.min(n - 1, i0 + 1);
+    const f = (i0 === i1) ? 0 : (t - i0);
+    const value = (+spec.lo) + u * ((+spec.hi) - (+spec.lo));
+    axes.push({ spec: spec, i0: i0, i1: i1, f: f, value: value });
+  }
+  return axes;
+}
+function sliderStepIndex(axes) {
+  let index = 0;
+  for (let b = 0; b < axes.length; b++) {
+    const ax = axes[b];
+    const i = ax.f >= 0.5 ? ax.i1 : ax.i0;
+    index += i * ax.spec.stride;
+  }
+  return index;
+}
+function sliderCorners(axes) {
+  const n = axes.length;
+  const corners = [];
+  const limit = 1 << n;
+  for (let mask = 0; mask < limit; mask++) {
+    let index = 0;
+    let w = 1;
+    for (let b = 0; b < n; b++) {
+      const bit = (mask >> b) & 1;
+      const ax = axes[b];
+      index += (bit ? ax.i1 : ax.i0) * ax.spec.stride;
+      w *= bit ? ax.f : (1 - ax.f);
+    }
+    if (w < 1e-8) continue;
+    corners.push({ index: index, w: w });
+  }
+  if (!corners.length) corners.push({ index: sliderStepIndex(axes), w: 1 });
+  return corners;
+}
+function writeLineCorners(entry, corners) {
+  const L = entry.L;
+  const F = L.frames;
+  if (!F || !F.x) return;
+  const nF = F.nFrames;
+  const n = L.n;
+  const ext = entry.ext;
+  const hasZ = !!entry.hasZ;
+  for (let i = 0; i < n; i++) {
+    let x = 0, y = 0, z = 0;
+    const base = i * nF;
+    for (let c = 0; c < corners.length; c++) {
+      const w = corners[c].w;
+      const idx = base + corners[c].index;
+      x += w * F.x.data[idx];
+      if (F.y) y += w * F.y.data[idx];
+      if (hasZ && F.z) z += w * F.z.data[idx];
+    }
+    L._x[i] = x;
+    L._y[i] = F.y ? y : L.y.data[i];
+    if (hasZ && F.z) L._z[i] = z;
+  }
+  for (let s = 0; s < entry.segs.length; s++) {
+    const seg = entry.segs[s];
+    const flat = new Float32Array(seg.cnt * 3);
+    for (let k = 0; k < seg.cnt; k++) {
+      const i = seg.s0 + k;
+      flat[k * 3] = L._x[i] * ext[0];
+      flat[k * 3 + 1] = L._y[i] * ext[1];
+      flat[k * 3 + 2] = hasZ ? L._z[i] * ext[2] : 0;
+    }
+    seg.geom.setPositions(Array.from(flat));
+  }
+}
+function writeSurfaceCorners(entry, corners) {
+  const L = entry.L;
+  const F = L.frames;
+  if (!F) return;
+  const nF = F.nFrames;
+  const n = L.n;
+  const ext = entry.ext;
+  const pos = entry.pos;
+  for (let i = 0; i < n; i++) {
+    let x = 0, y = 0, z = 0;
+    let wx = 0, wy = 0, wz = 0;
+    const base = i * nF;
+    for (let c = 0; c < corners.length; c++) {
+      const w = corners[c].w;
+      const idx = base + corners[c].index;
+      if (F.x) { x += w * F.x.data[idx]; wx += w; }
+      if (F.y) { y += w * F.y.data[idx]; wy += w; }
+      if (F.z) { z += w * F.z.data[idx]; wz += w; }
+    }
+    if (wx) L._x[i] = x; else L._x[i] = L.x.data[i];
+    if (wy) L._y[i] = y; else L._y[i] = L.y.data[i];
+    if (wz) L._z[i] = z; else L._z[i] = L.z.data[i];
+    pos[i * 3] = L._x[i] * ext[0];
+    pos[i * 3 + 1] = L._y[i] * ext[1];
+    pos[i * 3 + 2] = L._z[i] * ext[2];
+  }
+  entry.geom.attributes.position.needsUpdate = true;
+  entry.geom.computeVertexNormals();
+  if (entry.wire) {
+    const next = new THREE.WireframeGeometry(entry.geom);
+    entry.wire.geometry.dispose();
+    entry.wire.geometry = next;
   }
 }
 function addTweenLines(L, ext, cols) {
@@ -877,10 +999,83 @@ let playing = false;
 let playSpeed = 1;
 let recording = false;
 let mediaRec = null;
+function installSliders(renderFrame) {
+  const spec = S.slider;
+  const params = (spec && spec.params) || [];
+  const player = document.getElementById('player');
+  const yearEl = document.getElementById('year');
+  player.style.display = 'flex';
+  player.style.color = T.ink2;
+  yearEl.style.display = 'none';
+  document.getElementById('play-btn').style.display = 'none';
+  document.getElementById('play-range').style.display = 'none';
+  document.getElementById('play-readout').style.display = 'none';
+  document.getElementById('play-rec').style.display = 'none';
+  const speed = document.getElementById('play-speed');
+  if (speed && speed.parentElement) speed.parentElement.style.display = 'none';
+  const readouts = [];
+  for (let i = 0; i < params.length; i++) {
+    const p = params[i];
+    const lab = document.createElement('label');
+    lab.className = 'plot3-slider';
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = '0';
+    input.max = '1000';
+    input.value = '0';
+    input.id = 'slider-' + p.name;
+    input.setAttribute('aria-label', p.name);
+    const out = document.createElement('span');
+    out.className = 'plot3-slider-readout';
+    lab.appendChild(input);
+    lab.appendChild(out);
+    player.appendChild(lab);
+    readouts.push(out);
+    input.addEventListener('input', () => paint());
+  }
+  let shownLab = null;
+  function paint() {
+    const axes = sliderAxes();
+    const corners = sliderCorners(axes);
+    for (const e of lineEntries) writeLineCorners(e, corners);
+    for (const e of surfaceEntries) writeSurfaceCorners(e, corners);
+    const stepIndex = sliderStepIndex(axes);
+    for (const e of stepEntries) writeStepIndex(e, stepIndex);
+    const parts = [];
+    for (let i = 0; i < axes.length; i++) {
+      const text = axes[i].spec.name + ' = ' + fmtParam(axes[i].value);
+      parts.push(text);
+      if (readouts[i]) readouts[i].textContent = text;
+    }
+    const lab = parts.join(', ');
+    frameLabel = lab;
+    if (lab !== shownLab) {
+      shownLab = lab;
+      refreshFrameLabels();
+      const titleTemplate = (S.labs && S.labs.title) || '';
+      if (titleTemplate.indexOf('{frame_time}') >= 0) {
+        const next = titleTemplate.split('{frame_time}').join(lab);
+        if (S.labsMath && S.labsMath.title) {
+          const segs = S.labsMath.title.map(p => ({
+            latex: p.latex,
+            text: String(p.text == null ? '' : p.text).split('{frame_time}').join(lab),
+          }));
+          titleEl.innerHTML = plot3MathHTML(segs, next);
+          plot3Typeset(titleEl);
+        } else {
+          titleEl.textContent = next;
+        }
+      }
+    }
+    renderFrame();
+  }
+  paint();
+}
 function installPlayer(renderFrame) {
   window.__plot3.afterLegend = () => {
     for (const e of bubbleEntries) applyBubbleHide(e);
   };
+  if (S.slider) { installSliders(renderFrame); return; }
   if (!S.transition) return;
   const tr = S.transition;
   const nF = tr.nFrames;

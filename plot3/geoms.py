@@ -722,7 +722,7 @@ class scale_y_log10:
     axis = "y"
 
 
-def _as_range(value, name: str) -> tuple[float, float]:
+def _as_range(value, name: str, who: str = "transition_time") -> tuple[float, float]:
     """A finite ``(lo, hi)`` pair. Inverted pairs are swapped."""
     pair = None
     if isinstance(value, (tuple, list, np.ndarray)) and not isinstance(
@@ -745,7 +745,7 @@ def _as_range(value, name: str) -> tuple[float, float]:
                     lo, hi = hi, lo
                 return (lo, hi)
     raise TypeError(
-        f"transition_time() range {name} must be a pair of numbers, "
+        f"{who}() range {name} must be a pair of numbers, "
         f"for example {name}=(0, 3)"
     )
 
@@ -796,6 +796,41 @@ class transition_time:
         if self.ranges and nframes < 2:
             raise ValueError("transition_time() needs at least 2 frames")
         self.frames = nframes
+
+
+class slider:
+    """Drag formula coefficients, one control per parameter.
+
+    Unlike :class:`transition_time`, each range moves on its own and nothing
+    plays by itself. The grid is sampled in Python (``steps`` values along
+    each range, last keyword varying fastest) and the viewer blends curves
+    and surfaces between the neighboring cells. An implicit contour snaps
+    to the nearest cell, because its vertex count changes.
+
+        ggplot() + geom_function("y = a sin(k x)") + slider(a=(0, 3), k=(1, 5))
+
+    ``steps`` defaults to 25 per parameter. A surface on the default grid
+    is too large for several parameters at that count; pass a smaller
+    ``steps`` or ``n``. Do not combine with ``transition_time()``.
+    """
+
+    kind = "slider"
+
+    def __init__(self, *, steps: int = 25, **ranges):
+        if not ranges:
+            raise TypeError(
+                "slider() needs a parameter range, for example slider(a=(0, 3))"
+            )
+        try:
+            nsteps = int(steps)
+        except (TypeError, ValueError):
+            raise TypeError(
+                "slider() steps= must be an integer, for example steps=25"
+            ) from None
+        if nsteps < 2:
+            raise ValueError("slider() needs at least 2 steps")
+        self.steps = nsteps
+        self.ranges = {k: _as_range(v, k, "slider") for k, v in ranges.items()}
 
 
 class transition_states:

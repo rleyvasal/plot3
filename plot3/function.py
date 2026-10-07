@@ -69,20 +69,27 @@ def expand_function(
     data: Any,
     domains: dict[str, tuple[float, float]] | None = None,
     transition: Any = None,
+    slider: Any = None,
 ) -> _Geom:
     """Turn ``geom_function`` into a line, path, or surface layer."""
     del base_mapping, data  # the formula carries its own samples
     formula: Formula = geom.formula
     domains = domains or {}
     pending = tuple(getattr(formula, "pending", ()) or ())
-    ranges = getattr(transition, "ranges", None) or {}
+    # A slider replaces a transition. build_spec rejects having both.
+    sweep = slider if slider is not None else transition
+    ranges = getattr(sweep, "ranges", None) or {}
     if pending:
         missing = [name for name in pending if name not in ranges]
         if missing:
             raise ExprError(_missing_param_build_message(missing[0]))
-        axes = _assign_axes(formula)
-        return _expand_animated(geom, formula, axes, domains, transition)
+    namespace = getattr(formula, "namespace", None) or {}
+    # A coefficient passed as a keyword (a=2) already sits in the namespace.
+    # Naming it on a slider or transition sweeps that value instead.
+    covered = any(name in pending or name in namespace for name in ranges)
     axes = _assign_axes(formula)
+    if ranges and (pending or covered):
+        return _expand_animated(geom, formula, axes, domains, sweep)
     if axes.kind == "surface":
         return _expand_surface(geom, formula, axes, domains)
     if axes.kind == "implicit":
@@ -604,6 +611,66 @@ def _sweep(transition: Any) -> list[dict[str, float]]:
     return steps
 
 
+# nSamples * nFrames. A 501-point curve at 25x25 fits; a default surface
+# (80x80) times two 25-step sliders does not. Raise instead of thinning.
+_SLIDER_CELL_CAP = 500_000
+
+
+def _slider_frame_count(source: Any) -> int:
+    if getattr(source, "kind", None) != "slider":
+        return 0
+    n = 1
+    for _name in source.ranges:
+        n *= int(source.steps)
+    return n
+
+
+def _guard_slider(source: Any, n_samples: int, what: str) -> None:
+    n_frames = _slider_frame_count(source)
+    if not n_frames:
+        return
+    cells = int(n_samples) * n_frames
+    if cells <= _SLIDER_CELL_CAP:
+        return
+    raise ValueError(
+        f"slider() would sample {n_frames} frames of {n_samples} {what} "
+        f"({cells} values). Pass a smaller steps= or n=."
+    )
+
+
+def _parameter_steps(source: Any) -> list[dict[str, float]]:
+    """Frame parameters. A transition locksteps; a slider is the full grid.
+
+    Grid order is C-order, last keyword fastest, matching
+    ``np.meshgrid(..., indexing='ij')`` then ravel.
+    """
+    if getattr(source, "kind", None) != "slider":
+        return _sweep(source)
+    names = list(source.ranges)
+    axes = [
+        np.linspace(float(lo), float(hi), int(source.steps))
+        for lo, hi in source.ranges.values()
+    ]
+    grids = np.meshgrid(*axes, indexing="ij")
+    flat = [np.asarray(g, dtype=np.float64).ravel() for g in grids]
+    n = int(flat[0].size)
+    return [
+        {name: float(flat[k][i]) for k, name in enumerate(names)}
+        for i in range(n)
+    ]
+
+
+def _static_col(source: Any) -> int:
+    """Column shown with JavaScript off.
+
+    Sliders open with every thumb at the low end. A transition keeps the
+    last frame, which is the frame a paused chart already showed.
+    """
+    if getattr(source, "kind", None) == "slider":
+        return 0
+    return -1
+
+
 def _shared_frame_window(
     mat: np.ndarray,
 ) -> tuple[float, float, bool]:
@@ -695,8 +762,9 @@ def _expand_curve_anim(geom, formula, axes, domains, transition) -> _Geom:
     sample_axis = "y" if axes.computed == "x" else "x"
     (lo, hi), source = _domain_for(geom, sample_axis, domains)
     count = _sample_count(geom, grid=False)
+    _guard_slider(transition, count, "curve samples")
     samples = _linspace(lo, hi, count)
-    steps = _sweep(transition)
+    steps = _parameter_steps(transition)
     mat = _curve_matrix(formula, samples, steps)
     if source == "default":
         finite = np.isfinite(mat)
@@ -719,10 +787,11 @@ def _expand_curve_anim(geom, formula, axes, domains, transition) -> _Geom:
         x_mat, y_mat = mat, repeated
     else:
         x_mat, y_mat = repeated, mat
+    shown = _static_col(transition)
     frame = pd.DataFrame(
         {
-            "x": np.asarray(x_mat[:, -1], dtype=np.float64),
-            "y": np.asarray(y_mat[:, -1], dtype=np.float64),
+            "x": np.asarray(x_mat[:, shown], dtype=np.float64),
+            "y": np.asarray(y_mat[:, shown], dtype=np.float64),
         }
     )
     maker = geom_path if axes.computed == "x" else geom_line
@@ -742,20 +811,24 @@ def _expand_curve_anim(geom, formula, axes, domains, transition) -> _Geom:
         out._axis_lock = {view_axis: lock}
     if note:
         out._notes = [note]
-    out._anim = {
+    anim = {
         "mode": "tween",
         "channels": {"x": x_mat, "y": y_mat},
     }
+    if shown == 0:
+        anim["static_col"] = 0
+    out._anim = anim
     return out
 
 
 def _expand_surface_anim(geom, formula, axes, domains, transition) -> _Geom:
     count = _sample_count(geom, grid=True)
+    _guard_slider(transition, count * count, "surface vertices")
     (xlo, xhi), x_source = _domain_for(geom, "x", domains)
     (ylo, yhi), y_source = _domain_for(geom, "y", domains)
     xs = _linspace(xlo, xhi, count)
     ys = _linspace(ylo, yhi, count)
-    steps = _sweep(transition)
+    steps = _parameter_steps(transition)
 
     def grids(x_axis: np.ndarray, y_axis: np.ndarray) -> np.ndarray:
         layers = []
@@ -783,11 +856,12 @@ def _expand_surface_anim(geom, formula, axes, domains, transition) -> _Geom:
     z_mat, lock, note = _clip_matrix(flat, zlim, "z", axes.z or "z")
     xx, yy = np.meshgrid(xs, ys)
     n_frames = z_mat.shape[1]
+    shown = _static_col(transition)
     last = pd.DataFrame(
         {
             "x": xx.ravel(),
             "y": yy.ravel(),
-            "z": np.asarray(z_mat[:, -1], dtype=np.float64),
+            "z": np.asarray(z_mat[:, shown], dtype=np.float64),
         }
     )
     vertices, indices, nx, ny = regular_grid_mesh(last, "x", "y", "z")
@@ -823,10 +897,13 @@ def _expand_surface_anim(geom, formula, axes, domains, transition) -> _Geom:
         out._axis_lock = {"z": lock}
     if note:
         out._notes = [note]
-    out._anim = {
+    anim = {
         "mode": "tween",
         "channels": {"x": x_mat, "y": y_mat, "z": z_ordered},
     }
+    if shown == 0:
+        anim["static_col"] = 0
+    out._anim = anim
     return out
 
 
@@ -852,14 +929,18 @@ def _rows_from_polylines(polylines) -> tuple[np.ndarray, np.ndarray, list]:
 def _expand_implicit_anim(geom, formula, axes, domains, transition) -> _Geom:
     # Vertex counts change with the parameter, so frames are shown as-is.
     count = _sample_count(geom, grid=True)
+    _guard_slider(transition, count * count, "grid samples")
     (xlo, xhi), _x_source = _domain_for(geom, "x", domains)
     (ylo, yhi), _y_source = _domain_for(geom, "y", domains)
     xs = _linspace(xlo, xhi, count)
     ys = _linspace(ylo, yhi, count)
-    steps = _sweep(transition)
+    steps = _parameter_steps(transition)
     frames: list[dict] = []
     static = None
     static_i = 0
+    # A slider opens at the low end, so the fallback curve is the first
+    # non-empty frame. A transition keeps the last one.
+    keep_first = getattr(transition, "kind", None) == "slider"
     for index, params in enumerate(steps):
 
         def sample(xx_fine, yy_fine, params=params):
@@ -875,7 +956,7 @@ def _expand_implicit_anim(geom, formula, axes, domains, transition) -> _Geom:
         rows_x, rows_y, groups = _rows_from_polylines(polylines)
         frame = {"x": rows_x, "y": rows_y, "groups": groups}
         frames.append(frame)
-        if rows_x.size >= 2:
+        if rows_x.size >= 2 and (static is None or not keep_first):
             static = frame
             static_i = index
     if static is None:
