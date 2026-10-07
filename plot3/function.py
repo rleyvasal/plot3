@@ -14,6 +14,7 @@ import pandas as pd
 
 from plot3.contour import _contour_lines, _refine_active_cells
 from plot3.expr import ExprError, Formula, evaluate
+from plot3.mathtext import split_math
 from plot3.geoms import _Geom, aes, geom_line, geom_path
 from plot3.stats3d import regular_grid_mesh
 from plot3.table import has_column, numeric_array
@@ -207,8 +208,9 @@ def _expand_curve(geom: _Geom, formula: Formula, axes: _Axes, domains: dict) -> 
     values = _curve_values(formula, axes, samples)
     view_axis = "x" if axes.computed == "x" else "y"
     view_lim = _limit_pair(getattr(geom, view_axis + "lim", None), view_axis + "lim")
+    view_name = axes.x if view_axis == "x" else axes.y
     kept_s, kept_v, lock, index, note = _clip_series(
-        samples, values, view_lim, view_axis
+        samples, values, view_lim, view_axis, view_name
     )
     if axes.computed == "x":
         xs, ys = kept_v, kept_s
@@ -231,7 +233,7 @@ def _expand_curve(geom: _Geom, formula: Formula, axes: _Axes, domains: dict) -> 
     out.data_override = frame
     out._groups = groups
     out._replace_mapping = True
-    out._legend_label = formula.label
+    _stamp_formula(out, geom, formula)
     out._axis_labels = {"x": axes.x, "y": axes.y}
     if lock is not None:
         out._axis_lock = {view_axis: lock}
@@ -282,6 +284,7 @@ def _clip_series(
     values: np.ndarray,
     view_lim: tuple[float, float] | None,
     view_axis: str,
+    note_name: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray, tuple[float, float] | None, np.ndarray, str | None]:
     finite = np.isfinite(samples) & np.isfinite(values)
     if not np.any(finite):
@@ -295,7 +298,7 @@ def _clip_series(
         lo, hi, blew_up = _robust_window(values[finite])
         if blew_up:
             keep = finite & (values >= lo) & (values <= hi)
-            note = _clip_note(view_axis, lo, hi)
+            note = _clip_note(note_name or view_axis, lo, hi, param=view_axis)
         else:
             keep = finite
         lock = None
@@ -324,9 +327,49 @@ def _groups_from_index(index: np.ndarray) -> list[list[int]]:
     return groups
 
 
-def _clip_note(axis: str, lo: float, hi: float) -> str:
-    """Caption for a pole that was clipped to the bulk of the samples."""
-    return f"{axis} clipped to [{lo:.6g}, {hi:.6g}]; pass {axis}lim= to change"
+def _bound(value: float) -> str:
+    """``-2.3`` with a Unicode minus, so the caption matches the axis ticks."""
+    return f"{value:.6g}".replace("-", "−")
+
+
+def _clip_note(name: str, lo: float, hi: float, *, param: str | None = None) -> str:
+    """Caption for a pole that was clipped to the bulk of the samples.
+
+    ``name`` is the variable the reader sees (``t`` on a surface of ``t``).
+    ``param`` is the keyword that changes the window (``zlim``).
+    """
+    flag = param or name
+    return (
+        f"{name} clipped to [{_bound(lo)}, {_bound(hi)}]; "
+        f"pass {flag}lim= to change"
+    )
+
+
+def _stamp_formula(out, geom, formula: Formula) -> None:
+    """Legend text, and the symbolic form the tooltip shows above the values."""
+    custom = getattr(geom, "label", None)
+    if custom:
+        plain, segments = split_math(str(custom))
+        out._legend_label = plain
+        out._legend_math = segments
+        out._legend_latex = None
+        if formula.mode == "callable":
+            if segments and len(segments) == 1 and segments[0].get("latex"):
+                out._tip_latex = segments[0]["latex"]
+                out._tip_pretty = segments[0]["text"]
+            else:
+                out._tip_latex = ""
+                out._tip_pretty = plain
+        else:
+            out._tip_latex = formula.caption_latex or formula.latex
+            out._tip_pretty = formula.caption_pretty or formula.pretty
+    else:
+        out._legend_label = formula.legend_pretty or formula.pretty or formula.label
+        out._legend_latex = formula.legend_latex or formula.latex or None
+        out._legend_math = None
+        out._tip_latex = formula.caption_latex or formula.latex or ""
+        out._tip_pretty = formula.caption_pretty or formula.pretty or out._legend_label
+    out._is_formula = True
 
 
 def _robust_window(values: np.ndarray) -> tuple[float, float, bool]:
@@ -363,7 +406,9 @@ def _expand_surface(
         y_source == "default" and _limit_pair(geom.ylim, "ylim") is None,
         count,
     )
-    zz, lock, note = _clip_grid(zz, _limit_pair(geom.zlim, "zlim"))
+    zz, lock, note = _clip_grid(
+        zz, _limit_pair(geom.zlim, "zlim"), axes.z or "z"
+    )
     xx, yy = np.meshgrid(xs, ys)
     frame = pd.DataFrame(
         {
@@ -387,7 +432,7 @@ def _expand_surface(
     out._nx = nx
     out._ny = ny
     out._replace_mapping = True
-    out._legend_label = formula.label
+    _stamp_formula(out, geom, formula)
     out._axis_labels = {"x": axes.x, "y": axes.y, "z": axes.z or "z"}
     out._function_surface = True
     if lock is not None:
@@ -433,7 +478,9 @@ def _narrow_surface(
 
 
 def _clip_grid(
-    zz: np.ndarray, zlim: tuple[float, float] | None
+    zz: np.ndarray,
+    zlim: tuple[float, float] | None,
+    note_name: str = "z",
 ) -> tuple[np.ndarray, tuple[float, float] | None, str | None]:
     finite = zz[np.isfinite(zz)]
     if finite.size == 0:
@@ -448,7 +495,7 @@ def _clip_grid(
         return filled, None, None
     filled = np.where(np.isfinite(zz), zz, lo)
     filled = np.clip(filled, lo, hi)
-    return filled, (lo, hi), _clip_note("z", lo, hi)
+    return filled, (lo, hi), _clip_note(note_name, lo, hi, param="z")
 
 
 def _expand_implicit(
@@ -506,6 +553,6 @@ def _expand_implicit(
     out._groups = groups
     out._replace_mapping = True
     out._implicit = True
-    out._legend_label = formula.label
+    _stamp_formula(out, geom, formula)
     out._axis_labels = {"x": axes.x, "y": axes.y}
     return out

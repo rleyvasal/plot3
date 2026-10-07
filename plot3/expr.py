@@ -1,10 +1,11 @@
 """Parse math formulas for ``geom_function``.
 
-The quoted string is the main form (``"y = 2x + 2"``). A small normaliser
-turns math notation into Python, ``ast`` parses it, and a whitelist walk
-rejects anything that is not arithmetic or a known function call. Evaluation
-uses that checked tree with NumPy functions — not a raw ``eval`` of the
-user string.
+The quoted string is the main form (``"y = 2x + 2"``). A raw LaTeX string
+(``r"\\frac{\\sin x}{x}"`` or ``"$xy$"``) is translated into that same text
+first. A small normaliser turns math notation into Python, ``ast`` parses
+it, and a whitelist walk rejects anything that is not arithmetic or a known
+function call. Evaluation uses that checked tree with NumPy functions — not
+a raw ``eval`` of the user string.
 """
 
 from __future__ import annotations
@@ -16,6 +17,14 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import numpy as np
+
+from plot3.latexin import (
+    is_latex,
+    latex_to_source,
+    reject_eaten_backslashes,
+    unwrap_latex,
+)
+from plot3.mathtext import formula_texts
 
 # Single letters that may be plot variables without a keyword value.
 # Other single letters (a, b, k, …) are coefficients and must be passed in.
@@ -62,6 +71,7 @@ def math_namespace() -> dict[str, Any]:
         "ln": np.log,
         "log10": np.log10,
         "sqrt": np.sqrt,
+        "cbrt": np.cbrt,
         "abs": np.abs,
         "floor": np.floor,
         "ceil": np.ceil,
@@ -93,6 +103,17 @@ class Formula:
     namespace: dict[str, Any]
     fn: Callable[..., Any] | None = None
     fn_args: tuple[str, ...] = ()
+    latex: str = ""
+    pretty: str = ""
+    legend_latex: str = ""
+    legend_pretty: str = ""
+    caption_latex: str = ""
+    caption_pretty: str = ""
+
+    def _repr_latex_(self) -> str:
+        """Notebook display of the parsed formula, not the raw input text."""
+        body = self.latex or self.label
+        return f"${body}$"
 
 
 def parse_formula(expr: Any, params: dict[str, Any] | None = None) -> Formula:
@@ -172,6 +193,7 @@ def _parse_callable(fn: Callable[..., Any]) -> Formula:
         namespace={},
         fn=_wrap_user_callable(label, fn),
         fn_args=tuple(arg_names),
+        **_callable_math(label),
     )
 
 
@@ -211,13 +233,27 @@ def _parse_sympyish(expr: Any, params: dict[str, Any]) -> Formula:
             namespace={},
             fn=_wrap_user_callable(str(expr), fn),
             fn_args=names,
+            **_callable_math(str(expr)),
         )
     return _parse_math(str(expr), params)
 
 
-def _parse_math(source: str, params: dict[str, Any]) -> Formula:
-    text = source.strip()
-    if not text:
+def _evaluated_tree(source: str, params: dict[str, Any] | None = None) -> ast.AST:
+    """The tree ``evaluate`` runs. Implicit equations are ``lhs - rhs``."""
+    sink: dict[str, ast.AST] = {}
+    _parse_math(source, dict(params or {}), sink)
+    return sink["tree"]
+
+
+def _parse_math(
+    source: str, params: dict[str, Any], _sink: dict[str, ast.AST] | None = None
+) -> Formula:
+    try:
+        reject_eaten_backslashes(source)
+    except ValueError as exc:
+        raise ExprError(str(exc)) from exc
+    original = source.strip()
+    if not original:
         raise ExprError(
             'geom_function() needs a formula, for example geom_function("y = 2x")'
         )
@@ -226,9 +262,22 @@ def _parse_math(source: str, params: dict[str, Any]) -> Formula:
     func_names.update(callables)
     # Names that are values, so ``a(x+1)`` means ``a*(x+1)`` rather than a call.
     value_names = set(numbers) | set(_MATH_CONSTS)
-    lhs_src, rhs_src, label = _normalize(text, func_names, value_names)
-    rhs_tree = _parse_side(rhs_src, text)
-    lhs_tree = _parse_side(lhs_src, text) if lhs_src is not None else None
+    user_latex = None
+    plain = original
+    if is_latex(original):
+        user_latex = unwrap_latex(original)
+        if not user_latex:
+            raise ExprError(
+                'geom_function() needs a formula, for example geom_function("y = 2x")'
+            )
+        try:
+            # e^{x} is exp(x) unless the user passed a value for e.
+            plain = latex_to_source(user_latex, e_is_constant="e" not in numbers)
+        except ValueError as exc:
+            raise ExprError(str(exc)) from exc
+    lhs_src, rhs_src, _ignored = _normalize(plain, func_names, value_names)
+    rhs_tree = _parse_side(rhs_src, original)
+    lhs_tree = _parse_side(lhs_src, original) if lhs_src is not None else None
     _validate(rhs_tree, func_names)
     if lhs_tree is not None:
         _validate(lhs_tree, func_names)
@@ -308,16 +357,26 @@ def _parse_math(source: str, params: dict[str, Any]) -> Formula:
             f"implicit equation needs 2 free variables, got ({listed})"
         )
 
-    if lhs_tree is None:
-        shown = text
-        if "=" not in text:
-            shown = f"{dependent} = {text}"
-        label = shown
+    if user_latex is not None:
+        label = user_latex
+    elif lhs_tree is None:
+        label = original if "=" in original else f"{dependent} = {original}"
     else:
-        label = text
+        label = original
 
     expr_node = ast.fix_missing_locations(ast.Expression(body=code_tree))
     code = compile(expr_node, "<geom_function>", "eval")
+    texts = formula_texts(
+        lhs_tree,
+        rhs_tree,
+        mode=mode,
+        dependent=dependent,
+        parameters=numbers,
+    )
+    if user_latex is not None:
+        texts = _keep_user_latex(texts, user_latex)
+    if _sink is not None:
+        _sink["tree"] = code_tree
     return Formula(
         label=label,
         mode=mode,
@@ -325,7 +384,37 @@ def _parse_math(source: str, params: dict[str, Any]) -> Formula:
         dependent=dependent,
         variables=tuple(free),
         namespace=namespace,
+        **texts,
     )
+
+
+def _keep_user_latex(texts: dict[str, str], user_latex: str) -> dict[str, str]:
+    """Show the LaTeX the user wrote, not a regenerated string.
+
+    Numeric parameters stay in the caption. The legend keeps their source
+    so a pasted ``\\frac`` is not rewritten.
+    """
+    symbolic = texts["latex"]
+    caption = texts["caption_latex"]
+    suffix = caption[len(symbolic) :] if caption.startswith(symbolic) else ""
+    out = dict(texts)
+    out["latex"] = user_latex
+    out["legend_latex"] = user_latex
+    out["legend_pretty"] = texts["pretty"]
+    out["caption_latex"] = user_latex + suffix
+    return out
+
+
+def _callable_math(label: str) -> dict[str, str]:
+    """A lambda has no tree. The signature is the whole display."""
+    return {
+        "latex": label,
+        "pretty": label,
+        "legend_latex": label,
+        "legend_pretty": label,
+        "caption_latex": label,
+        "caption_pretty": label,
+    }
 
 
 def _split_bindings(
@@ -495,6 +584,9 @@ def _normalize(
         raise ExprError(
             'geom_function() needs a formula, for example geom_function("y = 2x")'
         )
+    # ``{ }`` groups like parentheses, and ``x_{0}`` is the name x_0.
+    # ``x^{2}`` then works in plain text as well as in LaTeX.
+    tokens = _fold_groups(tokens)
 
     last = tokens[-1]
     if last.type == tokenize.OP and last.string not in {")", "}"}:
@@ -536,6 +628,78 @@ def _normalize(
             source,
         )
     return None, _render(tokens, func_names, value_names), source
+
+
+def _fold_groups(tokens: list[tokenize.TokenInfo]) -> list[tokenize.TokenInfo]:
+    """Turn plain ``{ }`` into grouping parentheses. ``x_{0}`` stays one name."""
+    out: list[tokenize.TokenInfo] = []
+    index = 0
+    while index < len(tokens):
+        tok = tokens[index]
+        # Python tokenizes ``x_`` as one name, so ``x_{0}`` is NAME ``x_`` then ``{0}``.
+        name_then_brace = (
+            tok.string == "{"
+            and out
+            and out[-1].type == tokenize.NAME
+            and out[-1].string.endswith("_")
+        )
+        op_then_brace = (
+            tok.string == "_"
+            and out
+            and out[-1].type == tokenize.NAME
+            and index + 1 < len(tokens)
+            and tokens[index + 1].string == "{"
+        )
+        if name_then_brace or op_then_brace:
+            brace_at = index if name_then_brace else index + 1
+            inner, nxt = _brace_inner(tokens, brace_at)
+            if _plain_subscript(inner):
+                tail = "".join(part.string for part in inner)
+                prefix = out[-1].string if name_then_brace else out[-1].string + "_"
+                out[-1] = out[-1]._replace(string=prefix + tail)
+                index = nxt
+                continue
+        if tok.string == "{":
+            out.append(tok._replace(string="("))
+        elif tok.string == "}":
+            out.append(tok._replace(string=")"))
+        else:
+            out.append(tok)
+        index += 1
+    return out
+
+
+def _brace_inner(
+    tokens: list[tokenize.TokenInfo], start: int
+) -> tuple[list[tokenize.TokenInfo], int]:
+    """``tokens[start]`` is ``{``. Return the inside and the index after ``}``."""
+    depth = 0
+    inner: list[tokenize.TokenInfo] = []
+    for index in range(start, len(tokens)):
+        tok = tokens[index]
+        if tok.string == "{":
+            depth += 1
+            if depth > 1:
+                inner.append(tok)
+            continue
+        if tok.string == "}":
+            depth -= 1
+            if depth == 0:
+                return inner, index + 1
+            inner.append(tok)
+            continue
+        inner.append(tok)
+    raise ExprError("syntax error at '{' (column 1)")
+
+
+def _plain_subscript(tokens: list[tokenize.TokenInfo]) -> bool:
+    if not tokens:
+        return False
+    for tok in tokens:
+        if tok.type not in {tokenize.NAME, tokenize.NUMBER} and tok.string != "_":
+            return False
+    text = "".join(tok.string for tok in tokens)
+    return bool(text) and all(char.isalnum() or char == "_" for char in text)
 
 
 def _star_before_paren(name: str, func_names: set[str], value_names: set[str]) -> bool:

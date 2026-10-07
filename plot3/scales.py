@@ -73,6 +73,32 @@ def fmt_num(v: float) -> str:
     return s
 
 
+def log_ticks(lo: float, hi: float) -> list[list]:
+    """Ticks for a log10 scale.
+
+    ``lo`` and ``hi`` are already log10 values (the scale's stored domain).
+    Each tick is ``[log10(value), label]`` so it sits in that same space.
+    """
+    if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
+        val = 10 ** lo if math.isfinite(lo) else 1.0
+        return [[lo, fmt_num(val)]]
+    span = hi - lo
+    mults = (1, 2, 5) if span <= 3 else (1,)
+    exp0 = math.floor(lo)
+    exp1 = math.ceil(hi)
+    out: list[list] = []
+    for exp in range(int(exp0), int(exp1) + 1):
+        for mult in mults:
+            val = mult * 10.0 ** exp
+            lv = math.log10(val)
+            if lv < lo - 1e-9 or lv > hi + 1e-9:
+                continue
+            out.append([lv, fmt_num(val)])
+    if not out:
+        out = [[lo, fmt_num(10 ** lo)], [hi, fmt_num(10 ** hi)]]
+    return out
+
+
 DT_LADDERS = [
     # (span_seconds >, [(pandas freq, strftime fmt), coarse -> fine])
     (2 * 365 * 86400, [("YS", "%Y"), ("QS", "%b %Y"), ("MS", "%b %Y")]),
@@ -106,18 +132,28 @@ def dt_ladder(lo_s: float, hi_s: float) -> list[list[list]]:
 
 
 class Scale:
-    """Resolved positional scale: numeric, datetime or categorical."""
+    """Resolved positional scale: numeric, datetime or categorical.
 
-    def __init__(self, kind: str):
+    ``trans`` is ``None`` or ``"log10"``. A log scale stores ``lo`` / ``hi``
+    and tick positions in log10 space. Labels stay in the original units.
+    """
+
+    def __init__(self, kind: str, trans: str | None = None):
         self.kind = kind  # "num" | "dt" | "cat"
+        self.trans = trans
         self.lo = math.inf
         self.hi = -math.inf
         self.cats: list[str] = []
 
     def widen(self, values: np.ndarray):
-        if len(values):
-            self.lo = min(self.lo, float(np.nanmin(values)))
-            self.hi = max(self.hi, float(np.nanmax(values)))
+        if len(values) == 0:
+            return
+        finite = np.asarray(values, dtype=np.float64)
+        finite = finite[np.isfinite(finite)]
+        if finite.size == 0:
+            return
+        self.lo = min(self.lo, float(finite.min()))
+        self.hi = max(self.hi, float(finite.max()))
 
     def finish(self):
         if self.kind == "cat":
@@ -129,10 +165,14 @@ class Scale:
 
     def spec(self) -> dict:
         d = {"kind": self.kind, "lo": self.lo, "hi": self.hi}
+        if self.trans:
+            d["trans"] = self.trans
         if self.kind == "cat":
             d["cats"] = self.cats
         elif self.kind == "dt":
             d["ladder"] = dt_ladder(self.lo, self.hi)
+        elif self.trans == "log10":
+            d["ticks"] = log_ticks(self.lo, self.hi)
         else:
             d["ticks"] = [[t, fmt_num(t)] for t in nice_ticks(self.lo, self.hi)]
         return d

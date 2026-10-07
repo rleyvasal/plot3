@@ -9,7 +9,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from plot3 import aes, coord_3d, coord_equal, geom_function, geom_point, ggplot
+from plot3 import (
+    aes,
+    coord_3d,
+    coord_equal,
+    geom_function,
+    geom_point,
+    ggplot,
+    labs,
+)
 from plot3.build import build_spec, expand_stat_geom
 from plot3.masking import (
     Plot3MaskTransformer,
@@ -65,7 +73,11 @@ def test_lambda_and_variable_names():
     assert spec["labs"]["x"] == "t"
     assert spec["labs"]["y"] == "v"
     assert spec["is3d"] is False
-    assert spec["legend"][0]["label"].startswith("v =")
+    # One function: the formula is the title, not a one-row legend.
+    assert spec["legend"] is None
+    assert spec["labs"]["title"].startswith("v =")
+    assert "^{" not in spec["labs"]["title"]
+    assert spec["math"] is True
 
 
 def test_ggplot_without_data_and_overlay_domain():

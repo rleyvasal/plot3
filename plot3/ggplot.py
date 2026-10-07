@@ -17,7 +17,11 @@ from plot3.geoms import (
     facet_wrap,
     labs,
     scale_colour_continuous,
+    scale_x_log10,
+    scale_y_log10,
     stat_density_3d,
+    transition_states,
+    transition_time,
     _Theme,
 )
 from plot3.table import as_table, detect_backend
@@ -159,6 +163,9 @@ class ggplot:
         self.facet: facet_wrap | None = None
         self.coord: coord_3d | coord_equal | None = None
         self.stat_density_3d: stat_density_3d | None = None
+        self.scale_x: scale_x_log10 | None = None
+        self.scale_y: scale_y_log10 | None = None
+        self.transition: transition_time | transition_states | None = None
         self.height = height if isinstance(height, str) else f"{int(height)}px"
         self.quantize = bool(quantize)
         self.compress = bool(compress)
@@ -265,6 +272,12 @@ class ggplot:
             g.coord = other
         elif isinstance(other, stat_density_3d):
             g.stat_density_3d = other
+        elif isinstance(other, scale_x_log10):
+            g.scale_x = other
+        elif isinstance(other, scale_y_log10):
+            g.scale_y = other
+        elif isinstance(other, (transition_time, transition_states)):
+            g.transition = other
         elif isinstance(other, aes):
             m = aes()
             m.update(self.mapping)

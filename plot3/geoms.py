@@ -43,10 +43,18 @@ def _as_column_name(value):
 
 
 class aes(dict):
-    """Aesthetic mapping: aes(x=, y=, z=, colour=/color=, fill=, group=).
+    """Aesthetic mapping: aes(x=, y=, z=, colour=/color=, fill=, size=, group=).
 
     ``fill`` is accepted as an alias of ``colour`` when colour is omitted
     (useful for surfaces).
+
+    ``size`` maps a numeric column onto point area (radius follows the square
+    root), so a bubble chart reads population as area. A constant
+    ``geom_point(size=)`` is still one size for the whole layer.
+
+    ``group`` is the identity of an object. Lines use it to split series.
+    ``transition_time`` uses it to match the same object across frames
+    (a country, for example).
 
     In Jupyter / SolveIt with R-style masking (default), bare names and
     backticks work like ggplot2::
@@ -69,6 +77,7 @@ class aes(dict):
         color=None,
         colour=None,
         fill=None,
+        size=None,
         group=None,
     ):
         super().__init__()
@@ -81,6 +90,7 @@ class aes(dict):
         )
         for k, v in (("x", x), ("y", y), ("z", z),
                      ("color", colour_value),
+                     ("size", size),
                      ("group", group)):
             if v is not None:
                 self[k] = _as_column_name(v)
@@ -101,9 +111,10 @@ class _Geom:
 class geom_point(_Geom):
     """Scatter points.
 
-    In **2D**, ``size`` is pixels. In **3D** (when ``aes(z=...)`` is set),
-    ``size`` is scene units with distance attenuation (unit-cube space after
-    encoding). Prefer :class:`geom_point3d` for explicit 3D intent.
+    In **2D**, a constant ``size`` is pixels. In **3D** (when ``aes(z=...)``
+    is set), a constant ``size`` is scene units with distance attenuation
+    (unit-cube space after encoding). Prefer :class:`geom_point3d` for
+    explicit 3D intent. ``aes(size=)`` maps a column to area instead.
 
     When ``size`` is omitted in 3D, a density-aware default is chosen
     (pcviz-like fine points on dense clouds).
@@ -309,10 +320,27 @@ class geom_function(_Geom):
         ggplot() + geom_function("z = sin(x) cos(y)", xlim=(-4, 4), ylim=(-4, 4))
         ggplot() + geom_function("y = a x^2 + b", a=1, b=-2)
 
+    A raw LaTeX string is accepted too. Without the ``r`` prefix Python
+    eats the backslashes (``\\frac`` becomes a form feed) before plot3
+    sees them::
+
+        ggplot() + geom_function(r"y = \\frac{\\sin x}{x}")
+
+    ``$...$`` or a backslash command selects LaTeX, and in that form
+    ``xy`` means ``x`` times ``y``. Plain text is unchanged, and braces
+    still group, so ``x^{2}`` works either way.
+
     In a notebook, the same expression can be written without quotes
     (``geom_function(y = 2*x + 2)``). A callable is full Python::
 
         ggplot() + geom_function(lambda x: np.where(x < 0, 0, x**2))
+
+    The legend shows the formula typeset. A figure with one function puts
+    that formula in the title instead. ``label`` replaces it. ``$...$`` in
+    ``label`` or in ``labs()`` is math, and the rest of the string stays
+    plain::
+
+        geom_function("t = 2x^3 + 3y^3", label=r"Cubic: $t = 2x^3 + 3y^3$")
 
     ``xlim`` / ``ylim`` / ``zlim`` are axis limits. On a curve, ``xlim`` is
     the domain and ``ylim`` clips the view. On a surface, ``xlim`` and
@@ -343,6 +371,7 @@ class geom_function(_Geom):
         color=None,
         colour=None,
         alpha=None,
+        label=None,
         **params,
     ):
         from plot3.expr import parse_formula
@@ -389,6 +418,7 @@ class geom_function(_Geom):
         self.n = None if n is None else int(n)
         self.linewidth = None if linewidth is None else float(linewidth)
         self.wireframe = bool(wireframe)
+        self.label = None if label is None else str(label)
         self.params = bound
 
 
@@ -628,10 +658,11 @@ class facet_wrap:
 
 class labs(dict):
     def __init__(self, title=None, x=None, y=None, z=None, color=None,
-                 colour=None):
+                 colour=None, size=None):
         super().__init__()
         for k, v in (("title", title), ("x", x), ("y", y), ("z", z),
-                     ("color", color if color is not None else colour)):
+                     ("color", color if color is not None else colour),
+                     ("size", size)):
             if v is not None:
                 self[k] = v
 
@@ -669,6 +700,73 @@ class scale_colour_viridis_c(scale_colour_continuous):
 
 
 scale_color_viridis_c = scale_colour_viridis_c
+
+
+class scale_x_log10:
+    """Base-10 logarithmic scale for x.
+
+    Positions are encoded in log10 space, so a decade is a constant distance
+    and a tween along the axis moves in log space. Non-positive values are
+    omitted. Tick labels stay in the original units (1, 10, 100, …).
+    """
+
+    axis = "x"
+
+
+class scale_y_log10:
+    """Base-10 logarithmic scale for y. See :class:`scale_x_log10`."""
+
+    axis = "y"
+
+
+class transition_time:
+    """Animate a point layer over a continuous column.
+
+    Each ``aes(group=)`` value is one object (a country). Rows are the
+    keyframes of that object. The viewer stores every keyframe and
+    interpolates in the browser, in scale space, with the axes held fixed
+    on the range of every frame. The clock runs linearly from the first
+    time value to the last, so a ten-year gap takes ten times as long as
+    a one-year gap.
+
+    ``{frame_time}`` in a title or axis label is replaced by the current
+    frame value while the chart plays.
+
+        (
+            ggplot(df, aes(x="gdp", y="life", size="pop", colour="continent",
+                           group="country"))
+            + geom_point()
+            + scale_x_log10()
+            + transition_time("year")
+            + labs(title="{frame_time}")
+        )
+    """
+
+    kind = "time"
+
+    def __init__(self, column):
+        name = _as_column_name(column)
+        if not isinstance(name, str) or not name:
+            raise TypeError("transition_time() needs a column name")
+        self.column = name
+
+
+class transition_states:
+    """Animate a point layer over a discrete column.
+
+    Frames follow the order the states first appear in the data (so
+    ``before`` then ``after`` stays in that order). Objects ease from one
+    state to the next. ``aes(group=)`` matches the same object across states.
+    ``{frame_time}`` shows the current state label.
+    """
+
+    kind = "states"
+
+    def __init__(self, column):
+        name = _as_column_name(column)
+        if not isinstance(name, str) or not name:
+            raise TypeError("transition_states() needs a column name")
+        self.column = name
 
 
 class _Theme:

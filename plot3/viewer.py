@@ -12,13 +12,24 @@ body{display:flex;flex-direction:column}
 #fig{position:relative;width:100%;flex:1;min-height:0}
 #note{display:none;flex:none;padding:2px 14px 8px;font-size:11px;line-height:1.4}
 #title{position:absolute;left:14px;top:8px;font-size:14px;font-weight:600;z-index:4}
-#canvas-host{position:absolute}
+#canvas-host{position:absolute;z-index:1}
+#year{display:none;position:absolute;left:50%;top:46%;transform:translate(-50%,-50%);
+  z-index:0;font-weight:700;line-height:1;letter-spacing:-0.04em;opacity:0.13;
+  pointer-events:none;user-select:none}
 #axes{position:absolute;inset:0;pointer-events:none;z-index:2}
 #legend{position:absolute;right:10px;top:8px;z-index:4;padding:6px 9px;
   border-radius:6px;font-size:11px;line-height:1.7}
 #legend .sw{display:inline-block;width:9px;height:9px;border-radius:5px;
   margin-right:6px;vertical-align:-1px}
 #legend .lg-e{cursor:pointer;user-select:none}
+#legend .sz{display:flex;align-items:center;gap:8px;line-height:1.2;margin:3px 0}
+#legend .sz-block{margin-top:6px}
+#legend .bub{display:inline-block;border-radius:50%;box-sizing:border-box;flex:none;
+  border:1px solid rgba(0,0,0,.35)}
+#player{display:none;flex:none;align-items:center;flex-wrap:wrap;gap:8px;padding:4px 10px 8px}
+#player button{font:inherit;padding:3px 10px;border-radius:5px;cursor:pointer}
+#player #play-range{flex:1;min-width:80px}
+.plot3-math{white-space:nowrap}
 #tip{position:absolute;display:none;z-index:5;pointer-events:none;
   padding:4px 8px;border-radius:5px;font-size:11px;white-space:nowrap;
   line-height:1.45}
@@ -29,11 +40,19 @@ body{display:flex;flex-direction:column}
 </style></head><body>
 <div id="fig">
   <div id="title"></div>
+  <div id="year"></div>
   <div id="canvas-host"></div>
   <svg id="axes"></svg>
   <div id="legend" style="display:none"></div>
   <div id="tip"></div>
   <div id="hint"></div>
+</div>
+<div id="player">
+  <button type="button" id="play-btn">Play</button>
+  <input id="play-range" type="range" min="0" max="1000" value="1000" aria-label="Frame">
+  <span id="play-readout"></span>
+  <label>Speed <input id="play-speed" type="range" min="0.25" max="4" step="0.25" value="1" aria-label="Speed"></label>
+  <button type="button" id="play-rec" style="display:none">Record</button>
 </div>
 <div id="note"></div>
 __PAYLOADS__
@@ -68,6 +87,7 @@ async function decode(id, dtype) {
   }
   if (dtype === 'f32') return new Float32Array(a.buffer);
   if (dtype === 'u32') return new Uint32Array(a.buffer);
+  if (dtype === 'u8') return a;
   let u;
   if (S.gz) {                       // undo byte planes + delta
     const m = a.length >> 1;
@@ -113,6 +133,20 @@ for (const L of S.layers) {
   if (L.indices && L.indices.id) {
     L.indices.data = await decode(L.indices.id, 'u32');
   }
+  if (L.size && L.size.id) L.size.data = toNorm(await decode(L.size.id, L.size.dtype));
+  if (L.frames) {
+    const F = L.frames;
+    for (const key of ['x', 'y', 'z', 'size']) {
+      if (!F[key] || !F[key].id) continue;
+      F[key].data = toNorm(await decode(F[key].id, F[key].dtype));
+      if (F[key].mask) F[key].maskData = await decode(F[key].mask, 'u8');
+    }
+    if (F.color && F.color.id) {
+      const raw = await decode(F.color.id, 'u16');
+      F.color.data = F.color.kind === 'num' ? toNorm(raw) : raw;
+      if (F.color.mask) F.color.maskData = await decode(F.color.mask, 'u8');
+    }
+  }
 }
 
 // per-layer vertex colors (normalized cube space is built per-branch)
@@ -132,9 +166,66 @@ function layerColors(L, defRGB) {
 }
 
 // ── chrome: title + legend ──────────────────────────────────────────────────
+function plot3Esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[ch]);
+}
+function plot3MathHTML(segs, plain) {
+  if (!segs || !segs.length) return plot3Esc(plain);
+  return segs.map(p => p.latex
+    ? '<span class="plot3-math" data-latex="' + plot3Esc(p.latex) + '">' + plot3Esc(p.text) + '</span>'
+    : plot3Esc(p.text)).join('');
+}
+function plot3Typeset(root) {
+  const katex = window.katex;
+  if (!katex) return;
+  (root || document).querySelectorAll('.plot3-math').forEach(el => {
+    if (el.dataset.katexDone) return;
+    const latex = el.getAttribute('data-latex');
+    if (!latex) return;
+    katex.render(latex, el, {throwOnError: false, trust: false, displayMode: false});
+    el.dataset.katexDone = '1';
+  });
+}
+function formulaHead(L) {
+  if (!L || !L.tip) return '';
+  if (!L.tip.latex) return plot3Esc(L.tip.pretty) + '<br>';
+  return '<span class="plot3-math" data-latex="' + plot3Esc(L.tip.latex) + '">'
+    + plot3Esc(L.tip.pretty) + '</span><br>';
+}
+function axisPair(ax, text) {
+  const name = (S.labs && S.labs[ax]) || ax;
+  return plot3Esc(name) + ' = ' + plot3Esc(String(text).replace(/-/g, '\u2212'));
+}
+function sizeLegendHTML() {
+  const sl = S.sizeLegend;
+  if (!sl || !sl.breaks || !sl.breaks.length) return '';
+  const rows = sl.breaks.map(b => {
+    const d = Math.max(6, Math.round((b.t || 0) * 26));
+    return '<div class="sz"><span class="bub" style="width:' + d + 'px;height:' + d
+      + 'px;background:' + T.ink2 + '"></span><span>' + plot3Esc(b.label) + '</span></div>';
+  }).join('');
+  const title = sl.label
+    ? '<b style="color:' + T.ink + '">' + plot3Esc(sl.label) + '</b>' : '';
+  return '<div class="sz-block">' + title + rows + '</div>';
+}
+function legendLabel(e) {
+  if (e.math) return plot3MathHTML(e.math, e.label);
+  if (e.latex) return '<span class="plot3-math" data-latex="' + plot3Esc(e.latex) + '">'
+    + plot3Esc(e.label) + '</span>';
+  return plot3Esc(e.label);
+}
+function richLabel(key, plain) {
+  if (S.labsMath && S.labsMath[key]) return plot3MathHTML(S.labsMath[key], plain || '');
+  return plot3Esc(plain || '');
+}
 const figEl = document.getElementById('fig');
 const titleEl = document.getElementById('title');
-if (S.labs.title) titleEl.textContent = S.labs.title;
+if (S.labs.title) {
+  if (S.labsMath && S.labsMath.title) titleEl.innerHTML = plot3MathHTML(S.labsMath.title, S.labs.title);
+  else titleEl.textContent = S.labs.title;
+}
 const legEl = document.getElementById('legend');
 // legend click-filtering: category index -> three.js objects
 const hiddenCats = new Set();
@@ -145,16 +236,20 @@ function regCat(ci, obj) {
 }
 let redraw = () => {};   // 2D assigns its draw(); 3D renders continuously
 window.__plot3 = { hiddenCats, catObjs };
-if (S.legend) {
+function showLegendBox() {
   legEl.style.display = 'block';
   legEl.style.background = T.surface + 'e6';
   legEl.style.border = '1px solid ' + T.grid;
   legEl.style.color = T.ink2;
+}
+const szHTML = sizeLegendHTML();
+if (S.legend) {
+  showLegendBox();
   legEl.innerHTML = (S.labs.color ? '<b style="color:'+T.ink+'">' +
-      S.labs.color + '</b>' : '') +
+      richLabel('color', S.labs.color) + '</b>' : '') +
     S.legend.map((e, i) => '<div class="lg-e" data-ci="' + i +
       '"><span class="sw" style="background:' + e.color + '"></span>' +
-      e.label + '</div>').join('');
+      legendLabel(e) + '</div>').join('') + szHTML;
   legEl.addEventListener('click', ev => {
     const row = ev.target.closest('.lg-e');
     if (!row) return;
@@ -162,20 +257,22 @@ if (S.legend) {
     if (hiddenCats.has(ci)) hiddenCats.delete(ci); else hiddenCats.add(ci);
     row.style.opacity = hiddenCats.has(ci) ? 0.35 : 1;
     for (const o of (catObjs.get(ci) || [])) o.visible = !hiddenCats.has(ci);
+    if (window.__plot3.afterLegend) window.__plot3.afterLegend();
     tip.style.display = 'none';
     redraw();
   });
 } else if (S.color.kind === 'num') {
-  legEl.style.display = 'block';
-  legEl.style.background = T.surface + 'e6';
-  legEl.style.border = '1px solid ' + T.grid;
-  legEl.style.color = T.ink2;
-  legEl.innerHTML = '<b style="color:'+T.ink+'">' + (S.labs.color||'') +
+  showLegendBox();
+  legEl.innerHTML = '<b style="color:'+T.ink+'">' + richLabel('color', S.labs.color||'') +
     '</b><div id="ramp" style="background:linear-gradient(90deg,' +
     S.color.ramp.join(',') + ')"></div>' +
     '<span style="float:left">' + (+S.color.lo.toPrecision(3)) + '</span>' +
-    '<span style="float:right">' + (+S.color.hi.toPrecision(3)) + '</span>';
+    '<span style="float:right">' + (+S.color.hi.toPrecision(3)) + '</span>' + szHTML;
+} else if (szHTML) {
+  showLegendBox();
+  legEl.innerHTML = szHTML;
 }
+__KATEX__
 
 function fmt(v) {
   if (v === 0) return '0';
@@ -236,18 +333,43 @@ function ticksFor(ax, lo, hi) {
         .filter(t => t[0] >= lo && t[0] <= hi);
     return thin(vis, 10);
   }
+  if (sc.trans === 'log10') return logTicks(lo, hi);
   return niceTicks(lo, hi, 6).map(t => [t, fmt(t)]);
+}
+function logTicks(lo, hi) {
+  if (!(hi > lo)) return [[lo, fmt(Math.pow(10, lo))]];
+  const span = hi - lo;
+  const mults = span <= 3 ? [1, 2, 5] : [1];
+  const out = [];
+  const e0 = Math.floor(lo), e1 = Math.ceil(hi);
+  for (let e = e0; e <= e1; e++) {
+    for (const m of mults) {
+      const val = m * Math.pow(10, e);
+      const lv = Math.log10(val);
+      if (lv < lo - 1e-9 || lv > hi + 1e-9) continue;
+      out.push([lv, fmt(val)]);
+    }
+  }
+  if (!out.length) out.push([lo, fmt(Math.pow(10, lo))]);
+  return out;
 }
 // hover value: enough digits to resolve ~1/300 of the visible span
 function fmtSpan(ax, v, spanData) {
   const sc = S.scales[ax];
   if (sc.kind !== 'num') return fmtAxis(ax, v);
+  if (sc.trans === 'log10') return fmt(v);
   const d = Math.max(0, Math.min(6,
     Math.ceil(-Math.log10(Math.max(1e-12, spanData / 300)))));
   return v.toFixed(d);
 }
 const dataLo = ax => S.scales[ax].lo, dataHi = ax => S.scales[ax].hi;
 const spanOf = ax => (dataHi(ax) - dataLo(ax)) || 1;
+function fromScale(ax, norm) {
+  const sc = S.scales[ax];
+  const v = sc.lo + norm * ((sc.hi - sc.lo) || 1);
+  if (sc.trans === 'log10') return Math.pow(10, v);
+  return v;
+}
 
 const host = document.getElementById('canvas-host');
 const svg = document.getElementById('axes');
@@ -258,9 +380,476 @@ tip.style.color = T.ink;
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
 renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setClearColor(0x000000, 0);
 host.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 const lineMats = [];
+
+// Bubbles: per-point size (area) and, when a transition is set, a frame tween.
+let circleMap = null;
+function circleTexture() {
+  if (circleMap) return circleMap;
+  const c = document.createElement('canvas');
+  c.width = 64; c.height = 64;
+  const g = c.getContext('2d');
+  g.clearRect(0, 0, 64, 64);
+  g.beginPath();
+  g.arc(32, 32, 28, 0, Math.PI * 2);
+  g.fillStyle = '#ffffff';
+  g.fill();
+  g.lineWidth = 4;
+  g.strokeStyle = 'rgba(0,0,0,0.7)';
+  g.stroke();
+  circleMap = new THREE.CanvasTexture(c);
+  circleMap.needsUpdate = true;
+  return circleMap;
+}
+function bubbleMaterial(opacity, sizeAtten) {
+  const m = new THREE.PointsMaterial({
+    size: 1,
+    map: circleTexture(),
+    vertexColors: true,
+    transparent: true,
+    opacity: opacity == null ? 0.9 : opacity,
+    depthWrite: false,
+    depthTest: !!sizeAtten,
+    sizeAttenuation: !!sizeAtten,
+    alphaTest: 0.01,
+  });
+  // Cache key so this patched program is not reused for plain points.
+  m.customProgramCacheKey = () => 'plot3-bubble';
+  m.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        'uniform float size;',
+        'uniform float size;\\nattribute float aSize;\\nattribute float aAlpha;\\nvarying float vAlpha;'
+      )
+      .replace(
+        '#include <color_vertex>',
+        '#include <color_vertex>\\nvAlpha = aAlpha;'
+      )
+      .replace('gl_PointSize = size;', 'gl_PointSize = max(aSize, 0.0);');
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        'uniform float opacity;',
+        'uniform float opacity;\\nvarying float vAlpha;'
+      )
+      .replace(
+        'vec4 diffuseColor = vec4( diffuse, opacity );',
+        'vec4 diffuseColor = vec4( diffuse, opacity * vAlpha );'
+      );
+  };
+  return m;
+}
+const bubbleEntries = [];
+let hoverHold = false;
+let trail = null;
+let trailId = null;
+function framePresent(F, i) {
+  if (!F.x || !F.x.maskData || !F.x.maskData[i]) return false;
+  if (!F.y || !F.y.maskData || !F.y.maskData[i]) return false;
+  if (F.z && F.z.maskData && !F.z.maskData[i]) return false;
+  if (F.size && F.size.maskData && !F.size.maskData[i]) return false;
+  return true;
+}
+function applyBubbleHide(entry) {
+  const L = entry.L;
+  const nCats = (S.color && S.color.cats) ? S.color.cats.length : 0;
+  for (let i = 0; i < L.n; i++) {
+    let a = entry.baseAlpha[i];
+    if (L._ci && nCats && hiddenCats.has(L._ci[i] % nCats)) a = 0;
+    entry.aAlpha[i] = a;
+  }
+  entry.geom.attributes.aAlpha.needsUpdate = true;
+}
+function addBubbleLayer(L, ext, sizeAtten) {
+  const n = L.n;
+  const cols = layerColors(L, hex2rgb(T.cat[0]));
+  const pos = new Float32Array(n * 3);
+  const aSize = new Float32Array(n);
+  const aAlpha = new Float32Array(n);
+  const baseAlpha = new Float32Array(n);
+  L._x = new Float32Array(n);
+  L._y = new Float32Array(n);
+  L._z = L.z ? new Float32Array(n) : null;
+  L._size = aSize;
+  L._alpha = aAlpha;
+  L._ci = (L.color && L.color.kind === 'cat' && L.color.data)
+    ? new Uint16Array(L.color.data) : null;
+  L._cnorm = (L.color && L.color.kind === 'num' && L.color.data)
+    ? Float32Array.from(L.color.data, v => v / 65535) : null;
+  for (let i = 0; i < n; i++) {
+    const x = L.x.data[i], y = L.y.data[i];
+    const z = L.z ? L.z.data[i] : 0;
+    L._x[i] = x; L._y[i] = y;
+    if (L._z) L._z[i] = z;
+    pos[i * 3] = x * ext[0];
+    pos[i * 3 + 1] = y * ext[1];
+    pos[i * 3 + 2] = z * ext[2];
+    let sz = (typeof L.size === 'number') ? L.size : 6;
+    if (L.size && L.size.data) sz = L.size.data[i] * L.size.max;
+    aSize[i] = sz;
+    baseAlpha[i] = 1;
+    aAlpha[i] = 1;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+  g.setAttribute('aSize', new THREE.BufferAttribute(aSize, 1));
+  g.setAttribute('aAlpha', new THREE.BufferAttribute(aAlpha, 1));
+  const pt = new THREE.Points(g, bubbleMaterial(L.alpha, sizeAtten));
+  scene.add(pt);
+  const entry = { L, ext, pos, cols, aSize, aAlpha, baseAlpha, geom: g };
+  bubbleEntries.push(entry);
+  applyBubbleHide(entry);
+  return entry;
+}
+// playT is 0 at the first keyframe and nFrames-1 at the last. For a time
+// column that position is linear in the column value, not in the keyframe index.
+function frameSample(t) {
+  const tr = S.transition;
+  const nF = tr.nFrames;
+  const times = tr.times || [];
+  if (tr.type === 'time' && times.length === nF && nF > 1) {
+    const t0 = +times[0];
+    const t1 = +times[nF - 1];
+    const span = t1 - t0;
+    const T = span === 0 ? t0 : t0 + (t / (nF - 1)) * span;
+    let f0 = 0;
+    for (let i = 0; i < nF - 1; i++) {
+      if (+times[i + 1] <= T + 1e-9) f0 = i + 1;
+      else break;
+    }
+    if (f0 >= nF - 1) return { f0: nF - 1, f1: nF - 1, u: 0, T: t1 };
+    const a = +times[f0], b = +times[f0 + 1];
+    const u = b === a ? 0 : Math.max(0, Math.min(1, (T - a) / (b - a)));
+    return { f0: f0, f1: f0 + 1, u: u, T: T };
+  }
+  let f0 = Math.floor(t);
+  if (f0 < 0) f0 = 0;
+  if (f0 >= nF) f0 = nF - 1;
+  const f1 = Math.min(nF - 1, f0 + 1);
+  const u = f0 === f1 ? 0 : (t - f0);
+  return { f0: f0, f1: f1, u: u, T: null };
+}
+function writeBubbleFrame(entry, t) {
+  const L = entry.L;
+  const F = L.frames;
+  if (!F || !S.transition) return;
+  const nF = F.nFrames;
+  const n = L.n;
+  const sample = frameSample(t);
+  const f0 = sample.f0;
+  const f1 = sample.f1;
+  let u = sample.u;
+  if (S.transition.ease === 'smooth') u = u * u * (3 - 2 * u);
+  const ext = entry.ext;
+  const pos = entry.pos;
+  const col = entry.cols;
+  let colorDirty = false;
+  for (let obj = 0; obj < n; obj++) {
+    const i0 = obj * nF + f0;
+    const i1 = obj * nF + f1;
+    const p0 = framePresent(F, i0);
+    const p1 = framePresent(F, i1);
+    let x = 0, y = 0, z = 0, alpha = 0;
+    let sz = (typeof L.size === 'number') ? L.size : 6;
+    if (p0 && p1) {
+      x = F.x.data[i0] * (1 - u) + F.x.data[i1] * u;
+      y = F.y.data[i0] * (1 - u) + F.y.data[i1] * u;
+      if (F.z) z = F.z.data[i0] * (1 - u) + F.z.data[i1] * u;
+      alpha = 1;
+      if (F.size) sz = (F.size.data[i0] * (1 - u) + F.size.data[i1] * u) * F.size.max;
+    } else if (p0 || p1) {
+      const i = p0 ? i0 : i1;
+      x = F.x.data[i];
+      y = F.y.data[i];
+      if (F.z) z = F.z.data[i];
+      alpha = p0 ? (1 - u) : u;
+      if (F.size) sz = F.size.data[i] * F.size.max;
+    }
+    L._x[obj] = x; L._y[obj] = y;
+    if (L._z) L._z[obj] = z;
+    pos[obj * 3] = x * ext[0];
+    pos[obj * 3 + 1] = y * ext[1];
+    pos[obj * 3 + 2] = z * ext[2];
+    entry.aSize[obj] = alpha > 0 ? sz : 0;
+    entry.baseAlpha[obj] = alpha;
+    if (F.color && F.color.kind === 'cat' && F.color.data) {
+      const miss = 65535;
+      const c0 = F.color.data[i0], c1 = F.color.data[i1];
+      let code = miss;
+      if (c0 !== miss && c1 !== miss) code = u < 0.5 ? c0 : c1;
+      else if (c0 !== miss) code = c0;
+      else if (c1 !== miss) code = c1;
+      if (code === miss) entry.baseAlpha[obj] = 0;
+      else if (L._ci) L._ci[obj] = code;
+      if (code !== miss && PAL.length) {
+        const p = PAL[code % PAL.length];
+        col[obj * 3] = p[0]; col[obj * 3 + 1] = p[1]; col[obj * 3 + 2] = p[2];
+        colorDirty = true;
+      }
+    } else if (F.color && F.color.kind === 'num' && F.color.data) {
+      const m0 = !F.color.maskData || F.color.maskData[i0];
+      const m1 = !F.color.maskData || F.color.maskData[i1];
+      let tcol = null;
+      if (m0 && m1) tcol = F.color.data[i0] * (1 - u) + F.color.data[i1] * u;
+      else if (m0) tcol = F.color.data[i0];
+      else if (m1) tcol = F.color.data[i1];
+      if (tcol != null && L._cnorm) L._cnorm[obj] = tcol;
+      if (tcol != null && RAMP.length) {
+        const p = rampAt(tcol);
+        col[obj * 3] = p[0]; col[obj * 3 + 1] = p[1]; col[obj * 3 + 2] = p[2];
+        colorDirty = true;
+      }
+    }
+  }
+  entry.geom.attributes.position.needsUpdate = true;
+  entry.geom.attributes.aSize.needsUpdate = true;
+  if (colorDirty) entry.geom.attributes.color.needsUpdate = true;
+  applyBubbleHide(entry);
+}
+function clearTrail() {
+  if (trail) {
+    scene.remove(trail);
+    const mat = trail.userData ? trail.userData.mat : null;
+    if (mat) {
+      const idx = lineMats.indexOf(mat);
+      if (idx >= 0) lineMats.splice(idx, 1);
+    }
+    trail = null;
+  }
+  trailId = null;
+}
+function setTrail(L, obj) {
+  clearTrail();
+  if (!L || obj == null || !L.frames) return;
+  const F = L.frames;
+  const nF = F.nFrames;
+  const entry = bubbleEntries.find(e => e.L === L);
+  const ext = entry ? entry.ext : [1, 1, 1];
+  const runs = [];
+  let run = [];
+  for (let f = 0; f < nF; f++) {
+    const i = obj * nF + f;
+    if (!framePresent(F, i)) {
+      if (run.length >= 6) runs.push(run);
+      run = [];
+      continue;
+    }
+    const z = F.z ? F.z.data[i] : 0;
+    run.push(F.x.data[i] * ext[0], F.y.data[i] * ext[1], z * ext[2]);
+  }
+  if (run.length >= 6) runs.push(run);
+  if (!runs.length) return;
+  let rgb = hex2rgb(T.ink);
+  if (entry) rgb = [entry.cols[obj * 3], entry.cols[obj * 3 + 1], entry.cols[obj * 3 + 2]];
+  const lm = new LineMaterial({
+    color: new THREE.Color(rgb[0], rgb[1], rgb[2]).getHex(),
+    linewidth: 2, worldUnits: false, transparent: true, opacity: 0.85,
+  });
+  const w = renderer.domElement.width || 800;
+  const h = renderer.domElement.height || 600;
+  lm.resolution.set(w, h);
+  lineMats.push(lm);
+  const group = new THREE.Group();
+  group.userData.mat = lm;
+  for (let r = 0; r < runs.length; r++) {
+    const lg = new LineGeometry();
+    lg.setPositions(runs[r]);
+    group.add(new Line2(lg, lm));
+  }
+  scene.add(group);
+  trail = group;
+  trailId = String(obj) + '|' + (L.ids ? L.ids[obj] : '');
+}
+let frameLabel = '';
+const axisTitleSprites = [];
+let refreshFrameLabels = () => {};
+function withFrame(text) {
+  const s = text == null ? '' : String(text);
+  if (s.indexOf('{frame_time}') < 0) return s;
+  return s.split('{frame_time}').join(frameLabel);
+}
+function frameText(t) {
+  const tr = S.transition;
+  const sample = frameSample(t);
+  if (tr.type === 'states') {
+    return String(sample.u < 0.5 ? tr.times[sample.f0] : tr.times[sample.f1]);
+  }
+  if (sample.T != null) {
+    if (tr.integer) return String(Math.round(sample.T));
+    return fmt(sample.T);
+  }
+  const a = +tr.times[sample.f0], b = +tr.times[sample.f1];
+  const v = a + (b - a) * sample.u;
+  if (tr.integer) return String(Math.round(v));
+  return fmt(v);
+}
+let playT = 0;
+let playing = false;
+let playSpeed = 1;
+let recording = false;
+let mediaRec = null;
+function installPlayer(renderFrame) {
+  window.__plot3.afterLegend = () => {
+    for (const e of bubbleEntries) applyBubbleHide(e);
+  };
+  if (!S.transition) return;
+  const tr = S.transition;
+  const nF = tr.nFrames;
+  playT = Math.max(0, nF - 1);
+  const reduced = window.matchMedia
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  playing = !reduced && nF > 1;
+  // A paused chart shows the last keyframe. Playback starts at the first one,
+  // so the opening frame is not immediately wrapped away.
+  if (playing) playT = 0;
+  const player = document.getElementById('player');
+  const btn = document.getElementById('play-btn');
+  const range = document.getElementById('play-range');
+  const readout = document.getElementById('play-readout');
+  const speed = document.getElementById('play-speed');
+  const recBtn = document.getElementById('play-rec');
+  const yearEl = document.getElementById('year');
+  player.style.display = 'flex';
+  player.style.color = T.ink2;
+  btn.style.background = T.surface;
+  btn.style.color = T.ink;
+  btn.style.border = '1px solid ' + T.axis;
+  recBtn.style.background = T.surface;
+  recBtn.style.color = T.ink;
+  recBtn.style.border = '1px solid ' + T.axis;
+  yearEl.style.display = 'block';
+  yearEl.style.color = T.ink;
+  const titleTemplate = (S.labs && S.labs.title) || '';
+  let shownLab = null;
+  function syncChrome() {
+    const lab = frameText(playT);
+    frameLabel = lab;
+    readout.textContent = lab;
+    yearEl.textContent = lab;
+    yearEl.style.fontSize = lab.length > 8 ? '56px' : 'min(22vw, 148px)';
+    range.value = (nF <= 1) ? '1000' : String(Math.round(playT / (nF - 1) * 1000));
+    btn.textContent = playing ? 'Pause' : 'Play';
+    btn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+    if (lab === shownLab) return;
+    shownLab = lab;
+    refreshFrameLabels();
+    if (titleTemplate.indexOf('{frame_time}') < 0) return;
+    const next = titleTemplate.split('{frame_time}').join(lab);
+    if (S.labsMath && S.labsMath.title) {
+      const segs = S.labsMath.title.map(p => ({
+        latex: p.latex,
+        text: String(p.text == null ? '' : p.text).split('{frame_time}').join(lab),
+      }));
+      titleEl.innerHTML = plot3MathHTML(segs, next);
+      plot3Typeset(titleEl);
+    } else {
+      titleEl.textContent = next;
+    }
+  }
+  function paint() {
+    for (const e of bubbleEntries) if (e.L.frames) writeBubbleFrame(e, playT);
+    syncChrome();
+    renderFrame();
+  }
+  paint();
+  btn.addEventListener('click', () => {
+    playing = !playing;
+    if (playing && nF > 1 && playT >= nF - 1) playT = 0;
+    syncChrome();
+  });
+  range.addEventListener('input', () => {
+    playing = false;
+    const u = (+range.value) / 1000;
+    playT = (nF <= 1) ? 0 : u * (nF - 1);
+    paint();
+  });
+  speed.addEventListener('input', () => { playSpeed = +speed.value || 1; });
+  window.addEventListener('keydown', (e) => {
+    const tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON') return;
+    if (e.code === 'Space') {
+      e.preventDefault();
+      playing = !playing;
+      syncChrome();
+    } else if (e.code === 'ArrowRight' || e.code === 'ArrowLeft') {
+      e.preventDefault();
+      playing = false;
+      const dir = e.code === 'ArrowRight' ? 1 : -1;
+      const trTimes = tr.times || [];
+      if (tr.type === 'time' && trTimes.length === nF && nF > 1) {
+        const s = frameSample(playT);
+        let idx = s.f0;
+        if (dir > 0) idx = s.u > 1e-4 ? s.f1 : Math.min(nF - 1, s.f0 + 1);
+        else idx = s.u > 1e-4 ? s.f0 : Math.max(0, s.f0 - 1);
+        const t0 = +trTimes[0], t1 = +trTimes[nF - 1];
+        const span = t1 - t0;
+        playT = span === 0 ? 0 : ((+trTimes[idx] - t0) / span) * (nF - 1);
+      } else {
+        playT = Math.max(0, Math.min(nF - 1, Math.round(playT) + dir));
+      }
+      paint();
+    }
+  });
+  if (recBtn && typeof MediaRecorder !== 'undefined' && renderer.domElement.captureStream) {
+    recBtn.style.display = 'inline-block';
+    recBtn.addEventListener('click', () => {
+      if (recording) return;
+      let mime = 'video/webm';
+      if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) mime = 'video/webm;codecs=vp9';
+      else if (!MediaRecorder.isTypeSupported('video/webm')) return;
+      const stream = renderer.domElement.captureStream(30);
+      const rec = new MediaRecorder(stream, { mimeType: mime });
+      const chunks = [];
+      rec.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+      rec.onstop = () => {
+        recording = false;
+        recBtn.textContent = 'Record';
+        const blob = new Blob(chunks, { type: 'video/webm' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'plot3.webm';
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+      mediaRec = rec;
+      recording = true;
+      playing = true;
+      playT = 0;
+      recBtn.textContent = 'Recording';
+      rec.start();
+      paint();
+    });
+  }
+  let last = 0;
+  function loop(now) {
+    if (!last) last = now;
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (playing && !hoverHold && nF > 1) {
+      const dur = (tr.duration || 12) / (playSpeed || 1);
+      playT += dt * (nF - 1) / dur;
+      if (playT >= nF - 1) {
+        if (recording) {
+          playT = nF - 1;
+          playing = false;
+          if (mediaRec && mediaRec.state === 'recording') mediaRec.stop();
+        } else {
+          playT = playT % (nF - 1);
+        }
+      }
+      paint();
+    }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+}
+window.__plot3.afterLegend = () => {
+  for (const e of bubbleEntries) applyBubbleHide(e);
+};
 
 if (!S.is3d) {
   // ═════════════════════════ 2D: ortho + pan/zoom ═════════════════════════
@@ -306,7 +895,9 @@ if (!S.is3d) {
     const n = L.n;
     const cols = layerColors(L, hex2rgb(T.cat[0]));
     const isCat = L.color && L.color.kind === 'cat';
-    if (L.kind === 'point') {
+    if (L.kind === 'point' && (L.frames || (L.size && L.size.id))) {
+      addBubbleLayer(L, [1, 1, 1], false);
+    } else if (L.kind === 'point') {
       if (isCat) {
         // one Points object per category -> legend click-filtering
         const k = S.color.cats.length;
@@ -569,8 +1160,8 @@ if (!S.is3d) {
       s += `<text x="${M.l-7}" y="${Y+4}" fill="${T.muted}" text-anchor="end">${lab}</text>`;
     }
     s += `<rect x="${M.l}" y="${M.t}" width="${W}" height="${H}" fill="none" stroke="${T.axis}"/>`;
-    s += `<text x="${M.l+W/2}" y="${M.t+H+30}" fill="${T.ink2}" text-anchor="middle">${S.labs.x}</text>`;
-    s += `<text x="14" y="${M.t+H/2}" fill="${T.ink2}" text-anchor="middle" transform="rotate(-90 14 ${M.t+H/2})">${S.labs.y}</text>`;
+    s += `<text x="${M.l+W/2}" y="${M.t+H+30}" fill="${T.ink2}" text-anchor="middle">${plot3Esc(withFrame(S.labs.x))}</text>`;
+    s += `<text x="14" y="${M.t+H/2}" fill="${T.ink2}" text-anchor="middle" transform="rotate(-90 14 ${M.t+H/2})">${plot3Esc(withFrame(S.labs.y))}</text>`;
     svg.innerHTML = s;
   }
 
@@ -628,7 +1219,9 @@ if (!S.is3d) {
     }
   }
   let dragging = null;
+  let pointerMoved = false;
   el.addEventListener('pointerdown', e => {
+    pointerMoved = false;
     dragging = { x: e.clientX, y: e.clientY,
                  l: cam.left, r: cam.right, t: cam.top, b: cam.bottom };
     el.setPointerCapture(e.pointerId);
@@ -636,6 +1229,8 @@ if (!S.is3d) {
   el.addEventListener('pointerup', () => dragging = null);
   el.addEventListener('pointermove', e => {
     if (dragging) {
+      if (Math.abs(e.clientX - dragging.x) + Math.abs(e.clientY - dragging.y) > 4)
+        pointerMoved = true;
       const dx = (e.clientX - dragging.x) / W * (dragging.r - dragging.l);
       const dy = (e.clientY - dragging.y) / H * (dragging.t - dragging.b);
       cam.left = dragging.l - dx; cam.right = dragging.r - dx;
@@ -686,8 +1281,8 @@ if (!S.is3d) {
   });
 
   let hoverTick = 0;
-  function dataY(norm) { return dataLo('y') + norm * spanOf('y'); }
-  function dataX(norm) { return dataLo('x') + norm * spanOf('x'); }
+  function dataY(norm) { return fromScale('y', norm); }
+  function dataX(norm) { return fromScale('x', norm); }
   function screenX(norm) {
     return (norm - cam.left) / (cam.right - cam.left) * W;
   }
@@ -699,22 +1294,26 @@ if (!S.is3d) {
       hiddenCats.has(L.color.data[i] % S.color.cats.length);
   }
   function colorHead(L, i) {
-    if (L.color && L.color.kind === 'cat')
-      return '<b>' + S.color.cats[L.color.data[i] % S.color.cats.length] + '</b><br>';
-    if (L.color && L.color.kind === 'num')
-      return '<b>' + fmt(cval(L.color.data[i] / 65535)) + '</b><br>';
+    if (L.color && L.color.kind === 'cat') {
+      const codes = L._ci || L.color.data;
+      return '<b>' + S.color.cats[codes[i] % S.color.cats.length] + '</b><br>';
+    }
+    if (L.color && L.color.kind === 'num') {
+      const t = L._cnorm ? L._cnorm[i] : (L.color.data[i] / 65535);
+      return '<b>' + fmt(cval(t)) + '</b><br>';
+    }
     return '';
   }
   function hover(e) {
     const now = performance.now();
-    if (now - hoverTick < 33) return;
+    if (!S.transition && now - hoverTick < 33) return;
     hoverTick = now;
     const r = el.getBoundingClientRect();
     const mx = e.clientX - r.left, my = e.clientY - r.top;
     // best: {score, sx, sy, html} — lower score wins; 0 = solid hit
     let best = null;
-    function consider(score, sx, sy, html) {
-      if (!best || score < best.score) best = { score, sx, sy, html };
+    function consider(score, sx, sy, html, hold) {
+      if (!best || score < best.score) best = { score, sx, sy, html, hold: !!hold };
     }
     for (const L of S.layers) {
       if (L.kind === 'col') {
@@ -766,31 +1365,83 @@ if (!S.is3d) {
           consider(0, sx, sy, html);
         }
       } else {
-        // Points / line samples / poly vertices — nearest point within 12px
-        let bestD = 12 * 12;
+        // Points / line samples / poly vertices — nearest point within its radius.
+        const xs = L._x || (L.x && L.x.data);
+        const ys = L._y || (L.y && L.y.data);
+        if (!xs || !ys) continue;
+        let bestD = Infinity;
         for (let i = 0; i < L.n; i++) {
-          if (catHidden(L, i)) continue;
-          const sx = screenX(L.x.data[i]);
-          const sy = screenY(L.y.data[i]);
+          if (L._alpha && L._alpha[i] <= 0.04) continue;
+          if (L._ci && S.color.cats && hiddenCats.has(L._ci[i] % S.color.cats.length)) continue;
+          if (!L._ci && catHidden(L, i)) continue;
+          const sx = screenX(xs[i]);
+          const sy = screenY(ys[i]);
+          const rad = L._size ? Math.max(10, L._size[i] * 0.55) : 12;
+          const limit = rad * rad;
           const d = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
-          if (d < bestD) {
+          if (d <= limit && d < bestD) {
             bestD = d;
-            const xv = dataX(L.x.data[i]), yv = dataY(L.y.data[i]);
-            consider(d, sx, sy, colorHead(L, i)
-              + fmtSpan('x', xv, (cam.right - cam.left) * spanOf('x')) + ', '
-              + fmtSpan('y', yv, (cam.top - cam.bottom) * spanOf('y')));
+            const xv = dataX(xs[i]), yv = dataY(ys[i]);
+            const xSpan = (cam.right - cam.left) * spanOf('x');
+            const ySpan = (cam.top - cam.bottom) * spanOf('y');
+            let head = '';
+            if (L.ids && L.ids[i]) head += '<b>' + plot3Esc(L.ids[i]) + '</b><br>';
+            head += colorHead(L, i);
+            let sizeBit = '';
+            if (L._size && L.size && L.size.vmax && L.size.max) {
+              const frac = L._size[i] / L.size.max;
+              const value = frac * frac * L.size.vmax;
+              const name = (S.sizeLegend && S.sizeLegend.label) || 'size';
+              sizeBit = '<br>' + plot3Esc(name) + ' = ' + fmt(value);
+            }
+            const html = L.tip
+              ? head + formulaHead(L)
+                + axisPair('x', fmtSpan('x', xv, xSpan)) + ', '
+                + axisPair('y', fmtSpan('y', yv, ySpan)) + sizeBit
+              : head
+                + fmtSpan('x', xv, xSpan) + ', '
+                + fmtSpan('y', yv, ySpan) + sizeBit;
+            consider(d, sx, sy, html, !!(L.frames && S.transition));
           }
         }
       }
     }
+    hoverHold = !!(best && best.hold);
     if (!best) { tip.style.display = 'none'; return; }
     tip.innerHTML = best.html;
+    plot3Typeset(tip);
     tip.style.left = (M.l + best.sx + 12) + 'px';
     tip.style.top = (M.t + best.sy - 10) + 'px';
     tip.style.display = 'block';
   }
-  el.addEventListener('pointerleave', () => tip.style.display = 'none');
+  el.addEventListener('pointerleave', () => {
+    tip.style.display = 'none';
+    hoverHold = false;
+  });
+  el.addEventListener('click', (e) => {
+    if (!S.transition) return;
+    if (pointerMoved) return;
+    const r = el.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    let hit = null, hitD = Infinity;
+    for (const L of S.layers) {
+      if (!L.frames || !L._x) continue;
+      for (let i = 0; i < L.n; i++) {
+        if (L._alpha && L._alpha[i] <= 0.04) continue;
+        const sx = screenX(L._x[i]), sy = screenY(L._y[i]);
+        const rad = L._size ? Math.max(10, L._size[i] * 0.55) : 12;
+        const d = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
+        if (d <= rad * rad && d < hitD) { hitD = d; hit = { L, i }; }
+      }
+    }
+    if (!hit) { clearTrail(); draw(); return; }
+    const key = String(hit.i) + '|' + (hit.L.ids ? hit.L.ids[hit.i] : '');
+    if (trailId === key) { clearTrail(); draw(); return; }
+    setTrail(hit.L, hit.i);
+    draw();
+  });
 
+  installPlayer(() => draw());
   new ResizeObserver(layout).observe(figEl);
   layout();
 
@@ -835,9 +1486,11 @@ if (!S.is3d) {
       pos[i*3+1] = L.y.data[i] * ext[1];
       pos[i*3+2] = L.z.data[i] * ext[2];
     }
-    if (L.kind === 'point') {
+    if (L.kind === 'point' && (L.frames || (L.size && L.size.id))) {
+      addBubbleLayer(L, ext, sizeAtten);
+    } else if (L.kind === 'point') {
       // Default size is set in Python for unit-cube scene (pcviz-relative).
-      const psz = (L.size != null) ? L.size : 0.001;
+      const psz = (typeof L.size === 'number') ? L.size : 0.001;
       if (isCat) {
         const k = S.color.cats.length;
         const buckets = Array.from({ length: k }, () => []);
@@ -950,10 +1603,27 @@ if (!S.is3d) {
     const lp = [[0.5*ext[0], -2.6*off*ext[1], 0],
                 [-2.6*off*ext[0], 0.5*ext[1], 0],
                 [-2.6*off*ext[0], 0, 0.55*ext[2]]][ai];
-    const tl = sprite(S.labs[ax], false);
+    const rawLab = S.labs[ax] == null ? '' : String(S.labs[ax]);
+    const tl = sprite(withFrame(rawLab), false);
     tl.position.set(lp[0], lp[1], lp[2]);
     scene.add(tl);
+    if (rawLab.indexOf('{frame_time}') >= 0) {
+      axisTitleSprites.push({ sprite: tl, raw: rawLab, shown: withFrame(rawLab) });
+    }
   });
+  refreshFrameLabels = () => {
+    for (const item of axisTitleSprites) {
+      const text = withFrame(item.raw);
+      if (text === item.shown) continue;
+      item.shown = text;
+      const next = sprite(text, false);
+      item.sprite.material.map.dispose();
+      item.sprite.material.map = next.material.map;
+      item.sprite.scale.copy(next.scale);
+      next.material.map = null;
+      next.material.dispose();
+    }
+  };
 
   // Fit like pcviz: bounding sphere of the scene cube, camera on a soft orbit.
   const ctr = new THREE.Vector3(ext[0]/2, ext[1]/2, ext[2]/2);
@@ -978,50 +1648,75 @@ if (!S.is3d) {
   tip3.style.color = T.ink;
   const pickLayers = S.layers
     .map((L, li) => ({ L, li }))
-    .filter(({ L }) => L.kind === 'point' && L.n > 0);
+    .filter(({ L }) => L.n > 0 && L.x && L.y && L.z &&
+      (L.kind === 'point' || L.kind === 'surface' || L.tip));
   let hover3Tick = 0;
   function hover3d(e) {
     const now = performance.now();
-    if (now - hover3Tick < 40) return;
+    if (!S.transition && now - hover3Tick < 40) return;
     hover3Tick = now;
     if (!pickLayers.length) { tip3.style.display = 'none'; return; }
     const rect = renderer.domElement.getBoundingClientRect();
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
     const w = Math.max(rect.width, 1), h = Math.max(rect.height, 1);
     // Project each point; find nearest in screen px (cap search for big clouds).
-    let best = null, bestD = 14 * 14;
+    let best = null, bestD = Infinity;
     const maxScan = 80000;
     for (const { L } of pickLayers) {
       const n = L.n;
       const step = n > maxScan ? Math.ceil(n / maxScan) : 1;
+      const xs = L._x || L.x.data;
+      const ys = L._y || L.y.data;
+      const zs = L._z || L.z.data;
       for (let i = 0; i < n; i += step) {
-        if (L.color && L.color.kind === 'cat' &&
-            hiddenCats.has(L.color.data[i] % S.color.cats.length)) continue;
+        if (L._alpha && L._alpha[i] <= 0.04) continue;
+        const codes = L._ci || (L.color && L.color.kind === 'cat' ? L.color.data : null);
+        if (codes && S.color.cats && hiddenCats.has(codes[i] % S.color.cats.length)) continue;
         const v = new THREE.Vector3(
-          L.x.data[i] * ext[0],
-          L.y.data[i] * ext[1],
-          L.z.data[i] * ext[2]
+          xs[i] * ext[0],
+          ys[i] * ext[1],
+          zs[i] * ext[2]
         );
         v.project(cam);
         if (v.z < -1 || v.z > 1) continue;
         const sx = (v.x * 0.5 + 0.5) * w;
         const sy = (-v.y * 0.5 + 0.5) * h;
+        const rad = (L._size && !sizeAtten) ? Math.max(14, L._size[i] * 0.55) : 14;
         const d = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
-        if (d < bestD) { bestD = d; best = [L, i, sx, sy]; }
+        if (d <= rad * rad && d < bestD) {
+          bestD = d; best = [L, i, sx, sy, xs[i], ys[i], zs[i]];
+        }
       }
     }
+    hoverHold = !!(best && best[0].frames && S.transition);
     if (!best) { tip3.style.display = 'none'; return; }
-    const [L, i, sx, sy] = best;
-    const xv = dataLo('x') + L.x.data[i] * spanOf('x');
-    const yv = dataLo('y') + L.y.data[i] * spanOf('y');
-    const zv = dataLo('z') + L.z.data[i] * spanOf('z');
+    const [L, i, sx, sy, xn, yn, zn] = best;
+    const xv = fromScale('x', xn);
+    const yv = fromScale('y', yn);
+    const zv = fromScale('z', zn);
     let head = '';
-    if (L.color && L.color.kind === 'cat')
-      head = '<b>' + S.color.cats[L.color.data[i] % S.color.cats.length] + '</b><br>';
-    else if (L.color && L.color.kind === 'num')
-      head = '<b>' + fmt(cval(L.color.data[i] / 65535)) + '</b><br>';
-    tip3.innerHTML = head
-      + fmt(xv) + ', ' + fmt(yv) + ', ' + fmt(zv);
+    if (L.ids && L.ids[i]) head += '<b>' + plot3Esc(L.ids[i]) + '</b><br>';
+    const codes = L._ci || (L.color && L.color.kind === 'cat' ? L.color.data : null);
+    if (codes && S.color.cats)
+      head += '<b>' + S.color.cats[codes[i] % S.color.cats.length] + '</b><br>';
+    else if (L.color && L.color.kind === 'num') {
+      const t = L._cnorm ? L._cnorm[i] : (L.color.data[i] / 65535);
+      head += '<b>' + fmt(cval(t)) + '</b><br>';
+    }
+    let sizeBit = '';
+    if (L._size && L.size && L.size.vmax && L.size.max) {
+      const frac = L._size[i] / L.size.max;
+      const value = frac * frac * L.size.vmax;
+      const name = (S.sizeLegend && S.sizeLegend.label) || 'size';
+      sizeBit = '<br>' + plot3Esc(name) + ' = ' + fmt(value);
+    }
+    tip3.innerHTML = L.tip
+      ? head + formulaHead(L)
+        + axisPair('x', fmt(xv)) + ', '
+        + axisPair('y', fmt(yv)) + ', '
+        + axisPair('z', fmt(zv)) + sizeBit
+      : head + fmt(xv) + ', ' + fmt(yv) + ', ' + fmt(zv) + sizeBit;
+    plot3Typeset(tip3);
     tip3.style.left = Math.min(w - 8, sx + 12) + 'px';
     tip3.style.top = Math.max(8, sy - 10) + 'px';
     tip3.style.display = 'block';
@@ -1043,6 +1738,43 @@ if (!S.is3d) {
   renderer.domElement.addEventListener('pointermove', hover3d);
   renderer.domElement.addEventListener('pointerleave', () => {
     tip3.style.display = 'none';
+    hoverHold = false;
+  });
+  let pointerMoved3 = false;
+  let down3 = null;
+  renderer.domElement.addEventListener('pointerdown', (e) => {
+    pointerMoved3 = false;
+    down3 = { x: e.clientX, y: e.clientY };
+  });
+  renderer.domElement.addEventListener('pointermove', (e) => {
+    if (!down3) return;
+    if (Math.abs(e.clientX - down3.x) + Math.abs(e.clientY - down3.y) > 4)
+      pointerMoved3 = true;
+  });
+  renderer.domElement.addEventListener('pointerup', () => { down3 = null; });
+  renderer.domElement.addEventListener('click', (e) => {
+    if (!S.transition || pointerMoved3) return;
+    const rect = renderer.domElement.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const w = Math.max(rect.width, 1), h = Math.max(rect.height, 1);
+    let hit = null, hitD = Infinity;
+    for (const L of S.layers) {
+      if (!L.frames || !L._x || !L._z) continue;
+      for (let i = 0; i < L.n; i++) {
+        if (L._alpha && L._alpha[i] <= 0.04) continue;
+        const v = new THREE.Vector3(L._x[i] * ext[0], L._y[i] * ext[1], L._z[i] * ext[2]);
+        v.project(cam);
+        const sx = (v.x * 0.5 + 0.5) * w;
+        const sy = (-v.y * 0.5 + 0.5) * h;
+        const rad = (L._size && !sizeAtten) ? Math.max(16, L._size[i] * 0.55) : 16;
+        const d = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
+        if (d <= rad * rad && d < hitD) { hitD = d; hit = { L, i }; }
+      }
+    }
+    if (!hit) { clearTrail(); return; }
+    const key = String(hit.i) + '|' + (hit.L.ids ? hit.L.ids[hit.i] : '');
+    if (trailId === key) { clearTrail(); return; }
+    setTrail(hit.L, hit.i);
   });
 
   function layout() {
@@ -1052,6 +1784,7 @@ if (!S.is3d) {
     cam.updateProjectionMatrix();
     for (const lm of lineMats) lm.resolution.set(w, h);
   }
+  installPlayer(() => {});
   new ResizeObserver(layout).observe(figEl);
   layout();
   (function loop() {
@@ -1062,3 +1795,17 @@ if (!S.is3d) {
 }
 </script>
 </body></html>"""
+
+# Inserted only when the figure has a formula or a ``$...$`` label. Data
+# plots keep the portable HTML free of the KaTeX download.
+_KATEX_BOOT = """if (S.math) {
+  const katexCss = document.createElement('link');
+  katexCss.rel = 'stylesheet';
+  katexCss.href = 'https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css';
+  document.head.appendChild(katexCss);
+  const katexJs = document.createElement('script');
+  katexJs.src = 'https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js';
+  katexJs.onload = () => plot3Typeset(document);
+  document.head.appendChild(katexJs);
+}
+"""

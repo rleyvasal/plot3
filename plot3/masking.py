@@ -45,6 +45,8 @@ _SELECTOR_FUNCS = frozenset(
     {
         "aes",
         "facet_wrap",
+        "transition_time",
+        "transition_states",
     }
 )
 
@@ -264,6 +266,15 @@ class Plot3MaskTransformer(ast.NodeTransformer):
 
         if name == "aes":
             # All positional + keyword values are column selectors.
+            node.args = [self._mask_selector(a) for a in node.args]
+            node.keywords = [
+                ast.keyword(arg=kw.arg, value=self._mask_selector(kw.value))
+                for kw in node.keywords
+            ]
+            return node
+
+        if name in {"transition_time", "transition_states"}:
+            # The frame column is a selector, positional or keyword.
             node.args = [self._mask_selector(a) for a in node.args]
             node.keywords = [
                 ast.keyword(arg=kw.arg, value=self._mask_selector(kw.value))

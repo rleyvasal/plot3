@@ -10,7 +10,8 @@ import pandas as pd
 
 import copy
 
-from plot3.encode import encode_norm, pack_u16, pack_u32
+from plot3.encode import encode_codes, encode_norm, pack_u16, pack_u32, pack_u8
+from plot3.mathtext import split_math
 from plot3.geoms import (
     _Geom,
     aes,
@@ -19,7 +20,8 @@ from plot3.geoms import (
     geom_col,
     scale_colour_continuous,
 )
-from plot3.scales import Scale, col_values, resolution
+from plot3.scales import Scale, col_values, fmt_num, resolution
+
 from plot3.stats3d import isosurface_levels, regular_grid_mesh
 from plot3.table import (
     category_labels,
@@ -744,6 +746,191 @@ def _coord_spec(coord, is3d: bool, resolved) -> dict | None:
     return None
 
 
+def _log10_values(values: np.ndarray) -> tuple[np.ndarray, int]:
+    """Map positive values to log10. Non-positive finites count as omitted."""
+    v = np.asarray(values, dtype=np.float64)
+    out = np.full(v.shape, np.nan, dtype=np.float64)
+    ok = np.isfinite(v) & (v > 0)
+    out[ok] = np.log10(v[ok])
+    n_bad = int(np.count_nonzero(np.isfinite(v) & (v <= 0)))
+    return out, n_bad
+
+
+def _last_finite(mat: np.ndarray) -> np.ndarray:
+    """Last finite value of each row, or NaN when the row is all missing."""
+    out = np.full(mat.shape[0], np.nan, dtype=np.float64)
+    for frame in range(mat.shape[1] - 1, -1, -1):
+        col = mat[:, frame]
+        take = np.isnan(out) & np.isfinite(col)
+        out[take] = col[take]
+    return out
+
+
+def _nice_at_most(x: float) -> float:
+    if not math.isfinite(x) or x <= 0:
+        return 0.0
+    mag = 10 ** math.floor(math.log10(x))
+    for mult in (5, 2, 1):
+        val = mult * mag
+        if val <= x * 1.0000001:
+            return float(val)
+    return float(mag)
+
+
+def _size_breaks(vmax: float) -> list[float]:
+    """A few legend sizes up to ``vmax``, on a 1-2-5 ladder."""
+    if not math.isfinite(vmax) or vmax <= 0:
+        return []
+    breaks: list[float] = []
+    for frac in (0.15, 0.4, 0.7, 1.0):
+        nice = _nice_at_most(vmax * frac)
+        if nice <= 0:
+            continue
+        if breaks and abs(nice - breaks[-1]) <= abs(breaks[-1]) * 1e-9:
+            continue
+        breaks.append(nice)
+    if not breaks or breaks[-1] < vmax * 0.9:
+        breaks.append(float(vmax))
+    return breaks[-4:]
+
+
+def _area_fraction(values: np.ndarray, vmax: float) -> np.ndarray:
+    """sqrt(value / vmax), so bubble area tracks the column. Missing stays NaN."""
+    v = np.asarray(values, dtype=np.float64)
+    out = np.full(v.shape, np.nan, dtype=np.float64)
+    ok = np.isfinite(v) & (v >= 0)
+    if vmax <= 0:
+        out[ok] = 0.0
+    else:
+        out[ok] = np.sqrt(v[ok] / vmax)
+    return out
+
+
+def _bubble_max(is3d: bool, coord) -> float:
+    """Largest bubble diameter: pixels in 2D / screen mode, scene units in 3D."""
+    if not is3d:
+        return 46.0
+    mode = "scene"
+    if coord is not None:
+        mode = getattr(coord, "size_mode", "scene") or "scene"
+    if mode == "screen":
+        return 32.0
+    return 0.06
+
+
+def _filter_rows(vals: dict, ok: np.ndarray) -> None:
+    """Keep rows where ``ok`` is true. Arrays and colour/group tuples follow."""
+    n = int(ok.shape[0])
+    for key, item in list(vals.items()):
+        if isinstance(item, np.ndarray) and item.shape[:1] == (n,):
+            vals[key] = item[ok]
+        elif key == "color" and isinstance(item, tuple) and len(item) == 3:
+            kind, cv, cats = item
+            if isinstance(cv, np.ndarray) and cv.shape[:1] == (n,):
+                vals[key] = (kind, cv[ok], cats)
+        elif key == "group" and isinstance(item, tuple) and len(item) == 2:
+            gv, gcats = item
+            if isinstance(gv, np.ndarray) and gv.shape[:1] == (n,):
+                vals[key] = (gv[ok], gcats)
+        elif key == "ids" and isinstance(item, list) and len(item) == n:
+            vals[key] = [item[i] for i, keep in enumerate(ok) if keep]
+
+
+def _pivot_transition(sub: pd.DataFrame, mapping: dict, transition) -> dict:
+    """One row per group, and a matrix per channel shaped (objects, frames).
+
+    Matrices are still in data space. Object order is largest ``size`` first
+    when that column is present, so small bubbles draw on top.
+    """
+    name = (
+        "transition_states" if transition.kind == "states" else "transition_time"
+    )
+    if "group" not in mapping:
+        raise ValueError(
+            f"{name}() needs aes(group=) so each object keeps its identity "
+            "across frames"
+        )
+    gcol = mapping["group"]
+    tcol = transition.column
+    if gcol not in sub.columns:
+        raise KeyError(f"group column not in data: {gcol!r}")
+    if tcol not in sub.columns:
+        raise KeyError(f"{name}() column not in data: {tcol!r}")
+
+    g_ok = sub[gcol].notna().to_numpy()
+    labels = sub[gcol].astype(str)
+    ids = sorted({labels.iloc[i] for i in range(len(sub)) if g_ok[i]})
+    if not ids:
+        raise ValueError(f"{name}() needs at least one group value")
+    id_index = {lab: i for i, lab in enumerate(ids)}
+    g_idx = labels.map(id_index).to_numpy(dtype=np.float64)
+    g_idx = np.where(g_ok, g_idx, -1).astype(np.int32)
+
+    if transition.kind == "states":
+        t_ok = sub[tcol].notna().to_numpy()
+        t_labels = sub[tcol].astype(str).tolist()
+        times: list = []
+        seen: dict[str, int] = {}
+        for lab, ok in zip(t_labels, t_ok.tolist()):
+            if not ok or lab in seen:
+                continue
+            seen[lab] = len(times)
+            times.append(lab)
+        if not times:
+            raise ValueError(f"{name}() column has no values")
+        t_idx = np.array(
+            [seen.get(lab, -1) if ok else -1 for lab, ok in zip(t_labels, t_ok)],
+            dtype=np.int32,
+        )
+        integer = False
+        kind = "states"
+    else:
+        tvals = pd.to_numeric(sub[tcol], errors="coerce").to_numpy(dtype=np.float64)
+        finite_t = np.isfinite(tvals)
+        if not finite_t.any():
+            raise ValueError(f"{name}() column has no finite values")
+        times_arr = np.unique(tvals[finite_t])
+        t_idx = np.full(len(sub), -1, dtype=np.int32)
+        t_idx[finite_t] = np.searchsorted(times_arr, tvals[finite_t])
+        scale = np.maximum(1.0, np.abs(times_arr))
+        integer = bool(np.all(np.abs(times_arr - np.round(times_arr)) <= 1e-6 * scale))
+        if integer:
+            times = [int(round(float(t))) for t in times_arr]
+        else:
+            times = [float(t) for t in times_arr]
+        kind = "time"
+
+    n_fr = len(times)
+    valid = (g_idx >= 0) & (t_idx >= 0)
+    if valid.any():
+        key = g_idx[valid].astype(np.int64) * (n_fr + 1) + t_idx[valid]
+        if np.unique(key).size != key.size:
+            raise ValueError(
+                f"{name}() found more than one row for the same group and frame"
+            )
+
+    def _mat(values: np.ndarray) -> np.ndarray:
+        out = np.full((len(ids), n_fr), np.nan, dtype=np.float64)
+        if valid.any():
+            out[g_idx[valid], t_idx[valid]] = np.asarray(values, dtype=np.float64)[valid]
+        return out
+
+    order = np.arange(len(ids))
+    return {
+        "ids": ids,
+        "times": times,
+        "integer": integer,
+        "kind": kind,
+        "column": transition.column,
+        "nFrames": n_fr,
+        "g_idx": g_idx,
+        "t_idx": t_idx,
+        "valid": valid,
+        "order": order,
+        "_mat": _mat,
+    }
+
+
 def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if not g.layers:
         raise ValueError("add a geom: ggplot(df, aes(...)) + geom_point()")
@@ -817,15 +1004,46 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if is3d and getattr(g, "facet", None) is not None:
         raise ValueError("facet_wrap() is not supported with 3D figures yet")
 
+    transition = getattr(g, "transition", None)
+    if transition is not None:
+        tname = (
+            "transition_states" if transition.kind == "states" else "transition_time"
+        )
+        kinds = {geom.kind for geom, _ in resolved}
+        if "point" not in kinds:
+            raise ValueError(f"{tname}() needs a geom_point layer")
+        extra = sorted(kinds - {"point"})
+        if extra:
+            raise ValueError(
+                f"{tname}() animates geom_point layers only "
+                f"(this figure also has {extra})"
+            )
+
     axes = ["x", "y", "z"] if is3d else ["x", "y"]
     scales: dict[str, Scale] = {}
     color_scale = None  # ("num", lo, hi) | ("cat", cats)
     num_color_vals: list[np.ndarray] = []
+    dropped_log = 0
+    size_label = str(g.labs.get("size") or "")
+    transition_meta: dict | None = None
+
+    def _axis_trans(axis: str) -> str | None:
+        if axis == "x" and getattr(g, "scale_x", None) is not None:
+            return "log10"
+        if axis == "y" and getattr(g, "scale_y", None) is not None:
+            return "log10"
+        return None
 
     def _absorb_position(axis: str, kind: str, v: np.ndarray, cats: list[str]):
+        nonlocal dropped_log
+        trans = _axis_trans(axis)
         sc = scales.get(axis)
+        if trans == "log10" and kind != "num":
+            raise ValueError(
+                f"scale_{axis}_log10() needs a numeric {axis} column"
+            )
         if sc is None:
-            sc = scales[axis] = Scale(kind)
+            sc = scales[axis] = Scale(kind, trans=trans if kind == "num" else None)
         elif sc.kind != kind:
             raise ValueError(
                 f"aes {axis}: layers disagree on scale type "
@@ -838,11 +1056,70 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 for i, c in enumerate(merged)
                 if c in cats
             }
-            v = np.array([remap.get(int(c), -1) for c in v], dtype=np.float64)
+            out = np.full(np.size(v), np.nan, dtype=np.float64)
+            flat = np.asarray(v, dtype=np.float64).ravel()
+            for i, c in enumerate(flat):
+                if not math.isfinite(c):
+                    continue
+                out[i] = remap.get(int(c), -1)
+            v = out.reshape(np.shape(v))
             sc.cats = merged
         else:
+            if trans == "log10":
+                v, n_bad = _log10_values(v)
+                dropped_log += n_bad
             sc.widen(v)
         return v
+
+    def _take_color(column_values_kind, cv, ccats, *, into):
+        """Record a colour channel on ``into`` and widen the shared colour scale."""
+        nonlocal color_scale
+        kind = column_values_kind
+        if kind == "cat" or (kind == "num" and ccats):
+            if len(ccats) > len(theme["cat"]):
+                raise ValueError(
+                    f"{len(ccats)} colour categories > {len(theme['cat'])} "
+                    "palette slots — fold rare categories or map a number"
+                )
+            if color_scale is None:
+                color_scale = ["cat", list(ccats)]
+            else:
+                if color_scale[0] != "cat":
+                    raise ValueError("layers disagree on colour scale type")
+                color_scale[1] = list(dict.fromkeys(color_scale[1] + ccats))
+            into["color"] = ("cat", cv, ccats)
+        else:
+            finite = np.asarray(cv, dtype=np.float64)
+            finite = finite[np.isfinite(finite)]
+            if color_scale is None:
+                color_scale = ["num", math.inf, -math.inf]
+            elif color_scale[0] != "num":
+                raise ValueError("layers disagree on colour scale type")
+            if finite.size:
+                color_scale[1] = min(color_scale[1], float(finite.min()))
+                color_scale[2] = max(color_scale[2], float(finite.max()))
+            num_color_vals.append(np.asarray(cv, dtype=np.float64))
+            into["color"] = ("num", cv, None)
+
+    def _drop_log_rows(vals: dict) -> None:
+        log_on = any(
+            getattr(scales.get(a), "trans", None) == "log10" for a in axes
+        )
+        if not log_on or "frames" in vals:
+            return
+        n = len(vals["x"])
+        ok = np.isfinite(np.asarray(vals["x"], dtype=np.float64))
+        if "y" in vals:
+            ok = ok & np.isfinite(np.asarray(vals["y"], dtype=np.float64))
+        if "z" in vals:
+            ok = ok & np.isfinite(np.asarray(vals["z"], dtype=np.float64))
+        if ok.all():
+            return
+        if not ok.any():
+            raise ValueError(
+                "log scale removed every row; values must be positive"
+            )
+        _filter_rows(vals, ok)
 
     # Pass 1 — per-layer values + global scale domains.
     # Only selected columns are materialised to pandas at this boundary.
@@ -931,7 +1208,85 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         cols = [m[a] for a in axes if a in m] + (
             [m["color"]] if "color" in m else []
         ) + ([m["group"]] if "group" in m else [])
+        if geom.kind == "point" and "size" in m:
+            cols.append(m["size"])
+        if transition is not None:
+            cols.append(transition.column)
         sub = materialize_columns(frame, list(dict.fromkeys(cols)))
+
+        if transition is not None and geom.kind == "point":
+            pivot = _pivot_transition(sub, m, transition)
+            channels: dict[str, np.ndarray] = {}
+            if "size" in m:
+                skind, sv, _ = col_values(sub[m["size"]])
+                if skind != "num":
+                    raise ValueError("aes(size=) needs a numeric column")
+                sv = np.asarray(sv, dtype=np.float64)
+                sv = np.where(np.isfinite(sv) & (sv >= 0), sv, np.nan)
+                channels["size"] = pivot["_mat"](sv)
+                if not size_label:
+                    size_label = str(m["size"])
+            # Largest bubbles first, so later (smaller) points stay visible.
+            if "size" in channels:
+                with np.errstate(all="ignore"):
+                    score = np.nanmax(channels["size"], axis=1)
+                score = np.where(np.isfinite(score), score, -np.inf)
+                pivot["order"] = np.argsort(-score, kind="mergesort")
+            order = pivot["order"]
+            ids = [pivot["ids"][i] for i in order]
+            frames = {
+                "ids": ids,
+                "times": pivot["times"],
+                "integer": bool(pivot["integer"]),
+                "kind": pivot["kind"],
+                "column": pivot["column"],
+                "nFrames": int(pivot["nFrames"]),
+                "nObj": len(ids),
+            }
+            vals = {"ids": ids, "frames": frames}
+            for a in axes:
+                kind, raw, cats = col_values(sub[m[a]])
+                mat = pivot["_mat"](raw)[order]
+                flat = _absorb_position(a, kind, mat.ravel(), cats)
+                frames[a] = np.asarray(flat, dtype=np.float64).reshape(mat.shape)
+                # Static fallback is the last keyframe (missing stays missing).
+                vals[a] = frames[a][:, -1].copy()
+            if "size" in channels:
+                frames["size"] = channels["size"][order]
+                vals["size"] = _last_finite(frames["size"])
+            if "color" in m:
+                kind, cv, ccats = col_values(sub[m["color"]])
+                color_mat = pivot["_mat"](cv)[order]
+                frames["color"] = color_mat
+                frames["color_kind"] = "cat" if (kind == "cat" or ccats) else "num"
+                frames["color_cats"] = list(ccats)
+                shown = _last_finite(color_mat)
+                _take_color(kind, shown, ccats, into=vals)
+                if frames["color_kind"] == "num":
+                    full = np.asarray(cv, dtype=np.float64)
+                    num_color_vals[-1] = full
+                    finite = full[np.isfinite(full)]
+                    if finite.size and color_scale and color_scale[0] == "num":
+                        color_scale[1] = min(color_scale[1], float(finite.min()))
+                        color_scale[2] = max(color_scale[2], float(finite.max()))
+            meta = {
+                "type": frames["kind"],
+                "column": frames["column"],
+                "nFrames": frames["nFrames"],
+                "times": list(frames["times"]),
+                "integer": frames["integer"],
+                "ease": "smooth" if frames["kind"] == "states" else "linear",
+                "duration": 12,
+            }
+            if transition_meta is None:
+                transition_meta = meta
+            elif transition_meta["times"] != meta["times"] or transition_meta["type"] != meta["type"]:
+                raise ValueError(
+                    f"{transition_meta['type']} layers disagree on frame values"
+                )
+            layer_vals.append(vals)
+            continue
+
         vals = {}
         for a in axes:
             kind, v, cats = col_values(sub[m[a]])
@@ -939,17 +1294,25 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         # Histogram: domain is full bin edges, not just bin centres.
         x_domain = getattr(geom, "_x_domain", None)
         if x_domain is not None and "x" in scales and scales["x"].kind == "num":
-            scales["x"].widen(
-                np.asarray([x_domain[0], x_domain[1]], dtype=np.float64)
-            )
+            dom = np.asarray([x_domain[0], x_domain[1]], dtype=np.float64)
+            if getattr(scales["x"], "trans", None) == "log10":
+                dom, n_bad = _log10_values(dom)
+                dropped_log += n_bad
+            scales["x"].widen(dom)
         # Bars / densities include the baseline at y=0 in the domain.
+        # A log axis has no zero; positive bars keep the data domain.
         if (
             geom.kind in {"col", "area"}
             or getattr(geom, "_baseline_zero", False)
         ) and "y" in scales and scales["y"].kind == "num":
-            scales["y"].widen(np.asarray([0.0], dtype=np.float64))
+            if getattr(scales["y"], "trans", None) != "log10":
+                scales["y"].widen(np.asarray([0.0], dtype=np.float64))
         # Violin: numeric x positions with categorical tick labels.
         if getattr(geom, "_violin_levels", None) is not None:
+            if _axis_trans("x") == "log10":
+                raise ValueError(
+                    "scale_x_log10() cannot be used with categorical x"
+                )
             levels = list(geom._violin_levels)
             scales["x"] = Scale("cat")
             scales["x"].cats = levels
@@ -976,6 +1339,15 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         if "group" in m:
             _, gv, gcats = col_values(sub[m["group"]])
             vals["group"] = (gv, gcats)
+        if geom.kind == "point" and "size" in m:
+            skind, sv, _ = col_values(sub[m["size"]])
+            if skind != "num":
+                raise ValueError("aes(size=) needs a numeric column")
+            sv = np.asarray(sv, dtype=np.float64)
+            vals["size"] = np.where(np.isfinite(sv) & (sv >= 0), sv, np.nan)
+            if not size_label:
+                size_label = str(m["size"])
+        _drop_log_rows(vals)
         layer_vals.append(vals)
 
     for a in axes:
@@ -985,8 +1357,13 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     force = getattr(g, "_force_scales", None) or {}
     for ax, (lo, hi) in force.items():
         if ax in scales and scales[ax].kind == "num":
-            scales[ax].lo = float(lo)
-            scales[ax].hi = float(hi)
+            lo_f, hi_f = float(lo), float(hi)
+            if getattr(scales[ax], "trans", None) == "log10":
+                if lo_f <= 0 or hi_f <= 0:
+                    raise ValueError(f"scale_{ax}_log10() limits must be positive")
+                lo_f, hi_f = math.log10(lo_f), math.log10(hi_f)
+            scales[ax].lo = lo_f
+            scales[ax].hi = hi_f
             if scales[ax].hi <= scales[ax].lo:
                 scales[ax].hi = scales[ax].lo + 1.0
 
@@ -1001,6 +1378,12 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             lo, hi = float(bounds[0]), float(bounds[1])
             if hi < lo:
                 lo, hi = hi, lo
+            if getattr(scales[axis_name], "trans", None) == "log10":
+                if lo <= 0 or hi <= 0:
+                    raise ValueError(
+                        f"scale_{axis_name}_log10() limits must be positive"
+                    )
+                lo, hi = math.log10(lo), math.log10(hi)
             if hi <= lo:
                 hi = lo + 1.0
             scales[axis_name].lo = lo
@@ -1033,6 +1416,30 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         }[cs.trans]
         num_color = (lo_c, hi_c, cs.trans, tf)
 
+    # One size scale for the figure. Area: radius follows sqrt(value / max).
+    size_pieces = []
+    for vals in layer_vals:
+        if vals.get("size") is not None:
+            size_pieces.append(np.asarray(vals["size"], dtype=np.float64).ravel())
+        fr = vals.get("frames")
+        if fr is not None and fr.get("size") is not None:
+            size_pieces.append(np.asarray(fr["size"], dtype=np.float64).ravel())
+    size_max = None
+    size_units = None
+    if size_pieces:
+        all_s = np.concatenate(size_pieces)
+        ok_s = all_s[np.isfinite(all_s) & (all_s >= 0)]
+        if ok_s.size == 0:
+            raise ValueError("aes(size=) has no finite, non-negative values")
+        size_max = float(ok_s.max())
+        size_units = _bubble_max(is3d, coord)
+        for vals in layer_vals:
+            if vals.get("size") is not None:
+                vals["size_frac"] = _area_fraction(vals["size"], size_max)
+            fr = vals.get("frames")
+            if fr is not None and fr.get("size") is not None:
+                fr["size_frac"] = _area_fraction(fr["size"], size_max)
+
     # Pass 2 — encode payloads per layer (quantized against the shared scales)
     # Distinct default colours so several formulas can share a legend.
     palette = theme["cat"]
@@ -1063,6 +1470,17 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 keys.append(vals["x"])
             if keys:
                 order = np.lexsort(tuple(reversed(keys)))
+        # Large bubbles first so smaller ones, drawn later, stay visible.
+        if (
+            geom.kind == "point"
+            and vals.get("size") is not None
+            and "frames" not in vals
+        ):
+            raw_size = np.asarray(vals["size"], dtype=np.float64)
+            score = np.where(
+                np.isfinite(raw_size) & (raw_size >= 0), raw_size, -np.inf
+            )
+            order = np.argsort(-score, kind="mergesort")
         # poly keeps authoring order (closed violin contours).
 
         spec_l = {
@@ -1074,6 +1492,10 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
 
         def _encode_channel(name: str, values: np.ndarray, axis: str):
             sc = scales[axis]
+            values = np.asarray(values, dtype=np.float64)
+            if not np.isfinite(values).all():
+                fill = sc.lo if math.isfinite(sc.lo) else 0.0
+                values = np.where(np.isfinite(values), values, fill)
             enc = encode_norm(
                 values,
                 sc.lo,
@@ -1084,6 +1506,20 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             pid = f"p{li}{name}"
             payloads.append((pid, enc["b64"]))
             spec_l[name] = {"id": pid, "dtype": enc["dtype"]}
+
+        def _encode_matrix(tag: str, values: np.ndarray, lo: float, hi: float):
+            flat = np.asarray(values, dtype=np.float64).ravel()
+            present = np.isfinite(flat)
+            fill = lo if math.isfinite(lo) else 0.0
+            filled = np.where(present, flat, fill)
+            enc = encode_norm(
+                filled, lo, hi, quantize=g.quantize, compress=g.compress
+            )
+            pid = f"p{li}f{tag}"
+            mid = f"p{li}f{tag}m"
+            payloads.append((pid, enc["b64"]))
+            payloads.append((mid, pack_u8(present.astype(np.uint8), g.compress)))
+            return {"id": pid, "dtype": enc["dtype"], "mask": mid}
 
         if geom.kind in {"surface", "isosurface"}:
             for a in axes:
@@ -1260,7 +1696,23 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             if spec_l["alpha"] is None:
                 spec_l["alpha"] = 0.9
         else:
-            if getattr(geom, "size", None) is not None:
+            if vals.get("size_frac") is not None:
+                frac = np.asarray(vals["size_frac"], dtype=np.float64)[order]
+                present = np.isfinite(frac)
+                filled = np.where(present, frac, 0.0)
+                enc = encode_norm(
+                    filled, 0.0, 1.0, quantize=g.quantize, compress=g.compress
+                )
+                pid = f"p{li}sz"
+                payloads.append((pid, enc["b64"]))
+                spec_l["size"] = {
+                    "id": pid,
+                    "dtype": enc["dtype"],
+                    "scale": "area",
+                    "max": float(size_units),
+                    "vmax": float(size_max),
+                }
+            elif getattr(geom, "size", None) is not None:
                 spec_l["size"] = float(geom.size)
             elif is3d:
                 mode = "scene"
@@ -1278,6 +1730,84 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                     spec_l["alpha"] = 0.85 if n <= 50000 else 0.6
         if spec_l["alpha"] is None:
             spec_l["alpha"] = 1.0
+        frames = vals.get("frames")
+        if frames and geom.kind == "point":
+            spec_l["frames"] = {
+                "nFrames": int(frames["nFrames"]),
+                "nObj": int(frames["nObj"]),
+            }
+            for a in axes:
+                spec_l["frames"][a] = _encode_matrix(
+                    a, frames[a], scales[a].lo, scales[a].hi
+                )
+            if frames.get("size_frac") is not None:
+                ch = _encode_matrix("sz", frames["size_frac"], 0.0, 1.0)
+                ch["scale"] = "area"
+                ch["max"] = float(size_units)
+                ch["vmax"] = float(size_max)
+                spec_l["frames"]["size"] = ch
+            if frames.get("color") is not None and color_scale is not None:
+                if frames["color_kind"] == "cat":
+                    local = frames["color_cats"]
+                    remap = {
+                        i: color_scale[1].index(c) for i, c in enumerate(local)
+                    }
+                    raw = np.asarray(frames["color"], dtype=np.float64).ravel()
+                    flat = np.full(raw.shape, 65535, dtype=np.uint16)
+                    ok = np.isfinite(raw) & (raw >= 0)
+                    if ok.any():
+                        mapped = np.array(
+                            [remap.get(int(c), 0) for c in raw[ok]],
+                            dtype=np.uint16,
+                        )
+                        flat[np.flatnonzero(ok)] = mapped
+                    enc = encode_codes(flat, g.compress)
+                    pid = f"p{li}fc"
+                    payloads.append((pid, enc["b64"]))
+                    spec_l["frames"]["color"] = {
+                        "id": pid, "dtype": "u16", "kind": "cat",
+                    }
+                else:
+                    lo_c, hi_c, _trans, tf = num_color
+                    raw = np.asarray(frames["color"], dtype=np.float64)
+                    present = np.isfinite(raw)
+                    transformed = np.full(raw.shape, np.nan, dtype=np.float64)
+                    if present.any():
+                        transformed[present] = tf(np.clip(raw[present], lo_c, hi_c))
+                    lo_t = float(tf(np.asarray(lo_c)))
+                    hi_t = float(tf(np.asarray(hi_c)))
+                    if not math.isfinite(lo_t) or not math.isfinite(hi_t) or hi_t <= lo_t:
+                        lo_t, hi_t = 0.0, 1.0
+                    ch = _encode_matrix("c", transformed, lo_t, hi_t)
+                    ch["kind"] = "num"
+                    spec_l["frames"]["color"] = ch
+        if geom.kind == "point":
+            labels = None
+            if isinstance(vals.get("ids"), list) and len(vals["ids"]) == n:
+                labels = list(vals["ids"])
+            elif "group" in vals:
+                gv, gcats = vals["group"]
+                labels = []
+                for c in np.asarray(gv, dtype=np.float64):
+                    if not math.isfinite(c):
+                        labels.append("")
+                        continue
+                    idx = int(c)
+                    if gcats and 0 <= idx < len(gcats):
+                        labels.append(str(gcats[idx]))
+                    elif float(c).is_integer():
+                        labels.append(str(idx))
+                    else:
+                        labels.append(str(c))
+            if labels is not None and n <= 8000:
+                spec_l["ids"] = [labels[i] for i in order]
+        tip_pretty = getattr(geom, "_tip_pretty", None)
+        if tip_pretty:
+            tip = {"pretty": str(tip_pretty)}
+            tip_latex = getattr(geom, "_tip_latex", None)
+            if tip_latex:
+                tip["latex"] = str(tip_latex)
+            spec_l["tip"] = tip
         layer_specs.append(spec_l)
 
     # color spec + legend
@@ -1301,33 +1831,102 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             label = getattr(geom, "_legend_label", None)
             if not label or not geom.const_color:
                 continue
-            entries.append({"label": str(label), "color": geom.const_color})
+            entry = {"label": str(label), "color": geom.const_color}
+            if getattr(geom, "_is_formula", False):
+                entry["formula"] = True
+                segments = getattr(geom, "_legend_math", None)
+                latex = getattr(geom, "_legend_latex", None)
+                if segments:
+                    entry["math"] = segments
+                elif latex:
+                    entry["latex"] = str(latex)
+            entries.append(entry)
         if entries:
             legend = entries
 
     base_map = dict(g.mapping)
     coord_spec = _coord_spec(coord, is3d, resolved)
+    labs_math: dict[str, list] = {}
+
+    def _take(key: str, text) -> str:
+        raw = "" if text is None else str(text)
+        if "$" not in raw:
+            return raw
+        plain, segments = split_math(raw)
+        if segments:
+            labs_math[key] = segments
+        return plain
+
+    formula_geoms = [
+        geom for geom, _mapped in resolved if getattr(geom, "_is_formula", False)
+    ]
+    raw_title = g.labs.get("title") or ""
+    # One function and no title of your own: the formula is the title, and
+    # the single legend row would only repeat it.
+    if not str(raw_title).strip() and len(formula_geoms) == 1:
+        shown = formula_geoms[0]
+        title = str(getattr(shown, "_legend_label", "") or "")
+        segments = getattr(shown, "_legend_math", None)
+        if segments:
+            labs_math["title"] = segments
+        elif getattr(shown, "_legend_latex", None):
+            labs_math["title"] = [{"text": title, "latex": str(shown._legend_latex)}]
+        if legend and len(legend) == 1 and legend[0].get("formula"):
+            legend = None
+    else:
+        title = _take("title", raw_title)
+    if legend:
+        for entry in legend:
+            entry.pop("formula", None)
     notes: list[str] = []
     for geom, _mapped in resolved:
         for note in getattr(geom, "_notes", None) or ():
             text = str(note)
             if text and text not in notes:
                 notes.append(text)
+    if dropped_log:
+        word = "value" if dropped_log == 1 else "values"
+        notes.append(f"{dropped_log} non-positive {word} omitted on a log scale")
+
+    size_legend = None
+    if size_max is not None:
+        breaks = []
+        for value in _size_breaks(size_max):
+            frac = 0.0 if size_max <= 0 else math.sqrt(max(value, 0.0) / size_max)
+            breaks.append({
+                "value": float(value),
+                "label": fmt_num(float(value)),
+                "t": float(frac),
+            })
+        size_legend = {
+            "label": size_label or "size",
+            "vmax": float(size_max),
+            "max": float(size_units),
+            "breaks": breaks,
+        }
 
     spec = {
         "v": 1,
         "is3d": is3d,
         "theme": theme,
         "labs": {
-            "title": g.labs.get("title", ""),
-            "x": _axis_label(g, base_map, resolved, "x", is3d),
-            "y": _axis_label(g, base_map, resolved, "y", is3d),
-            "z": _axis_label(g, base_map, resolved, "z", is3d) if is3d else "",
-            "color": g.labs.get("color", base_map.get("color", "")),
+            "title": title,
+            "x": _take("x", _axis_label(g, base_map, resolved, "x", is3d)),
+            "y": _take("y", _axis_label(g, base_map, resolved, "y", is3d)),
+            "z": _take("z", _axis_label(g, base_map, resolved, "z", is3d)) if is3d else "",
+            "color": _take("color", g.labs.get("color", base_map.get("color", ""))),
         },
+        "labsMath": labs_math or None,
+        "math": bool(
+            labs_math
+            or any(layer.get("tip") for layer in layer_specs)
+            or any(entry.get("latex") or entry.get("math") for entry in (legend or []))
+        ),
         "scales": {a: scales[a].spec() for a in axes},
         "color": cspec,
         "legend": legend,
+        "sizeLegend": size_legend,
+        "transition": transition_meta,
         "layers": layer_specs,
         "gz": 1 if g.compress else 0,
         "coord": coord_spec,
@@ -1472,7 +2071,10 @@ def _build_doc_faceted(g: ggplot, facet) -> str:
             "title=\"panel\"></iframe></div>"
         )
 
-    title = _htmlesc.escape(str(g.labs.get("title", "")))
+    raw_title = str(g.labs.get("title", "") or "")
+    if "$" in raw_title:
+        raw_title, _segments = split_math(raw_title)
+    title = _htmlesc.escape(raw_title)
     doc = f"""<!doctype html>
 <html><head><meta charset="utf-8"><style>
 html,body{{margin:0;height:100%;background:{theme["surface"]};color:{theme["ink"]};

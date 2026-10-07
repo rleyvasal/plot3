@@ -27,8 +27,12 @@ from plot3.geoms import (
     scale_color_viridis_c,
     scale_colour_continuous,
     scale_colour_viridis_c,
+    scale_x_log10,
+    scale_y_log10,
     theme_dark,
     theme_light,
+    transition_states,
+    transition_time,
 )
 from plot3.ggplot import autohide, ggsave, ggplot  # show via ggplot.show
 from plot3.io import read_bin
@@ -80,6 +84,10 @@ __all__ = [
     "scale_color_continuous",
     "scale_colour_viridis_c",
     "scale_color_viridis_c",
+    "scale_x_log10",
+    "scale_y_log10",
+    "transition_time",
+    "transition_states",
     "theme_dark",
     "theme_light",
     "ggsave",

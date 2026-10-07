@@ -132,6 +132,7 @@ def render_payload(
     This is the **viewer** half: no DataFrame access, only ``spec`` + ``blobs``.
     """
     from plot3.viewer import _DOC_TEMPLATE as DOC_TEMPLATE
+    from plot3.viewer import _KATEX_BOOT
 
     payload = validate_payload(payload)
     spec = payload["spec"]
@@ -146,6 +147,7 @@ def render_payload(
         DOC_TEMPLATE
         .replace("__SPEC__", json.dumps(spec, separators=(",", ":")))
         .replace("__PAYLOADS__", blocks)
+        .replace("__KATEX__", _KATEX_BOOT if spec.get("math") else "")
     )
     if log:
         kb = len(doc) // 1024
