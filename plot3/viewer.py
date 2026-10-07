@@ -11,14 +11,27 @@ html,body{margin:0;height:100%;overflow:hidden;
 body{display:flex;flex-direction:column}
 #fig{position:relative;width:100%;flex:1;min-height:0}
 #note{display:none;flex:none;padding:2px 14px 8px;font-size:11px;line-height:1.4}
-#title{position:absolute;left:14px;top:8px;font-size:14px;font-weight:600;z-index:4}
+#title{position:absolute;left:14px;top:8px;max-width:calc(100% - 120px);
+  font-size:14px;font-weight:600;z-index:4}
 #canvas-host{position:absolute;z-index:1}
 #year{display:none;position:absolute;left:50%;top:46%;transform:translate(-50%,-50%);
   z-index:0;font-weight:700;line-height:1;letter-spacing:-0.04em;opacity:0.13;
   pointer-events:none;user-select:none}
 #axes{position:absolute;inset:0;pointer-events:none;z-index:2}
-#legend{position:absolute;right:10px;top:8px;z-index:4;padding:6px 9px;
+#legend{position:absolute;right:10px;top:36px;z-index:4;padding:6px 9px;
   border-radius:6px;font-size:11px;line-height:1.7}
+#modebar{position:absolute;top:6px;right:6px;z-index:6;display:flex;
+  opacity:0;transition:opacity .12s ease;border-radius:4px;user-select:none;
+  box-shadow:0 1px 2px rgba(0,0,0,.25)}
+#modebar button{font:600 11px/1.2 system-ui,-apple-system,"Segoe UI",sans-serif;
+  padding:4px 7px;margin:0;border:0;background:transparent;color:inherit;
+  cursor:pointer;white-space:nowrap}
+#modebar button:first-child{border-radius:3px 0 0 3px}
+#modebar button:last-child{border-radius:0 3px 3px 0}
+#modebar button:hover{background:rgba(128,128,128,.18)}
+#modebar button:focus-visible{outline:2px solid currentColor;outline-offset:-2px}
+#fig:hover #modebar,#modebar:focus-within{opacity:1}
+@media (hover:none){#modebar{opacity:1}}
 #legend .sw{display:inline-block;width:9px;height:9px;border-radius:5px;
   margin-right:6px;vertical-align:-1px}
 #legend .lg-e{cursor:pointer;user-select:none}
@@ -49,6 +62,10 @@ body{display:flex;flex-direction:column}
   <div id="legend" style="display:none"></div>
   <div id="tip"></div>
   <div id="hint"></div>
+  <div id="modebar">
+    <button type="button" id="save-png" aria-label="Save as PNG" title="Save as PNG">PNG</button>
+    <button type="button" id="save-svg" aria-label="Save as SVG" title="Save as SVG">SVG</button>
+  </div>
 </div>
 <div id="player">
   <button type="button" id="play-btn">Play</button>
@@ -381,7 +398,8 @@ tip.style.background = T.surface;
 tip.style.border = '1px solid ' + T.axis;
 tip.style.color = T.ink;
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+// preserveDrawingBuffer keeps the frame readable for the hover save buttons.
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setClearColor(0x000000, 0);
 host.appendChild(renderer.domElement);
@@ -1235,6 +1253,8 @@ window.__plot3.afterLegend = () => {
   for (const e of bubbleEntries) applyBubbleHide(e);
 };
 
+let renderNow = () => {};
+
 if (!S.is3d) {
   // ═════════════════════════ 2D: ortho + pan/zoom ═════════════════════════
   const M = { l: 58, r: 12, t: 30, b: 40 };
@@ -1833,6 +1853,11 @@ if (!S.is3d) {
   installPlayer(() => draw());
   new ResizeObserver(layout).observe(figEl);
   layout();
+  renderNow = () => {
+    cam.updateProjectionMatrix();
+    renderer.render(scene, cam);
+    drawAxes();
+  };
 
 } else {
   // ═════════════════════════ 3D: orbit viewer ═════════════════════════════
@@ -2188,7 +2213,325 @@ if (!S.is3d) {
     renderer.render(scene, cam);
     requestAnimationFrame(loop);
   })();
+  renderNow = () => {
+    controls.update();
+    renderer.render(scene, cam);
+  };
 }
+
+// Hover save. PNG is the picture on screen. SVG keeps the axis overlay as
+// vectors and embeds the WebGL layer, which is already a raster.
+function installSave() {
+  const bar = document.getElementById('modebar');
+  const pngBtn = document.getElementById('save-png');
+  const svgBtn = document.getElementById('save-svg');
+  if (!bar || !pngBtn || !svgBtn) return;
+  bar.style.background = T.surface;
+  bar.style.color = T.ink;
+  bar.style.border = '1px solid ' + T.axis;
+  svgBtn.style.boxShadow = 'inset 1px 0 0 ' + T.axis;
+  bar.addEventListener('pointerdown', (ev) => ev.stopPropagation());
+
+  function fileStem() {
+    let raw = (S.labs && S.labs.title) ? String(S.labs.title) : '';
+    if (!raw) return 'plot3';
+    if (frameLabel && raw.indexOf('{frame_time}') >= 0)
+      raw = raw.split('{frame_time}').join(frameLabel);
+    let stem = '';
+    for (let i = 0; i < raw.length && stem.length < 60; i++) {
+      const c = raw.charAt(i);
+      const ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+        (c >= '0' && c <= '9') || c === '.' || c === '_' || c === '-';
+      if (ok) stem += c;
+      else if (stem && stem.charAt(stem.length - 1) !== '_') stem += '_';
+    }
+    while (stem.charAt(0) === '_') stem = stem.slice(1);
+    while (stem && stem.charAt(stem.length - 1) === '_') stem = stem.slice(0, -1);
+    return stem || 'plot3';
+  }
+  function num(v) { return String(Math.round(Number(v) * 100) / 100); }
+  function visibleColor(c) {
+    if (!c || c === 'transparent' || c === 'rgba(0, 0, 0, 0)') return '';
+    return c;
+  }
+  function traceRound(ctx, x, y, w, h, rad) {
+    const r = Math.max(0, Math.min(rad || 0, w / 2, h / 2));
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') ctx.roundRect(x, y, w, h, r);
+    else ctx.rect(x, y, w, h);
+  }
+  function paintBox(ctx, el, st, ox, oy, alpha) {
+    const r = el.getBoundingClientRect();
+    const w = r.width, h = r.height;
+    if (w < 0.5 || h < 0.5) return;
+    const bg = visibleColor(st.backgroundColor);
+    const ramp = el.id === 'ramp';
+    const bw = parseFloat(st.borderTopWidth) || 0;
+    const bc = bw > 0 ? visibleColor(st.borderTopColor) : '';
+    if (!bg && !ramp && !bc) return;
+    const x = r.left - ox, y = r.top - oy;
+    const rad = parseFloat(st.borderRadius) || 0;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    traceRound(ctx, x, y, w, h, rad);
+    if (ramp && S.color && S.color.ramp && S.color.ramp.length) {
+      const g = ctx.createLinearGradient(x, y, x + w, y);
+      const stops = S.color.ramp;
+      for (let i = 0; i < stops.length; i++)
+        g.addColorStop(stops.length === 1 ? 0 : i / (stops.length - 1), stops[i]);
+      ctx.fillStyle = g;
+      ctx.fill();
+    } else if (bg) {
+      ctx.fillStyle = bg;
+      ctx.fill();
+    }
+    if (bc) {
+      ctx.lineWidth = bw;
+      ctx.strokeStyle = bc;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+  function fillWrapped(ctx, text, x, y, maxW, lineH) {
+    const words = text.split(' ');
+    let line = '', cy = y;
+    for (let i = 0; i < words.length; i++) {
+      const trial = line ? line + ' ' + words[i] : words[i];
+      if (line && ctx.measureText(trial).width > maxW) {
+        ctx.fillText(line, x, cy);
+        line = words[i];
+        cy += lineH;
+      } else line = trial;
+    }
+    if (line) ctx.fillText(line, x, cy);
+  }
+  function paintText(ctx, node, ox, oy, alpha) {
+    const text = node.textContent;
+    if (!text || !text.trim()) return;
+    const parent = node.parentElement;
+    if (!parent) return;
+    const st = getComputedStyle(parent);
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const rects = range.getClientRects();
+    range.detach();
+    if (!rects.length) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = st.color;
+    ctx.font = (st.fontStyle || 'normal') + ' ' + (st.fontWeight || '400') + ' '
+      + (st.fontSize || '12px') + ' ' + (st.fontFamily || 'sans-serif');
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'left';
+    if ('letterSpacing' in ctx && st.letterSpacing && st.letterSpacing !== 'normal')
+      ctx.letterSpacing = st.letterSpacing;
+    if (rects.length === 1) {
+      ctx.fillText(text, rects[0].left - ox, rects[0].top - oy);
+    } else {
+      const pr = parent.getBoundingClientRect();
+      const padL = parseFloat(st.paddingLeft) || 0;
+      const padR = parseFloat(st.paddingRight) || 0;
+      const maxW = Math.max(1, pr.width - padL - padR);
+      let lineH = parseFloat(st.lineHeight);
+      if (!isFinite(lineH)) lineH = rects[0].height || 14;
+      fillWrapped(ctx, text.trim(), pr.left + padL - ox, rects[0].top - oy, maxW, lineH);
+    }
+    ctx.restore();
+  }
+  function paintNode(ctx, node, ox, oy, alpha) {
+    if (!node) return;
+    if (node.nodeType === 3) { paintText(ctx, node, ox, oy, alpha); return; }
+    if (node.nodeType !== 1) return;
+    const el = node;
+    if (el.id === 'modebar' || el.id === 'tip' || el.id === 'hint' || el.id === 'canvas-host' || el.id === 'axes')
+      return;
+    const st = getComputedStyle(el);
+    if (st.display === 'none' || st.visibility === 'hidden') return;
+    const own = parseFloat(st.opacity);
+    const next = alpha * (isFinite(own) ? own : 1);
+    if (next <= 0.001) return;
+    paintBox(ctx, el, st, ox, oy, next);
+    for (let i = 0; i < el.childNodes.length; i++)
+      paintNode(ctx, el.childNodes[i], ox, oy, next);
+  }
+  function svgRotate(transform) {
+    if (!transform) return null;
+    const i = transform.indexOf('rotate(');
+    if (i < 0) return null;
+    const inner = transform.slice(i + 7, transform.indexOf(')', i));
+    const parts = inner.trim().split(/[ ,]+/).map(Number);
+    if (parts.length < 3 || parts.some(n => !isFinite(n))) return null;
+    return parts;
+  }
+  function paintAxes(ctx) {
+    if (!svg) return;
+    const font = '12px ' + (getComputedStyle(document.body).fontFamily || 'sans-serif');
+    const nodes = svg.querySelectorAll('line, rect, text');
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      const tag = el.tagName.toLowerCase();
+      ctx.save();
+      if (tag === 'line') {
+        ctx.beginPath();
+        ctx.strokeStyle = el.getAttribute('stroke') || T.grid;
+        ctx.lineWidth = 1;
+        ctx.moveTo(+el.getAttribute('x1'), +el.getAttribute('y1'));
+        ctx.lineTo(+el.getAttribute('x2'), +el.getAttribute('y2'));
+        ctx.stroke();
+      } else if (tag === 'rect') {
+        ctx.strokeStyle = el.getAttribute('stroke') || T.axis;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(+el.getAttribute('x'), +el.getAttribute('y'),
+          +el.getAttribute('width'), +el.getAttribute('height'));
+      } else if (tag === 'text') {
+        const x = +el.getAttribute('x'), y = +el.getAttribute('y');
+        const anchor = el.getAttribute('text-anchor') || 'start';
+        ctx.fillStyle = el.getAttribute('fill') || T.ink2;
+        ctx.font = font;
+        ctx.textAlign = anchor === 'middle' ? 'center' : anchor === 'end' ? 'right' : 'left';
+        ctx.textBaseline = 'alphabetic';
+        const rot = svgRotate(el.getAttribute('transform'));
+        if (rot) {
+          ctx.translate(rot[1], rot[2]);
+          ctx.rotate(rot[0] * Math.PI / 180);
+          ctx.translate(-rot[1], -rot[2]);
+        }
+        ctx.fillText(el.textContent || '', x, y);
+      }
+      ctx.restore();
+    }
+  }
+  function pickDpr(w, h) {
+    let dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const maxSide = 4096;
+    if (w * dpr > maxSide) dpr = maxSide / w;
+    if (h * dpr > maxSide) dpr = Math.min(dpr, maxSide / h);
+    return Math.max(0.5, dpr);
+  }
+  function layerCanvas(w, h, dpr) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(w * dpr));
+    c.height = Math.max(1, Math.round(h * dpr));
+    const ctx = c.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { canvas: c, ctx: ctx };
+  }
+  function compose(kind) {
+    renderNow();
+    const figR = figEl.getBoundingClientRect();
+    const cssW = Math.max(1, figR.width);
+    const cssH = Math.max(1, figR.height);
+    const noteEl = document.getElementById('note');
+    const yearEl = document.getElementById('year');
+    let noteH = 0;
+    if (noteEl && getComputedStyle(noteEl).display !== 'none' && (noteEl.textContent || '').trim())
+      noteH = noteEl.offsetHeight || 0;
+    const totalH = cssH + noteH;
+    const dpr = pickDpr(cssW, totalH);
+    const hostR = host.getBoundingClientRect();
+    const hx = hostR.left - figR.left, hy = hostR.top - figR.top;
+    const shot = layerCanvas(cssW, totalH, dpr);
+    const ctx = shot.ctx;
+    ctx.fillStyle = T.surface;
+    ctx.fillRect(0, 0, cssW, totalH);
+    const yearOn = yearEl && getComputedStyle(yearEl).display !== 'none' && (yearEl.textContent || '').trim();
+    let yearURL = '', yearBox = null;
+    if (yearOn) {
+      const yr = yearEl.getBoundingClientRect();
+      const pad = 8;
+      const yw = yr.width + pad * 2, yh = yr.height + pad * 2;
+      const layer = layerCanvas(yw, yh, dpr);
+      paintNode(layer.ctx, yearEl, yr.left - pad, yr.top - pad, 1);
+      yearBox = { x: yr.left - figR.left - pad, y: yr.top - figR.top - pad, w: yw, h: yh };
+      ctx.drawImage(layer.canvas, yearBox.x, yearBox.y, yw, yh);
+      if (kind === 'svg') yearURL = layer.canvas.toDataURL('image/png');
+    }
+    if (hostR.width > 1 && hostR.height > 1)
+      ctx.drawImage(renderer.domElement, hx, hy, hostR.width, hostR.height);
+    paintAxes(ctx);
+    const chrome = layerCanvas(cssW, totalH, dpr);
+    paintNode(chrome.ctx, titleEl, figR.left, figR.top, 1);
+    if (legEl && legEl.style.display !== 'none')
+      paintNode(chrome.ctx, legEl, figR.left, figR.top, 1);
+    if (noteH > 0) {
+      const nr = noteEl.getBoundingClientRect();
+      paintNode(chrome.ctx, noteEl, figR.left, nr.top - cssH, 1);
+    }
+    ctx.drawImage(chrome.canvas, 0, 0, cssW, totalH);
+    if (kind === 'svg') {
+      const W = Math.max(1, Math.round(cssW)), H = Math.max(1, Math.round(totalH));
+      const glURL = renderer.domElement.toDataURL('image/png');
+      const chromeURL = chrome.canvas.toDataURL('image/png');
+      const axesInner = (svg && svg.innerHTML.trim()) ? svg.innerHTML : '';
+      const titleText = plot3Esc(withFrame((S.labs && S.labs.title) || 'plot3'));
+      let body = '<rect width="100%" height="100%" fill="' + T.surface + '"/>';
+      if (yearURL && yearBox) {
+        body += '<image x="' + num(yearBox.x) + '" y="' + num(yearBox.y)
+          + '" width="' + num(yearBox.w) + '" height="' + num(yearBox.h)
+          + '" href="' + yearURL + '"/>';
+      }
+      body += '<image x="' + num(hx) + '" y="' + num(hy)
+        + '" width="' + num(hostR.width) + '" height="' + num(hostR.height)
+        + '" href="' + glURL + '"/>';
+      if (axesInner) {
+        body += '<g font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="12">'
+          + axesInner + '</g>';
+      }
+      body += '<image x="0" y="0" width="' + W + '" height="' + H + '" href="' + chromeURL + '"/>';
+      return '<?xml version="1.0" encoding="UTF-8"?>'
+        + '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H
+        + '" viewBox="0 0 ' + W + ' ' + H + '"><title>' + titleText + '</title>'
+        + body + '</svg>';
+    }
+    return shot.canvas.toDataURL('image/png');
+  }
+  function dataURLToBlob(url) {
+    const comma = url.indexOf(',');
+    const head = url.slice(0, comma);
+    const body = url.slice(comma + 1);
+    const mimeEnd = head.indexOf(';');
+    const mime = head.slice(head.indexOf(':') + 1, mimeEnd < 0 ? head.length : mimeEnd)
+      || 'application/octet-stream';
+    const bin = atob(body);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  }
+  function downloadBlob(blob, name) {
+    const a = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+  function download(kind, btn) {
+    const prev = btn.textContent;
+    btn.disabled = true;
+    try {
+      const stem = fileStem();
+      if (kind === 'svg') {
+        const text = compose('svg');
+        downloadBlob(new Blob([text], { type: 'image/svg+xml;charset=utf-8' }), stem + '.svg');
+      } else {
+        downloadBlob(dataURLToBlob(compose('png')), stem + '.png');
+      }
+      window.__plot3.saveError = '';
+    } catch (err) {
+      window.__plot3.saveError = String(err && err.message ? err.message : err);
+      console.error(err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = prev;
+    }
+  }
+  pngBtn.addEventListener('click', () => download('png', pngBtn));
+  svgBtn.addEventListener('click', () => download('svg', svgBtn));
+  window.__plot3.snapshot = (kind) => compose(kind || 'png');
+}
+installSave();
 </script>
 </body></html>"""
 

@@ -392,7 +392,18 @@ class ggplot:
 
         return build_doc(self)
 
-    def save(self, path: str | Path) -> str:
+    def save(self, path: str | Path, *, width=None, height=None) -> str:
+        """Write this figure.
+
+        ``.png`` and ``.svg`` write a static image. Any other suffix writes
+        the standalone HTML viewer. ``width`` and ``height`` are pixel sizes
+        and apply to png and svg.
+        """
+        suffix = Path(path).suffix.lower()
+        if suffix in {".png", ".svg"}:
+            from plot3.static import save_static
+
+            return save_static(self, path, width=width, height=height)
         path = str(path)
         doc = self.html()
         with open(path, "w", encoding="utf-8") as f:
@@ -518,10 +529,16 @@ def autohide(on: bool = True) -> None:
     AUTOHIDE = bool(on)
 
 
-def ggsave(filename, plot: ggplot | None = None, **_kw) -> str:
-    """ggsave("fig.html", p) — ggplot2-style save (HTML only)."""
-    if isinstance(filename, ggplot) and isinstance(plot, str):
+def ggsave(filename, plot: ggplot | None = None, *, width=None, height=None, **_kw) -> str:
+    """Save ``plot``.
+
+    ``ggsave("fig.png", p)`` and ``ggsave("fig.svg", p)`` write a static
+    image. Any other suffix, including ``.html``, writes the standalone
+    viewer. ``width`` and ``height`` are pixels for png and svg. The plot
+    and the filename can be passed in either order.
+    """
+    if isinstance(filename, ggplot) and plot is not None and not isinstance(plot, ggplot):
         filename, plot = plot, filename  # tolerate swapped args
-    if plot is None:
+    if not isinstance(plot, ggplot):
         raise ValueError("ggsave(filename, plot) needs the plot")
-    return plot.save(filename)
+    return plot.save(filename, width=width, height=height)
