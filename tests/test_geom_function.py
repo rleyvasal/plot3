@@ -118,7 +118,8 @@ def test_surface_and_sideways_parabola():
     assert list(ys) == pytest.approx([-2, -1, 0, 1, 2])
 
 
-def test_implicit_circle_and_rearranged_line():
+def test_implicit_circle_and_rearranged_line(contour_backend):
+    del contour_backend
     circle = _layer("x^2 + y^2 = 1", xlim=(-1.2, 1.2), ylim=(-1.2, 1.2), n=48)
     pts = circle.data_override
     radius = np.sqrt(pts["x"] ** 2 + pts["y"] ** 2)
@@ -142,7 +143,8 @@ def _equal_spans(width, height, x_span, y_span, ratio=1.0, pad=0.03):
     return nx, ny
 
 
-def test_coord_equal_locks_units_and_implicit_figures_use_it():
+def test_coord_equal_locks_units_and_implicit_figures_use_it(contour_backend):
+    del contour_backend
     circle, _ = build_spec(ggplot() + geom_function("x^2 + y^2 = 1"))
     assert circle["coord"] == {"aspect": "equal", "ratio": 1.0}
     # Wide panel, equal data spans: x shows more range so the circle stays round.
@@ -180,9 +182,10 @@ def test_coord_equal_locks_units_and_implicit_figures_use_it():
         )
 
 
-def test_default_circle_is_a_smooth_loop():
-    # No limits: the sample window starts at (-10, 10) and must tighten,
-    # otherwise the unit circle is a few dozen straight chords.
+def test_default_circle_is_a_smooth_loop(contour_backend):
+    del contour_backend
+    # No limits: the sample window is (-10, 10). Cells the circle crosses
+    # are subdivided, otherwise it would be a few dozen straight chords.
     circle = _layer("x^2 + y^2 = 1")
     pts = circle.data_override
     x = pts["x"].to_numpy()
@@ -200,6 +203,31 @@ def test_default_circle_is_a_smooth_loop():
     line = _layer("y = 2x + 2y")
     pts = line.data_override
     assert np.median(np.abs(pts["y"] + 2 * pts["x"])) < 0.05
+
+
+def test_small_loop_next_to_a_long_line_stays_smooth(contour_backend):
+    del contour_backend
+    # The line spans the whole window, so the circle cannot be isolated by
+    # shrinking the sample domain. Refining the cells the curve crosses is
+    # what keeps the loop smooth.
+    out = _layer("(x^2 + y^2 - 1) * (y - x) = 0")
+    x = out.data_override["x"].to_numpy()
+    y = out.data_override["y"].to_numpy()
+    assert float(x.min()) < -8.0
+    assert float(x.max()) > 8.0
+    steps = []
+    for start, count in out._groups:
+        seg_x = x[start : start + count]
+        seg_y = y[start : start + count]
+        radius = np.hypot(seg_x, seg_y)
+        on_circle = np.abs(radius - 1.0) < 0.02
+        angle = np.unwrap(np.arctan2(seg_y, seg_x))
+        for index in range(count - 1):
+            if on_circle[index] and on_circle[index + 1]:
+                steps.append(abs(float(angle[index + 1] - angle[index])))
+    steps = np.asarray(steps)
+    assert len(steps) > 80
+    assert float(steps.max()) < np.radians(4.0)
 
 
 def test_keyword_formula_uses_that_name_as_the_output():

@@ -68,6 +68,19 @@ def grid() -> pd.DataFrame:
     )
 
 
+@pytest.fixture(params=["numpy", "contourpy"])
+def contour_backend(request, monkeypatch):
+    """Run an implicit-curve test once on each contour backend."""
+    if request.param == "contourpy":
+        pytest.importorskip("contourpy")
+    monkeypatch.setenv("PLOT3_CONTOUR_BACKEND", request.param)
+    from plot3.contour import _reset_contour_backend
+
+    _reset_contour_backend()
+    yield request.param
+    _reset_contour_backend()
+
+
 @pytest.fixture
 def box_frame() -> pd.DataFrame:
     rng = np.random.default_rng(1)

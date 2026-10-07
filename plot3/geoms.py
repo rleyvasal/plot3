@@ -318,9 +318,9 @@ class geom_function(_Geom):
     the domain and ``ylim`` clips the view. On a surface, ``xlim`` and
     ``ylim`` are the domain and ``zlim`` clips the view. ``n`` is the sample
     count (default 501 on a curve, 80 per axis on a surface or implicit curve).
-    An implicit curve that covers only part of that window is resampled
-    around the contour so the line stays smooth. A figure made only of
-    implicit equations uses equal axis units, so a circle stays round.
+    An implicit curve then subdivides the cells it crosses, so the line stays
+    smooth. A figure made only of implicit equations uses equal axis units,
+    so a circle stays round.
     """
 
     kind = "function"

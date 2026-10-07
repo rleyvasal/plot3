@@ -21,6 +21,9 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,jupyter]"
 ```
 
+`pip install plot3[fast]` adds a faster implicit-curve contour. Matplotlib
+already installs that extra (`contourpy`).
+
 In VS Code: **Python: Select Interpreter** → this `.venv`. No CRAFT required.
 
 ## SolveIt / CRAFT
@@ -266,11 +269,13 @@ as `t` and y as `v`). A coefficient such as `a` must be passed at the end
 (`a=2`).
 
 `xlim` / `ylim` / `zlim` set the domain or clip the view. A curve uses `n=501`
-samples; a surface or implicit curve uses `n=80` per axis. An implicit curve
-that covers only part of the window is resampled around the contour, so
-`x^2 + y^2 = 1` draws a smooth circle on the default domain. A figure made
-only of implicit equations also uses `coord_equal()`, so that circle is round
-in a wide panel. Add `coord_equal()` to any other 2D plot for the same lock.
+samples. A surface uses `n=80` per axis. An implicit curve uses that same
+`n=80` grid, then subdivides only the cells the contour crosses, so
+`x^2 + y^2 = 1` draws a smooth circle on the default domain.
+`pip install plot3[fast]` uses contourpy for a faster contour on large grids;
+matplotlib users already have it. A figure made only of implicit equations
+also uses `coord_equal()`, so that circle is round in a wide panel. Add
+`coord_equal()` to any other 2D plot for the same lock.
 
 ## Package layout
 
@@ -282,6 +287,7 @@ plot3/
   build.py         # stats expand + layer/spec encoding
   expr.py          # formula parser for geom_function
   function.py      # sample formulas into lines and surfaces
+  contour.py       # implicit-curve contours (NumPy, optional contourpy)
   viewer.py        # three.js HTML template
   encode.py        # quantize / gzip payloads
   scales.py        # positional scales & ticks
