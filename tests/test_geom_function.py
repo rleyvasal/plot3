@@ -95,16 +95,109 @@ def test_log_domain_starts_where_defined():
 
 
 def test_clipping_breaks_the_line():
-    with pytest.warns(UserWarning, match="clipped"):
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
         out = _layer("y = tan(x)", xlim=(-3, 3), n=401)
     assert len(out._groups) > 1
     assert float(np.max(np.abs(out.data_override["y"]))) < 500
+    assert out._notes[0].startswith("y clipped to [")
+    assert "pass ylim= to change" in out._notes[0]
 
     spec, _ = build_spec(
+        ggplot() + geom_function("y = tan(x)", xlim=(-3, 3), n=201)
+    )
+    assert spec["notes"][0].startswith("y clipped to [")
+    assert "ylim=" in spec["notes"][0]
+
+    locked, _ = build_spec(
         ggplot() + geom_function("y = tan(x)", xlim=(-3, 3), ylim=(-10, 10), n=201)
     )
-    assert spec["scales"]["y"]["lo"] == pytest.approx(-10)
-    assert spec["scales"]["y"]["hi"] == pytest.approx(10)
+    assert locked["scales"]["y"]["lo"] == pytest.approx(-10)
+    assert locked["scales"]["y"]["hi"] == pytest.approx(10)
+    assert locked["notes"] == []
+
+
+def test_clip_note_is_in_the_figure_not_on_stderr(capsys):
+    html = (ggplot() + geom_function("y = 1/x", n=40)).html()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert "y clipped to [" in html
+    assert "pass ylim= to change" in html
+    assert 'id="note"' in html
+
+
+def test_status_line_is_opt_in_and_save_still_prints(capsys, monkeypatch, tmp_path):
+    fig = ggplot() + geom_function("y = x", xlim=(0, 1), n=4)
+    monkeypatch.delenv("PLOT3_VERBOSE", raising=False)
+    fig.save(tmp_path / "fig.html")
+    saved = capsys.readouterr().out
+    assert "saved" in saved
+    assert "layer(s)" not in saved
+
+    monkeypatch.setenv("PLOT3_VERBOSE", "1")
+    fig.html()
+    logged = capsys.readouterr().out
+    assert logged.count("layer(s)") == 1
+
+
+def test_show_builds_once_and_hints_once(monkeypatch, tmp_path):
+    import importlib
+    import sys
+    import types
+
+    gg = importlib.import_module("plot3.ggplot")
+
+    gg._BLANK_HINT_SHOWN = False
+    fig = ggplot() + geom_function("y = x", xlim=(0, 1), n=4)
+    calls = {"n": 0}
+    real_html = fig.html
+
+    def counting():
+        calls["n"] += 1
+        return real_html()
+
+    monkeypatch.setattr(fig, "html", counting)
+    shown: list[str] = []
+
+    class HTML:
+        def __init__(self, data):
+            self.data = data
+
+    def display(obj):
+        shown.append(obj.data)
+
+    html_mod = types.ModuleType("IPython.display")
+    html_mod.HTML = HTML
+    html_mod.display = display
+    monkeypatch.setitem(sys.modules, "IPython", types.ModuleType("IPython"))
+    monkeypatch.setitem(sys.modules, "IPython.display", html_mod)
+    monkeypatch.setattr(gg, "_in_solveit", lambda: False)
+    monkeypatch.setattr(gg.webbrowser, "open", lambda *_a, **_k: None)
+    monkeypatch.delenv("PLOT3_DISPLAY", raising=False)
+
+    fig.show(browser=False, path=tmp_path / "a.html")
+    assert calls["n"] == 1
+    assert shown[0].startswith('<div class="plot3-fig"><iframe')
+    assert sum("blank" in item for item in shown) == 1
+
+    shown.clear()
+    fig.show(browser=False, path=tmp_path / "b.html")
+    assert calls["n"] == 2
+    assert len(shown) == 1
+    assert "blank" not in shown[0]
+
+    gg._BLANK_HINT_SHOWN = False
+    monkeypatch.setenv("PLOT3_DISPLAY", "iframe")
+    shown.clear()
+    fig.show(browser=False, path=tmp_path / "c.html")
+    assert calls["n"] == 3
+    assert len(shown) == 1
+    assert shown[0].startswith('<div class="plot3-fig"><iframe')
+    assert "blank" not in shown[0]
+    gg._BLANK_HINT_SHOWN = False
 
 
 def test_surface_and_sideways_parabola():

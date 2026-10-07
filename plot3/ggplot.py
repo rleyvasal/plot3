@@ -98,13 +98,24 @@ def _in_vscode_notebook() -> bool:
     return False
 
 
+def _display_mode() -> str:
+    return (os.environ.get("PLOT3_DISPLAY") or "").strip().lower()
+
+
+def _skip_blank_hint() -> bool:
+    """No fallback hint in SolveIt, or when the user already chose an iframe."""
+    if _in_solveit():
+        return True
+    return _display_mode() in ("iframe", "inline", "notebook")
+
+
 def _prefer_external_browser() -> bool:
     """VS Code notebook webviews block CDN ES modules inside iframes.
 
     SolveIt / full browsers render the srcdoc iframe fine. Force either mode
     with PLOT3_DISPLAY=browser|iframe.
     """
-    mode = (os.environ.get("PLOT3_DISPLAY") or "").strip().lower()
+    mode = _display_mode()
     if mode in ("browser", "external", "file"):
         return True
     if mode in ("iframe", "inline", "notebook"):
@@ -362,7 +373,9 @@ class ggplot:
         print(f"plot3: saved {path} ({len(doc) // 1024} KB)")
         return path
 
-    def _write_preview(self, path: str | Path | None = None) -> Path:
+    def _write_preview(
+        self, path: str | Path | None = None, doc: str | None = None
+    ) -> Path:
         if path is None:
             out_dir = Path.cwd() / ".plot3_preview"
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -370,7 +383,9 @@ class ggplot:
         else:
             path = Path(path)
             path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self.html(), encoding="utf-8")
+        if doc is None:
+            doc = self.html()
+        path.write_text(doc, encoding="utf-8")
         return path.resolve()
 
     def show(self, *, browser: bool | None = None, path: str | Path | None = None):
@@ -388,9 +403,10 @@ class ggplot:
         """
         if browser is None:
             browser = _prefer_external_browser()
+        doc = self.html()
 
         if browser:
-            out = self._write_preview(path)
+            out = self._write_preview(path, doc)
             uri = out.as_uri()
             open_browser = _env_flag("PLOT3_NO_BROWSER") is not True
             try:
@@ -415,28 +431,34 @@ class ggplot:
         try:
             from IPython.display import HTML, display
 
-            display(HTML(self._iframe()))
+            display(HTML(self._iframe(doc)))
             # Restricted hosts (VS Code) often show a blank panel: keep a file
-            # fallback so the figure is never "lost" when auto-detect misses.
-            if not _in_solveit():
-                out = self._write_preview(path)
-                display(
-                    HTML(
-                        "<div style='font:12px system-ui,sans-serif;margin-top:6px;"
-                        "color:#94a3b8'>If the panel above is blank, run "
-                        "<code style='color:#93c5fd'>fig.show(browser=True)</code> "
-                        f"or open <code style='color:#93c5fd'>{out}</code></div>"
+            # fallback so the figure is never lost when auto-detect misses.
+            # The hint itself is once per session, and skipped when the user
+            # already asked for an iframe.
+            if not _skip_blank_hint():
+                out = self._write_preview(path, doc)
+                global _BLANK_HINT_SHOWN
+                if not _BLANK_HINT_SHOWN:
+                    _BLANK_HINT_SHOWN = True
+                    display(
+                        HTML(
+                            "<div style='font:12px system-ui,sans-serif;margin-top:6px;"
+                            "color:#94a3b8'>If the panel above is blank, run "
+                            "<code style='color:#93c5fd'>fig.show(browser=True)</code> "
+                            f"or open <code style='color:#93c5fd'>{out}</code></div>"
+                        )
                     )
-                )
                 return out
         except Exception:
-            out = self._write_preview(path)
+            out = self._write_preview(path, doc)
             webbrowser.open(out.as_uri())
             return out
         return None
 
-    def _iframe(self) -> str:
-        doc = self.html()
+    def _iframe(self, doc: str | None = None) -> str:
+        if doc is None:
+            doc = self.html()
         if self._payload is not None:
             spec = self._payload.get("spec") or {}
             title = (spec.get("labs") or {}).get("title") or "plot3 figure"
@@ -447,17 +469,20 @@ class ggplot:
             title = self.labs.get("title", "plot3 figure")
             surface = _THEMES[self.theme_name]["surface"]
         # sandbox must allow scripts or the three.js viewer never starts.
+        # A wrapping div keeps the string from starting with ``<iframe``,
+        # which is what makes IPython suggest display.IFrame.
         return (
-            f'<iframe srcdoc="{_htmlesc.escape(doc, quote=True)}" '
+            f'<div class="plot3-fig"><iframe srcdoc="{_htmlesc.escape(doc, quote=True)}" '
             f'sandbox="allow-scripts allow-same-origin allow-pointer-lock" '
             f'allow="fullscreen" '
             f'style="width:100%;height:{self.height};border:0;'
             f'border-radius:6px;background:{surface}" '
-            f'title="{_htmlesc.escape(str(title))}"></iframe>'
+            f'title="{_htmlesc.escape(str(title))}"></iframe></div>'
         )
 
 
 AUTOHIDE = True
+_BLANK_HINT_SHOWN = False
 
 
 def autohide(on: bool = True) -> None:

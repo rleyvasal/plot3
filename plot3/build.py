@@ -1307,6 +1307,12 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
 
     base_map = dict(g.mapping)
     coord_spec = _coord_spec(coord, is3d, resolved)
+    notes: list[str] = []
+    for geom, _mapped in resolved:
+        for note in getattr(geom, "_notes", None) or ():
+            text = str(note)
+            if text and text not in notes:
+                notes.append(text)
 
     spec = {
         "v": 1,
@@ -1325,6 +1331,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         "layers": layer_specs,
         "gz": 1 if g.compress else 0,
         "coord": coord_spec,
+        "notes": notes,
     }
     return spec, payloads
 

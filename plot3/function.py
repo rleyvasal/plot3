@@ -7,7 +7,6 @@ with ``data_override`` already filled — the same path bar and density stats us
 
 from __future__ import annotations
 
-import warnings
 from typing import Any
 
 import numpy as np
@@ -208,7 +207,9 @@ def _expand_curve(geom: _Geom, formula: Formula, axes: _Axes, domains: dict) -> 
     values = _curve_values(formula, axes, samples)
     view_axis = "x" if axes.computed == "x" else "y"
     view_lim = _limit_pair(getattr(geom, view_axis + "lim", None), view_axis + "lim")
-    kept_s, kept_v, lock, index = _clip_series(samples, values, view_lim, view_axis)
+    kept_s, kept_v, lock, index, note = _clip_series(
+        samples, values, view_lim, view_axis
+    )
     if axes.computed == "x":
         xs, ys = kept_v, kept_s
     else:
@@ -234,6 +235,8 @@ def _expand_curve(geom: _Geom, formula: Formula, axes: _Axes, domains: dict) -> 
     out._axis_labels = {"x": axes.x, "y": axes.y}
     if lock is not None:
         out._axis_lock = {view_axis: lock}
+    if note:
+        out._notes = [note]
     return out
 
 
@@ -279,10 +282,11 @@ def _clip_series(
     values: np.ndarray,
     view_lim: tuple[float, float] | None,
     view_axis: str,
-) -> tuple[np.ndarray, np.ndarray, tuple[float, float] | None, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, tuple[float, float] | None, np.ndarray, str | None]:
     finite = np.isfinite(samples) & np.isfinite(values)
     if not np.any(finite):
         raise ExprError("geom_function() is undefined everywhere on this domain")
+    note: str | None = None
     if view_lim is not None:
         lo, hi = view_lim
         keep = finite & (values >= lo) & (values <= hi)
@@ -291,12 +295,7 @@ def _clip_series(
         lo, hi, blew_up = _robust_window(values[finite])
         if blew_up:
             keep = finite & (values >= lo) & (values <= hi)
-            warnings.warn(
-                "geom_function clipped extreme values to a robust window; "
-                f"pass {view_axis}lim= to choose the range",
-                UserWarning,
-                stacklevel=4,
-            )
+            note = _clip_note(view_axis, lo, hi)
         else:
             keep = finite
         lock = None
@@ -308,7 +307,7 @@ def _clip_series(
             else "geom_function() is undefined everywhere on this domain"
         )
     index = np.flatnonzero(keep)
-    return samples[index], values[index], lock, index
+    return samples[index], values[index], lock, index, note
 
 
 def _groups_from_index(index: np.ndarray) -> list[list[int]]:
@@ -323,6 +322,11 @@ def _groups_from_index(index: np.ndarray) -> list[list[int]]:
             start = position
     groups.append([start, int(index.size) - start])
     return groups
+
+
+def _clip_note(axis: str, lo: float, hi: float) -> str:
+    """Caption for a pole that was clipped to the bulk of the samples."""
+    return f"{axis} clipped to [{lo:.6g}, {hi:.6g}]; pass {axis}lim= to change"
 
 
 def _robust_window(values: np.ndarray) -> tuple[float, float, bool]:
@@ -359,7 +363,7 @@ def _expand_surface(
         y_source == "default" and _limit_pair(geom.ylim, "ylim") is None,
         count,
     )
-    zz, lock = _clip_grid(zz, _limit_pair(geom.zlim, "zlim"))
+    zz, lock, note = _clip_grid(zz, _limit_pair(geom.zlim, "zlim"))
     xx, yy = np.meshgrid(xs, ys)
     frame = pd.DataFrame(
         {
@@ -388,6 +392,8 @@ def _expand_surface(
     out._function_surface = True
     if lock is not None:
         out._axis_lock = {"z": lock}
+    if note:
+        out._notes = [note]
     return out
 
 
@@ -428,27 +434,21 @@ def _narrow_surface(
 
 def _clip_grid(
     zz: np.ndarray, zlim: tuple[float, float] | None
-) -> tuple[np.ndarray, tuple[float, float] | None]:
+) -> tuple[np.ndarray, tuple[float, float] | None, str | None]:
     finite = zz[np.isfinite(zz)]
     if finite.size == 0:
         raise ExprError("geom_function() is undefined everywhere on this domain")
     if zlim is not None:
         lo, hi = zlim
         clipped = np.clip(np.where(np.isfinite(zz), zz, lo), lo, hi)
-        return clipped, (lo, hi)
+        return clipped, (lo, hi), None
     lo, hi, blew_up = _robust_window(finite)
     if not blew_up:
         filled = np.where(np.isfinite(zz), zz, float(np.median(finite)))
-        return filled, None
-    warnings.warn(
-        "geom_function clipped extreme values to a robust window; "
-        "pass zlim= to choose the range",
-        UserWarning,
-        stacklevel=4,
-    )
+        return filled, None, None
     filled = np.where(np.isfinite(zz), zz, lo)
     filled = np.clip(filled, lo, hi)
-    return filled, (lo, hi)
+    return filled, (lo, hi), _clip_note("z", lo, hi)
 
 
 def _expand_implicit(

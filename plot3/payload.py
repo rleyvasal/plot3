@@ -26,6 +26,7 @@ grid of independent figure payloads (each panel is a normal figure payload).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -148,12 +149,15 @@ def render_payload(
     )
     if log:
         kb = len(doc) // 1024
-        rows = sum(int(sp.get("n", 0)) for sp in spec.get("layers", []))
-        n_layers = len(spec.get("layers", []))
-        print(
-            f"plot3: {n_layers} layer(s), {rows:,} rows -> {kb:,} KB "
-            f"portable HTML{' (3D)' if spec.get('is3d') else ''}"
-        )
+        # The size line is the one worth seeing unprompted. The row count is
+        # opt-in so a notebook cell is just the plot.
+        if os.environ.get("PLOT3_VERBOSE", "").strip() == "1":
+            rows = sum(int(sp.get("n", 0)) for sp in spec.get("layers", []))
+            n_layers = len(spec.get("layers", []))
+            print(
+                f"plot3: {n_layers} layer(s), {rows:,} rows -> {kb:,} KB "
+                f"portable HTML{' (3D)' if spec.get('is3d') else ''}"
+            )
         if kb > 1500:
             print(
                 "plot3: warning — figure may exceed sslive's ~1.8 MB in-slide cap"

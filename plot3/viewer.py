@@ -8,7 +8,9 @@ _DOC_TEMPLATE = """<!doctype html>
 <style>
 html,body{margin:0;height:100%;overflow:hidden;
   font:12px system-ui,-apple-system,"Segoe UI",sans-serif}
-#fig{position:relative;width:100vw;height:100vh}
+body{display:flex;flex-direction:column}
+#fig{position:relative;width:100%;flex:1;min-height:0}
+#note{display:none;flex:none;padding:2px 14px 8px;font-size:11px;line-height:1.4}
 #title{position:absolute;left:14px;top:8px;font-size:14px;font-weight:600;z-index:4}
 #canvas-host{position:absolute}
 #axes{position:absolute;inset:0;pointer-events:none;z-index:2}
@@ -33,6 +35,7 @@ html,body{margin:0;height:100%;overflow:hidden;
   <div id="tip"></div>
   <div id="hint"></div>
 </div>
+<div id="note"></div>
 __PAYLOADS__
 <script type="module">
 import * as THREE from 'three';
@@ -45,6 +48,12 @@ const S = __SPEC__;
 const T = S.theme;
 document.body.style.background = T.surface;
 document.body.style.color = T.ink;
+const noteEl = document.getElementById('note');
+if (S.notes && S.notes.length) {
+  noteEl.style.display = 'block';
+  noteEl.style.color = T.muted;
+  noteEl.textContent = S.notes.join('   ');
+}
 
 async function decode(id, dtype) {
   const node = document.getElementById(id);
