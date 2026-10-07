@@ -30,7 +30,9 @@ from __future__ import annotations
 
 import ast
 import builtins
+import io
 import re
+import tokenize
 from typing import Any, Iterable
 
 # Sentinels (plot3 own + tidy3 compatibility).
@@ -97,19 +99,64 @@ _PASSTHROUGH_KW = frozenset(
 _BT_RE = re.compile(r"`([^`\n]+)`")
 
 
+def rewrite_formula_carets(source: str) -> str:
+    """Inside ``geom_function(...)``, turn ``^`` into ``**`` before Python parses.
+
+    ``2*x^3`` and ``(2*x)^3`` are the same tree once Python has parsed ``^``
+    as xor, so the rewrite has to happen on the text.
+    """
+    if "^" not in source or "geom_function" not in source:
+        return source
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (tokenize.TokenError, SyntaxError):
+        return source
+    starts = [0]
+    for line in source.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+    hits: list[int] = []
+    depth = 0  # paren depth inside the current geom_function call
+    armed = False  # just saw the name geom_function
+    for tok in tokens:
+        if depth == 0:
+            if tok.type == tokenize.NAME and tok.string == "geom_function":
+                armed = True
+                continue
+            if armed and tok.type == tokenize.OP and tok.string == "(":
+                depth = 1
+            armed = False
+            continue
+        if tok.type == tokenize.OP:
+            if tok.string in "([{":
+                depth += 1
+            elif tok.string in ")]}":
+                depth -= 1
+            elif tok.string == "^":
+                row, col = tok.start
+                hits.append(starts[row - 1] + col)
+    for pos in reversed(hits):
+        source = source[:pos] + "**" + source[pos + 1 :]
+    return source
+
+
 def rewrite_backticks(source: str) -> str:
-    """Preparse backticks: `` `col name` `` → ``__plot3_bt__("col name")``."""
+    """Preparse backticks, and ``^`` inside ``geom_function``, before parsing.
+
+    `` `col name` `` → ``__plot3_bt__("col name")``. ``^`` → ``**`` only
+    inside a ``geom_function(...)`` call, where it means power.
+    """
+    source = rewrite_formula_carets(source)
     if "`" not in source:
         return source
     return _BT_RE.sub(lambda m: f"{BT_NAME}({m.group(1)!r})", source)
 
 
 def plot3_backtick_transform(lines: list[str]) -> list[str]:
-    """IPython input transformer: backtick preparser."""
+    """IPython input transformer: backticks, and ``^`` inside geom_function."""
     if not lines:
         return lines
     src = "".join(lines)
-    if "`" not in src:
+    if "`" not in src and "^" not in src:
         return lines
     out = rewrite_backticks(src)
     if out == src:
@@ -247,7 +294,7 @@ class Plot3MaskTransformer(ast.NodeTransformer):
         """Stringify the formula argument only (``y=``, ``z=``, ``f=``, or first).
 
         ``a=``, ``xlim=``, ``n=`` and other keywords stay Python so they
-        evaluate normally. ``^`` inside the formula is read as power.
+        evaluate normally. ``^`` is already ``**`` if the text hook ran.
         """
         known = self._known()
         formula_done = False
@@ -278,16 +325,6 @@ class Plot3MaskTransformer(ast.NodeTransformer):
         return node
 
 
-class _BitXorToPow(ast.NodeTransformer):
-    """Notebook ``x^2`` is bitwise xor; formulas read it as power."""
-
-    def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
-        self.generic_visit(node)
-        if isinstance(node.op, ast.BitXor):
-            node.op = ast.Pow()
-        return node
-
-
 def _is_formula_expr(node: ast.AST, known: set[str]) -> bool:
     """True when this argument is a formula to quote, not a Python value."""
     if isinstance(node, ast.Lambda):
@@ -304,8 +341,11 @@ def _is_formula_expr(node: ast.AST, known: set[str]) -> bool:
 
 
 def _formula_string(node: ast.AST) -> ast.Constant:
-    rewritten = _BitXorToPow().visit(node)
-    text = ast.unparse(rewritten)
+    # ``^`` left in the tree is xor, and ``2*x^3`` is already ``(2*x)^3``.
+    # Do not guess. The text hook should have rewritten it.
+    if any(isinstance(child, ast.BitXor) for child in ast.walk(node)):
+        raise ValueError('use ** or quote the formula: "y = x^2"')
+    text = ast.unparse(node)
     return ast.copy_location(ast.Constant(value=text), node)
 
 
@@ -316,7 +356,9 @@ def apply_masking(
     backticks: bool = True,
 ) -> str:
     """Apply backtick rewrite + AST masking; return unparsed source (tests)."""
-    text = rewrite_backticks(source) if backticks else source
+    text = rewrite_formula_carets(source)
+    if backticks:
+        text = rewrite_backticks(text)
     tree = ast.parse(text)
     tree = Plot3MaskTransformer(known=known or default_known_names()).visit(tree)
     ast.fix_missing_locations(tree)

@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import ast
 import math
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from plot3 import aes, coord_equal, geom_function, geom_point, ggplot
+from plot3 import aes, coord_3d, coord_equal, geom_function, geom_point, ggplot
 from plot3.build import build_spec, expand_stat_geom
+from plot3.masking import (
+    Plot3MaskTransformer,
+    apply_masking,
+    default_known_names,
+    plot3_backtick_transform,
+)
 
 
 def _layer(expr, **kw):
@@ -228,6 +235,71 @@ def test_small_loop_next_to_a_long_line_stays_smooth(contour_backend):
     steps = np.asarray(steps)
     assert len(steps) > 80
     assert float(steps.max()) < np.radians(4.0)
+
+
+def test_notebook_caret_is_power_with_math_precedence():
+    # apply_masking quotes the formula. The caret is rewritten before parse,
+    # so 2*x^3 stays 2 * x**3 and (2*x)^3 stays a power of the product.
+    cases = {
+        "geom_function(y=2*x^3 + 3*x^3)": "2 * x ** 3 + 3 * x ** 3",
+        "geom_function(y=(2*x)^3)": "(2 * x) ** 3",
+        "geom_function(y=-x^2)": "-x ** 2",
+    }
+    for src, formula in cases.items():
+        out = apply_masking(src, known=default_known_names())
+        assert formula in out
+        assert "^" not in out
+
+    limited = apply_masking(
+        "geom_function(z=sin(x)^2 + cos(y)^2, xlim=(0, 3))",
+        known=default_known_names(),
+    )
+    assert "sin(x) ** 2 + cos(y) ** 2" in limited
+    assert "xlim=(0, 3)" in limited
+    assert "^" not in limited
+
+    quoted = apply_masking("geom_function('y = x^2')", known=default_known_names())
+    assert "x^2" in quoted
+    assert "**" not in quoted
+
+    outside = apply_masking(
+        "flags = a ^ b\ngeom_function(y = x^2)",
+        known=default_known_names(),
+    )
+    assert "a ^ b" in outside
+    assert "x ** 2" in outside
+
+    # The notebook hook used to return early when the cell had no backtick.
+    lines = plot3_backtick_transform(["geom_function(y=2*x^3)\n"])
+    assert "2*x**3" in "".join(lines)
+
+
+def test_unrewritten_caret_is_not_guessed():
+    tree = ast.parse("geom_function(y=2*x^3)")
+    with pytest.raises(ValueError, match="quote the formula"):
+        Plot3MaskTransformer(known=default_known_names()).visit(tree)
+
+
+def test_function_surface_defaults_to_a_cube():
+    spec, _ = build_spec(
+        ggplot()
+        + geom_function("t = 2x^3 + 3y^3", xlim=(0, 1), ylim=(0, 1), n=4)
+    )
+    assert spec["is3d"] is True
+    assert spec["coord"]["aspect"] == "equal"
+
+    cloud = pd.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0], "z": [0.0, 2.0]})
+    data_spec, _ = build_spec(
+        ggplot(cloud, aes(x="x", y="y", z="z")) + geom_point()
+    )
+    assert data_spec["coord"]["aspect"] == "data"
+
+    forced, _ = build_spec(
+        ggplot()
+        + geom_function("z = x + y", xlim=(0, 1), ylim=(0, 1), n=3)
+        + coord_3d(aspect="data")
+    )
+    assert forced["coord"]["aspect"] == "data"
 
 
 def test_keyword_formula_uses_that_name_as_the_output():

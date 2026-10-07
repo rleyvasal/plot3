@@ -709,8 +709,10 @@ def _axis_label(g, base_map: dict, resolved, axis: str, is3d: bool) -> str:
 def _coord_spec(coord, is3d: bool, resolved) -> dict | None:
     """Coordinate spec for the viewer.
 
-    3D keeps ``coord_3d``. 2D uses ``coord_equal`` when asked, and also when
-    every layer is an implicit equation, so a circle is round in a wide panel.
+    3D keeps ``coord_3d``. A formula surface with no coord uses equal aspect
+    (a cube); data such as lidar stays proportional. 2D uses ``coord_equal``
+    when asked, and also when every layer is an implicit equation, so a
+    circle is round in a wide panel.
     """
     if is3d:
         if isinstance(coord, coord_equal):
@@ -719,6 +721,10 @@ def _coord_spec(coord, is3d: bool, resolved) -> dict | None:
             )
         if coord is not None:
             return coord.to_spec()
+        # A formula's axes are different quantities (t vs x); true proportions
+        # can squash the surface to a sliver. Data stays proportional (lidar).
+        if any(getattr(geom, "_function_surface", False) for geom, _ in resolved):
+            return {"aspect": "equal", "sizeMode": "scene", "maxPoints": None}
         return {"aspect": "data", "sizeMode": "scene", "maxPoints": None}
     if isinstance(coord, coord_3d):
         raise ValueError(

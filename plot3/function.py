@@ -385,6 +385,7 @@ def _expand_surface(
     out._replace_mapping = True
     out._legend_label = formula.label
     out._axis_labels = {"x": axes.x, "y": axes.y, "z": axes.z or "z"}
+    out._function_surface = True
     if lock is not None:
         out._axis_lock = {"z": lock}
     return out

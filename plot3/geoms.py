@@ -320,7 +320,8 @@ class geom_function(_Geom):
     count (default 501 on a curve, 80 per axis on a surface or implicit curve).
     An implicit curve then subdivides the cells it crosses, so the line stays
     smooth. A figure made only of implicit equations uses equal axis units,
-    so a circle stays round.
+    so a circle stays round. A formula surface uses equal aspect (a cube)
+    unless you pass ``coord_3d``.
     """
 
     kind = "function"
