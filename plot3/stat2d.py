@@ -290,8 +290,11 @@ def _range_frame(geom: _Geom, mapping: dict, data: Any, need_y: bool):
         raise ValueError(f"{name}() requires aes({wanted})")
     colour = mapping.get("color")
     colour = colour if colour and has_column(data, colour) else None
-    frame = _frame(data, [xcol, lo, hi, ycol if need_y else None, colour])
-    return frame, xcol, lo, hi, ycol, colour
+    # Dodge by the colour group, or by a fill the layer is not coloured by.
+    dodge = colour or mapping.get("__fillgroup") or mapping.get("group")
+    dodge = dodge if dodge and has_column(data, dodge) else None
+    frame = _frame(data, [xcol, lo, hi, ycol if need_y else None, colour, dodge])
+    return frame, xcol, lo, hi, ycol, colour, dodge
 
 
 def _dodged_x(geom: _Geom, axis: _Axis, groups: np.ndarray, n_groups: int) -> np.ndarray:
@@ -305,9 +308,11 @@ def _dodged_x(geom: _Geom, axis: _Axis, groups: np.ndarray, n_groups: int) -> np
 def ranges(geom: _Geom, mapping: dict, data: Any):
     """geom_errorbar, geom_linerange, geom_pointrange."""
     kind = geom.kind
-    frame, xcol, lo, hi, ycol, colour = _range_frame(geom, mapping, data, kind == "pointrange")
+    frame, xcol, lo, hi, ycol, colour, dodge = _range_frame(
+        geom, mapping, data, kind == "pointrange"
+    )
     axis = _axis(frame[xcol])
-    groups, levels = _colour_groups(frame, colour)
+    groups, levels = _colour_groups(frame, dodge)
     xs = _dodged_x(geom, axis, groups, len(levels))
     y_lo = frame[lo].to_numpy(np.float64)
     y_hi = frame[hi].to_numpy(np.float64)
@@ -342,7 +347,10 @@ def ranges(geom: _Geom, mapping: dict, data: Any):
         line_frame[colour] = rows_c
         line_map["colour"] = colour
     linewidth = float(getattr(geom, "linewidth", 1.0) or 1.0)
-    line = _layer("line", line_frame, line_map, geom, _groups=starts, linewidth=linewidth)
+    line = _layer(
+        "line", line_frame, line_map, geom, _groups=starts, linewidth=linewidth,
+        _ink_default=not colour,
+    )
     inherited = (getattr(geom, "_axis_labels", None) or {}).get("y")
     _title(line, "y", inherited or ycol or lo)
     _levels_hook(line, axis)
@@ -353,7 +361,7 @@ def ranges(geom: _Geom, mapping: dict, data: Any):
     if colour:
         dot_frame[colour] = frame[colour].to_numpy()
         dot_map["colour"] = colour
-    dot = _layer("point", dot_frame, dot_map, geom)
+    dot = _layer("point", dot_frame, dot_map, geom, _ink_default=not colour)
     dot.size = getattr(geom, "size", None) or 7.0
     dot.alpha = geom.alpha if geom.alpha is not None else 1.0
     _title(dot, "y", inherited or ycol)
@@ -617,8 +625,15 @@ def summary(geom: _Geom, mapping: dict, data: Any):
     fun_args = dict(getattr(geom, "fun_args", None) or {})
     colour = mapping.get("color")
     colour = colour if colour and colour not in {xcol, ycol} and has_column(data, colour) else None
-    frame = _frame(data, [xcol, ycol, colour])
-    keys = [xcol] + ([colour] if colour else [])
+    fill_group = mapping.get("__fillgroup")
+    fill_group = (
+        fill_group
+        if not colour and fill_group and fill_group not in {xcol, ycol} and has_column(data, fill_group)
+        else None
+    )
+    split = colour or fill_group
+    frame = _frame(data, [xcol, ycol, split])
+    keys = [xcol] + ([split] if split else [])
     rows = []
     for key, piece in frame.groupby(keys, sort=False, dropna=False, observed=True):
         values = piece[ycol].to_numpy(np.float64)
@@ -628,8 +643,8 @@ def summary(geom: _Geom, mapping: dict, data: Any):
         y, lo, hi = fn(values, **fun_args)
         key = key if isinstance(key, tuple) else (key,)
         row = {xcol: key[0], "__y": y, "__ymin": lo, "__ymax": hi}
-        if colour:
-            row[colour] = key[1]
+        if split:
+            row[split] = key[1]
         rows.append(row)
     stats = pd.DataFrame(rows)
     if stats.empty:
@@ -638,6 +653,8 @@ def summary(geom: _Geom, mapping: dict, data: Any):
     stat_map = {"x": xcol, "y": "__y", "ymin": "__ymin", "ymax": "__ymax"}
     if colour:
         stat_map["color"] = colour
+    elif fill_group:
+        stat_map["__fillgroup"] = fill_group
     proxy = _Geom(color=geom.const_color, alpha=geom.alpha)
     proxy.position = getattr(geom, "position", None)
     proxy.width = getattr(geom, "width", 0.5)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pandas as pd
 
 from plot3.themes import _CONT_PALETTES, _THEMES
 
@@ -46,14 +47,18 @@ class aes(dict):
     """Aesthetic mapping: aes(x=, y=, z=, colour=/color=, fill=, size=, group=,
     ymin=, ymax=).
 
-    ``fill`` is accepted as an alias of ``colour`` when colour is omitted
-    (useful for surfaces).
+    ``fill`` colours the inside of filled shapes (bars, boxes, violins,
+    ribbons, densities, surfaces), as in ggplot2. Points, lines, and error
+    bars use ``colour`` and ignore ``fill``, so ``geom_col(aes(fill=g))``
+    with ``geom_errorbar()`` gives coloured bars and black error bars.
 
     ``size`` maps a numeric column onto point area (radius follows the square
     root), so a bubble chart reads population as area. A constant
     ``geom_point(size=)`` is still one size for the whole layer.
 
-    ``ymin`` and ``ymax`` are the ends of an error bar or ribbon.
+    ``ymin`` and ``ymax`` are the ends of an error bar or ribbon. ``label``
+    is the text of ``geom_text``. ``shape`` picks point symbols and
+    ``linetype`` dash patterns per group.
 
     ``group`` is the identity of an object. Lines use it to split series.
     ``transition_time`` uses it to match the same object across frames
@@ -84,21 +89,22 @@ class aes(dict):
         group=None,
         ymin=None,
         ymax=None,
+        label=None,
+        shape=None,
+        linetype=None,
     ):
         super().__init__()
-        colour_value = (
-            color
-            if color is not None
-            else colour
-            if colour is not None
-            else fill
-        )
+        colour_value = color if color is not None else colour
         for k, v in (("x", x), ("y", y), ("z", z),
                      ("color", colour_value),
+                     ("fill", fill),
                      ("size", size),
                      ("group", group),
                      ("ymin", ymin),
-                     ("ymax", ymax)):
+                     ("ymax", ymax),
+                     ("label", label),
+                     ("shape", shape),
+                     ("linetype", linetype)):
             if v is not None:
                 self[k] = _as_column_name(v)
 
@@ -129,9 +135,10 @@ class geom_point(_Geom):
 
     kind = "point"
 
-    def __init__(self, mapping=None, *, size=None, **kw):
+    def __init__(self, mapping=None, *, size=None, shape=None, **kw):
         super().__init__(mapping, **kw)
         self.size = size
+        self.shape = None if shape is None else shape_name(shape)
 
 
 class geom_point3d(geom_point):
@@ -320,9 +327,11 @@ class geom_path(_Geom):
     kind = "line"
     sort_x = False  # ggplot2 geom_path: connect in data order
 
-    def __init__(self, mapping=None, *, linewidth=None, width=None, **kw):
+    def __init__(self, mapping=None, *, linewidth=None, width=None, linetype=None, **kw):
         super().__init__(mapping, **kw)
         self.linewidth = linewidth if linewidth is not None else (width or 2.0)
+        dash_pattern(linetype)
+        self.linetype = linetype
 
 
 class geom_line(geom_path):
@@ -855,6 +864,218 @@ class stat_summary(_Geom):
         self.position = position
 
 
+# ggplot2's default shape palette, in order: what aes(shape=) assigns.
+SHAPE_ORDER = ["circle", "triangle", "square", "diamond", "plus", "cross"]
+_SHAPE_NUMBERS = {
+    0: "square", 1: "circle", 2: "triangle", 3: "plus", 4: "cross", 5: "diamond",
+    15: "square", 16: "circle", 17: "triangle", 18: "diamond", 19: "circle",
+    20: "circle", 21: "circle", 22: "square", 23: "diamond", 24: "triangle",
+}
+LINETYPE_ORDER = ["solid", "dashed", "dotted", "dotdash", "longdash", "twodash"]
+
+
+def shape_name(shape) -> str:
+    """``"triangle"`` or R's numbers (17 = filled triangle) to a shape name."""
+    if isinstance(shape, (int, float)) and not isinstance(shape, bool):
+        if int(shape) in _SHAPE_NUMBERS:
+            return _SHAPE_NUMBERS[int(shape)]
+    name = str(shape).strip().lower()
+    if name in SHAPE_ORDER:
+        return name
+    raise ValueError(f"shape {shape!r} is not one of {SHAPE_ORDER} or an R shape number")
+
+
+# ggplot2 line types as dash patterns, in multiples of the line width.
+LINETYPES = {
+    "solid": None,
+    "dashed": (4.0, 4.0),
+    "dotted": (1.0, 3.0),
+    "dotdash": (1.0, 3.0, 4.0, 3.0),
+    "longdash": (8.0, 4.0),
+    "twodash": (2.0, 2.0, 6.0, 2.0),
+}
+_LINETYPE_NUMBERS = ["blank", "solid", "dashed", "dotted", "dotdash", "longdash", "twodash"]
+
+
+def dash_pattern(linetype) -> tuple[float, ...] | None:
+    """``"dashed"`` -> (4, 4). Also R's numbers (2 = dashed) and hex strings ("44")."""
+    if linetype is None:
+        return None
+    if isinstance(linetype, (int, float)) and not isinstance(linetype, bool):
+        index = int(linetype)
+        if 0 <= index < len(_LINETYPE_NUMBERS):
+            linetype = _LINETYPE_NUMBERS[index]
+    name = str(linetype).strip().lower()
+    if name in LINETYPES:
+        return LINETYPES[name]
+    if name and len(name) % 2 == 0 and all(c in "0123456789abcdef" for c in name):
+        return tuple(float(int(c, 16)) for c in name)
+    raise ValueError(
+        f"linetype {linetype!r} is not one of {sorted(LINETYPES)} "
+        "or a hex pattern such as '44'"
+    )
+
+
+class geom_hline(_Geom):
+    """Horizontal reference line(s) across the panel: ``geom_hline(yintercept=0)``.
+
+    ``yintercept`` may be a list. ``linetype`` is ``"solid"``, ``"dashed"``,
+    ``"dotted"``, ``"dotdash"``, ``"longdash"``, or ``"twodash"``.
+    """
+
+    kind = "hline"
+
+    def __init__(self, mapping=None, *, yintercept, linetype="solid", linewidth=1.0, **kw):
+        super().__init__(mapping, **kw)
+        self.values = _as_list(yintercept, "yintercept")
+        self.linetype = linetype
+        dash_pattern(linetype)
+        self.linewidth = float(linewidth)
+
+
+class geom_vline(_Geom):
+    """Vertical reference line(s): ``geom_vline(xintercept=[1, 2], linetype="dashed")``."""
+
+    kind = "vline"
+
+    def __init__(self, mapping=None, *, xintercept, linetype="solid", linewidth=1.0, **kw):
+        super().__init__(mapping, **kw)
+        self.values = _as_list(xintercept, "xintercept")
+        self.linetype = linetype
+        dash_pattern(linetype)
+        self.linewidth = float(linewidth)
+
+
+class geom_abline(_Geom):
+    """The line ``y = intercept + slope * x`` across the panel (default ``y = x``)."""
+
+    kind = "abline"
+
+    def __init__(self, mapping=None, *, slope=1.0, intercept=0.0, linetype="solid", linewidth=1.0, **kw):
+        super().__init__(mapping, **kw)
+        self.slope = float(slope)
+        self.intercept = float(intercept)
+        self.linetype = linetype
+        dash_pattern(linetype)
+        self.linewidth = float(linewidth)
+
+
+def _as_list(value, name: str) -> list:
+    if value is None:
+        raise ValueError(f"{name}= is required")
+    if isinstance(value, (list, tuple, np.ndarray, pd.Series)):
+        return list(value)
+    return [value]
+
+
+class geom_text(_Geom):
+    """Text at each row: ``geom_text(aes(label=name))`` (ggplot2 ``geom_text``).
+
+    ``size`` is in millimetres like ggplot2 (default 3.88, about 11 pt).
+    ``hjust``/``vjust`` are 0 (left/bottom) to 1 (right/top). ``nudge_x`` and
+    ``nudge_y`` shift labels off their points. ``check_overlap=True`` skips a
+    label that would overlap one already drawn. ``fontface`` is ``"plain"``,
+    ``"bold"``, ``"italic"``, or ``"bold.italic"``.
+    """
+
+    kind = "text"
+    _box = False
+
+    def __init__(
+        self, mapping=None, *, size=3.88, hjust=0.5, vjust=0.5, nudge_x=0.0,
+        nudge_y=0.0, check_overlap=False, fontface="plain", **kw,
+    ):
+        super().__init__(mapping, **kw)
+        self.size = float(size)
+        self.hjust = float(hjust)
+        self.vjust = float(vjust)
+        self.nudge_x = float(nudge_x)
+        self.nudge_y = float(nudge_y)
+        self.check_overlap = bool(check_overlap)
+        if fontface not in {"plain", "bold", "italic", "bold.italic"}:
+            raise ValueError("fontface is 'plain', 'bold', 'italic', or 'bold.italic'")
+        self.fontface = fontface
+
+
+class geom_label(geom_text):
+    """Like ``geom_text`` with a box behind each label (ggplot2 ``geom_label``)."""
+
+    kind = "text"
+    _box = True
+
+
+def annotate(geom: str, *, x=None, y=None, xmin=None, xmax=None, ymin=None,
+             ymax=None, xend=None, yend=None, label=None, **params):
+    """One-off marks in data coordinates (ggplot2 ``annotate``).
+
+    * ``annotate("text", x=2, y=5, label="peak")`` (also ``"label"``)
+    * ``annotate("rect", xmin=1, xmax=2, ymin=0, ymax=10, alpha=0.2)``
+    * ``annotate("segment", x=1, y=1, xend=2, yend=3)``
+    * ``annotate("point", x=1, y=1, size=8)``
+
+    Values may be lists for several marks. Text, segments, and points
+    default to the ink colour; a rectangle to translucent grey.
+    """
+    def seq(value):
+        if value is None:
+            return None
+        return list(value) if isinstance(value, (list, tuple, np.ndarray, pd.Series)) else [value]
+
+    def frame(**cols):
+        given = {k: seq(v) for k, v in cols.items()}
+        size = max(len(v) for v in given.values())
+        return pd.DataFrame({k: v * size if len(v) == 1 else v for k, v in given.items()})
+
+    colour = params.pop("colour", params.pop("color", None))
+    fill = params.pop("fill", None)
+    kind = str(geom).lower()
+    if kind in {"text", "label"}:
+        if x is None or y is None or label is None:
+            raise ValueError(f'annotate("{kind}") needs x=, y=, and label=')
+        cls = geom_label if kind == "label" else geom_text
+        out = cls(aes(x="x", y="y", label="label"), colour=colour, **params)
+        out.data_override = frame(x=x, y=y, label=label)
+    elif kind == "rect":
+        if None in (xmin, xmax, ymin, ymax):
+            raise ValueError('annotate("rect") needs xmin=, xmax=, ymin=, ymax=')
+        box = frame(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax)
+        xs, ys, groups = [], [], []
+        for row in box.itertuples(index=False):
+            groups.append([len(xs), 4])
+            xs += [row.xmin, row.xmin, row.xmax, row.xmax]
+            ys += [row.ymin, row.ymax, row.ymax, row.ymin]
+        out = _Geom(aes(x="x", y="y"), colour=fill or colour or "#7f7f7f",
+                    alpha=params.pop("alpha", 0.2))
+        out.kind = "poly"
+        out.data_override = pd.DataFrame({"x": xs, "y": ys})
+        out._groups = groups
+        out.linewidth = 0.0
+    elif kind == "segment":
+        if None in (x, y, xend, yend):
+            raise ValueError('annotate("segment") needs x=, y=, xend=, yend=')
+        seg = frame(x=x, y=y, xend=xend, yend=yend)
+        xs, ys, groups = [], [], []
+        for row in seg.itertuples(index=False):
+            groups.append([len(xs), 2])
+            xs += [row.x, row.xend]
+            ys += [row.y, row.yend]
+        out = geom_path(aes(x="x", y="y"), colour=colour, **params)
+        out.data_override = pd.DataFrame({"x": xs, "y": ys})
+        out._groups = groups
+        out._ink_default = colour is None
+    elif kind == "point":
+        if x is None or y is None:
+            raise ValueError('annotate("point") needs x= and y=')
+        out = geom_point(aes(x="x", y="y"), colour=colour, **params)
+        out.data_override = frame(x=x, y=y)
+        out._ink_default = colour is None
+    else:
+        raise ValueError('annotate() draws "text", "label", "rect", "segment", or "point"')
+    out._replace_mapping = True
+    out._annotation = True
+    return out
+
+
 class geom_histogram(_Geom):
     """Histogram of a continuous ``x`` (ggplot2 ``geom_histogram`` / ``stat_bin``).
 
@@ -1049,11 +1270,14 @@ class facet_wrap:
 
 
 class labs(dict):
+    """Titles. ``colour`` (or ``fill``) names the colour legend."""
+
     def __init__(self, title=None, x=None, y=None, z=None, color=None,
-                 colour=None, size=None):
+                 colour=None, size=None, fill=None):
         super().__init__()
+        legend = color if color is not None else colour if colour is not None else fill
         for k, v in (("title", title), ("x", x), ("y", y), ("z", z),
-                     ("color", color if color is not None else colour),
+                     ("color", legend),
                      ("size", size)):
             if v is not None:
                 self[k] = v

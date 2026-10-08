@@ -189,6 +189,7 @@ for (const L of S.layers) {
     L.indices.data = await decode(L.indices.id, 'u32');
   }
   if (L.size && L.size.id) L.size.data = toNorm(await decode(L.size.id, L.size.dtype));
+  if (L.shape && L.shape.id) L.shape.data = await decode(L.shape.id, 'u16');
   if (L.frames) {
     const F = L.frames;
     for (const key of ['x', 'y', 'z', 'size']) {
@@ -324,13 +325,37 @@ function placeLegend() {
     legEl.style.maxWidth = 'none';
   }
 }
-const szHTML = sizeLegendHTML();
+const LEGEND_GLYPH = { circle: '●', triangle: '▲', square: '■', diamond: '◆', plus: '+', cross: '×' };
+// Legend keys: a square, the point's symbol, or a short (dashed) line.
+function keyHTML(e, color) {
+  if (e.shape) {
+    return '<span class="sw" style="background:none;border-radius:0;width:auto;color:' + color +
+      ';font-size:11px;line-height:9px">' + (LEGEND_GLYPH[e.shape] || '●') + '</span>';
+  }
+  if (e.dash !== undefined && e.dash !== null) {
+    const da = (e.dash && e.dash.length) ? ' stroke-dasharray="' + e.dash.map(d => d * 1.6).join(' ') + '"' : '';
+    return '<svg width="14" height="9" style="margin-right:4px;vertical-align:middle"><line x1="0" y1="4.5" x2="14" y2="4.5" stroke="' +
+      color + '" stroke-width="1.6"' + da + '/></svg>';
+  }
+  return '<span class="sw" style="background:' + color + '"></span>';
+}
+// aes(shape=) / aes(linetype=) on a column other than colour: own block.
+function keyLegendsHTML() {
+  let h = '';
+  for (const lg of [S.shapeLegend, S.linetypeLegend]) {
+    if (!lg) continue;
+    h += '<div style="margin-top:4px"><b style="color:' + T.ink + '">' + plot3Esc(lg.label) + '</b></div>' +
+      lg.entries.map(e => '<div>' + keyHTML(e, T.ink) + plot3Esc(e.label) + '</div>').join('');
+  }
+  return h;
+}
+const szHTML = sizeLegendHTML() + keyLegendsHTML();
 if (S.legend) {
   showLegendBox();
   legEl.innerHTML = (S.labs.color ? '<b style="color:'+T.ink+'">' +
       richLabel('color', S.labs.color) + '</b>' : '') +
     S.legend.map((e, i) => '<div class="lg-e" data-ci="' + i +
-      '"><span class="sw" style="background:' + e.color + '"></span>' +
+      '">' + keyHTML(e, e.color) +
       legendLabel(e) + '</div>').join('') + szHTML;
   legEl.addEventListener('click', ev => {
     const row = ev.target.closest('.lg-e');
@@ -522,6 +547,34 @@ renderer.setClearColor(0x000000, 0);
 host.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 const lineMats = [];
+
+// Point symbols (aes(shape=) / geom_point(shape=)) as white sprites tinted
+// by the point colour.
+const shapeMaps = {};
+function shapeTexture(name) {
+  if (shapeMaps[name]) return shapeMaps[name];
+  const c = document.createElement('canvas');
+  c.width = 64; c.height = 64;
+  const g = c.getContext('2d');
+  g.fillStyle = '#ffffff'; g.strokeStyle = '#ffffff';
+  g.beginPath();
+  if (name === 'triangle') { g.moveTo(32, 6); g.lineTo(60, 54); g.lineTo(4, 54); g.closePath(); g.fill(); }
+  else if (name === 'square') { g.fillRect(9, 9, 46, 46); }
+  else if (name === 'diamond') { g.moveTo(32, 2); g.lineTo(62, 32); g.lineTo(32, 62); g.lineTo(2, 32); g.closePath(); g.fill(); }
+  else if (name === 'plus') { g.lineWidth = 12; g.moveTo(32, 4); g.lineTo(32, 60); g.moveTo(4, 32); g.lineTo(60, 32); g.stroke(); }
+  else if (name === 'cross') { g.lineWidth = 12; g.moveTo(10, 10); g.lineTo(54, 54); g.moveTo(54, 10); g.lineTo(10, 54); g.stroke(); }
+  else { g.arc(32, 32, 28, 0, Math.PI * 2); g.fill(); }
+  const t = new THREE.CanvasTexture(c);
+  t.needsUpdate = true;
+  shapeMaps[name] = t;
+  return t;
+}
+function shapeOf(L, i) {
+  if (!L.shape) return null;
+  if (typeof L.shape === 'string') return L.shape;
+  const names = L.shape.names || ['circle'];
+  return names[L.shape.data[i] % names.length];
+}
 
 // Bubbles: per-point size (area) and, when a transition is set, a frame tween.
 let circleMap = null;
@@ -1435,7 +1488,37 @@ if (!S.is3d) {
     if (L.kind === 'point' && (L.frames || (L.size && L.size.id))) {
       addBubbleLayer(L, [1, 1, 1], false);
     } else if (L.kind === 'point') {
-      if (isCat) {
+      if (L.shape) {
+        // One Points object per (category, symbol), each with its sprite.
+        const k = isCat ? S.color.cats.length : 1;
+        const buckets = new Map();
+        for (let i = 0; i < n; i++) {
+          const ci = isCat ? L.color.data[i] % k : 0;
+          const key = ci + '|' + shapeOf(L, i);
+          if (!buckets.has(key)) buckets.set(key, []);
+          buckets.get(key).push(i);
+        }
+        for (const [key, idx] of buckets) {
+          const [ciText, shape] = key.split('|');
+          const ci = Number(ciText);
+          const pos = new Float32Array(idx.length * 3);
+          const col = new Float32Array(idx.length * 3);
+          for (let j = 0; j < idx.length; j++) {
+            const i = idx[j];
+            pos[j*3] = L.x.data[i]; pos[j*3+1] = L.y.data[i]; pos[j*3+2] = 0;
+            col[j*3] = cols[i*3]; col[j*3+1] = cols[i*3+1]; col[j*3+2] = cols[i*3+2];
+          }
+          const g = new THREE.BufferGeometry();
+          g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+          g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+          const pt = new THREE.Points(g, new THREE.PointsMaterial({
+            size: (L.size || 6) * 1.25, sizeAttenuation: false, vertexColors: true,
+            map: shapeTexture(shape), alphaTest: 0.3,
+            transparent: true, opacity: L.alpha }));
+          scene.add(pt);
+          if (isCat) regCat(ci, pt);
+        }
+      } else if (isCat) {
         // one Points object per category -> legend click-filtering
         const k = S.color.cats.length;
         const buckets = Array.from({ length: k }, () => []);
@@ -1656,8 +1739,8 @@ if (!S.is3d) {
     } else if (L.frames && L.frames.x) {
       addTweenLines(L, [1, 1, 1], cols);
     } else {
-      for (const [s0, cnt] of L.groups) {
-        if (cnt < 2) continue;
+      L.groups.forEach(([s0, cnt], gi) => {
+        if (cnt < 2) return;
         const flat = new Float32Array(cnt * 3);
         for (let i = 0; i < cnt; i++) {
           flat[i*3] = L.x.data[s0+i]; flat[i*3+1] = L.y.data[s0+i]; flat[i*3+2]=0;
@@ -1671,9 +1754,21 @@ if (!S.is3d) {
           transparent: true, opacity: L.alpha });
         lineMats.push(lm);
         const ln = new Line2(lg, lm);
+        const dash = (L.dashes && L.dashes[gi]) || L.dash;
+        if (dash && dash.length >= 2) {
+          // Dash lengths are in world units: size them from the pixels the
+          // panel shows now (they scale with zoom).
+          const wpp = (cam.right - cam.left) / Math.max(1, renderer.domElement.clientWidth || 800);
+          const unit = Math.max(L.linewidth || 1, 1) * wpp;
+          lm.dashed = true;
+          lm.dashSize = dash[0] * unit;
+          lm.gapSize = dash[1] * unit;
+          lm.dashScale = 1;
+          ln.computeLineDistances();
+        }
         scene.add(ln);
         if (isCat) regCat(L.color.data[s0] % S.color.cats.length, ln);
-      }
+      });
     }
   }
   scene.add = addToScene;
@@ -1702,13 +1797,48 @@ if (!S.is3d) {
       s += `<text x="${M.l-7}" y="${Y+4}" fill="${T.muted}" text-anchor="end">${lab}</text>`;
     }
     s += `<rect x="${M.l}" y="${M.t}" width="${W}" height="${H}" fill="none" stroke="${T.axis}"/>`;
+    // geom_hline / geom_vline / geom_abline, clipped to the panel so they
+    // follow pan and zoom without spilling into the margins.
+    const refs = S.refs || [];
+    if (refs.length) {
+      s += `<clipPath id="p3refclip"><rect x="${M.l}" y="${M.t}" width="${W}" height="${H}"/></clipPath><g clip-path="url(#p3refclip)">`;
+      for (const r of refs) {
+        let X1, Y1, X2, Y2;
+        if (r.kind === 'hline') { Y1 = Y2 = py(r.value); X1 = M.l; X2 = M.l + W; }
+        else if (r.kind === 'vline') { X1 = X2 = px(r.value); Y1 = M.t; Y2 = M.t + H; }
+        else { X1 = px(x0); X2 = px(x1); Y1 = py(r.intercept + r.slope * x0); Y2 = py(r.intercept + r.slope * x1); }
+        const w = r.width || 1;
+        const dash = (r.dash && r.dash.length) ? ` stroke-dasharray="${r.dash.map(d => d * Math.max(w, 1)).join(' ')}"` : '';
+        s += `<line x1="${X1}" y1="${Y1}" x2="${X2}" y2="${Y2}" stroke="${r.color}" stroke-width="${w}" stroke-opacity="${r.alpha == null ? 1 : r.alpha}"${dash}/>`;
+      }
+      s += '</g>';
+    }
     s += `<text x="${M.l+W/2}" y="${M.t+H+30}" fill="${T.ink2}" text-anchor="middle">${plot3Esc(withFrame(S.labs.x))}</text>`;
     s += `<text x="14" y="${M.t+H/2}" fill="${T.ink2}" text-anchor="middle" transform="rotate(-90 14 ${M.t+H/2})">${plot3Esc(withFrame(S.labs.y))}</text>`;
     const anns = S.ann || [];
+    const textBoxes = [];
     for (let i = 0; i < anns.length; i++) {
       const ann = anns[i];
       const X = px(ann.x), Y = py(ann.y);
       if (X < M.l - 2 || X > M.l + W + 2 || Y < M.t - 2 || Y > M.t + H + 2) continue;
+      if (ann.style === 'text' || ann.style === 'label') {
+        // geom_text / geom_label, anchored by hjust/vjust like ggplot2.
+        // 3.88 mm (ggplot2's default) matches this viewer's base font.
+        const size = (ann.size || 14.7) * (13.75 / 14.67);
+        const w = 0.55 * size * String(ann.text).length, h = 1.2 * size;
+        const hj = ann.hjust == null ? 0.5 : ann.hjust, vj = ann.vjust == null ? 0.5 : ann.vjust;
+        const left = X - hj * w, top = Y - (1 - vj) * h;
+        if (ann.overlap === false && textBoxes.some(b =>
+            left < b[0] + b[2] && b[0] < left + w && top < b[1] + b[3] && b[1] < top + h)) continue;
+        textBoxes.push([left, top, w, h]);
+        const col = ann.color || T.ink;
+        if (ann.style === 'label') {
+          const pad = 0.25 * size;
+          s += `<rect x="${left - pad}" y="${top - pad * 0.6}" width="${w + 2 * pad}" height="${h + pad * 1.2}" rx="3" fill="${T.surface}" stroke="${col}" stroke-width="0.8"/>`;
+        }
+        s += `<text x="${left + w / 2}" y="${top + h / 2}" fill="${col}" fill-opacity="${ann.alpha == null ? 1 : ann.alpha}" text-anchor="middle" dominant-baseline="middle" font-size="${size}" font-weight="${ann.weight || 400}"${ann.italic ? ' font-style="italic"' : ''}>${plot3Esc(ann.text)}</text>`;
+        continue;
+      }
       // Inside the panel, with a halo in the page colour so the label reads
       // where it crosses the curve (P(X >= 1.96) sits on a thin tail).
       const halfW = 0.29 * 12 * String(ann.text).length + 3;

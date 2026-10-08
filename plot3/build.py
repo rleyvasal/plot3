@@ -292,6 +292,119 @@ def _histogram_breaks(
     return _edges_from_binwidth(lo, hi, w, boundary)
 
 
+# Filled shapes take their colour from aes(fill=). Points, lines, error bars,
+# and text use aes(colour=) only (ggplot2's default shapes ignore fill).
+_FILL_KINDS = frozenset({
+    "col", "bar", "histogram", "boxplot", "box", "violin", "poly", "area",
+    "density", "surface", "isosurface", "density_3d_stat", "ribbon",
+})
+
+
+def _apply_fill(mapping: dict, kind: str) -> dict:
+    """Resolve ``fill`` into the one colour channel a layer draws with."""
+    out = dict(mapping)
+    fill = out.pop("fill", None)
+    if fill is None:
+        return out
+    if kind in _FILL_KINDS:
+        out["color"] = fill
+    elif kind == "smooth" and "color" not in out:
+        out["color"] = fill  # a smoother's band follows its fill
+    else:
+        # Not drawn in the fill colour, but a discrete fill still groups the
+        # layer (ggplot2), so error bars dodge onto the bars they belong to.
+        out["__fillgroup"] = fill
+    return out
+
+
+_REF_KINDS = frozenset({"hline", "vline", "abline"})
+_MM_TO_PX = 96.0 / 25.4
+
+
+def _text_annotations(geom, vals, color_scale, theme) -> list[dict]:
+    """geom_text / geom_label rows as annotation entries in scale units."""
+    xs = np.asarray(vals["x"], dtype=np.float64) + float(getattr(geom, "nudge_x", 0.0))
+    ys = np.asarray(vals["y"], dtype=np.float64) + float(getattr(geom, "nudge_y", 0.0))
+    labels = vals.get("label") or []
+    colours: list[str | None] = [geom.const_color or theme["ink"]] * len(labels)
+    if vals.get("color") and vals["color"][0] == "cat" and color_scale and color_scale[0] == "cat":
+        _kind, codes, local = vals["color"]
+        palette = theme["cat"]
+        for i, code in enumerate(codes):
+            if math.isfinite(code):
+                name = local[int(code)]
+                index = color_scale[1].index(name) if name in color_scale[1] else 0
+                colours[i] = palette[index % len(palette)]
+    face = getattr(geom, "fontface", "plain")
+    style = {
+        "style": "label" if getattr(geom, "_box", False) else "text",
+        "size": float(getattr(geom, "size", 3.88)) * _MM_TO_PX,
+        "hjust": float(getattr(geom, "hjust", 0.5)),
+        "vjust": float(getattr(geom, "vjust", 0.5)),
+        "weight": 700 if "bold" in face else 400,
+        "italic": "italic" in face,
+        "overlap": not bool(getattr(geom, "check_overlap", False)),
+        "alpha": 1.0 if geom.alpha is None else float(geom.alpha),
+    }
+    out = []
+    for x, y, text, colour in zip(xs, ys, labels, colours):
+        if text and math.isfinite(x) and math.isfinite(y):
+            out.append({"x": float(x), "y": float(y), "text": text, "color": colour, **style})
+    return out
+
+
+def _ref_scale_value(scale, value) -> float | None:
+    """A reference value in the scale's own units (index, seconds, log10)."""
+    if scale.kind == "cat":
+        key = str(value)
+        return float(scale.cats.index(key)) if key in scale.cats else None
+    if scale.kind == "dt":
+        try:
+            return float(pd.Timestamp(value).timestamp())
+        except (TypeError, ValueError):
+            return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if getattr(scale, "trans", None) == "log10":
+        return math.log10(number) if number > 0 else None
+    return number if math.isfinite(number) else None
+
+
+def _ref_specs(ref_layers, scales, theme) -> list[dict]:
+    from plot3.geoms import dash_pattern
+
+    out = []
+    for ref in ref_layers:
+        style = {
+            "color": ref.const_color or theme["ink"],
+            "width": float(getattr(ref, "linewidth", 1.0) or 1.0),
+            "alpha": 1.0 if ref.alpha is None else float(ref.alpha),
+            "dash": list(dash_pattern(getattr(ref, "linetype", None)) or []) or None,
+        }
+        if ref.kind in {"hline", "vline"}:
+            axis = "y" if ref.kind == "hline" else "x"
+            if axis not in scales:
+                continue
+            for value in ref.values:
+                v = _ref_scale_value(scales[axis], value)
+                if v is not None:
+                    out.append({"kind": ref.kind, "value": v, **style})
+        else:
+            sx, sy = scales.get("x"), scales.get("y")
+            linear = all(
+                sc is not None and sc.kind == "num" and getattr(sc, "trans", None) is None
+                for sc in (sx, sy)
+            )
+            if not linear:
+                raise ValueError("geom_abline() needs numeric, linear x and y axes")
+            out.append({
+                "kind": "abline", "slope": ref.slope, "intercept": ref.intercept, **style,
+            })
+    return out
+
+
 _STAT2D_KINDS = frozenset(
     {"jitter", "errorbar", "linerange", "pointrange", "ribbon", "smooth", "summary"}
 )
@@ -331,8 +444,9 @@ def expand_stat_geom(
 
         layers = expand_vector_field(geom, transition, slider)
         return layers[0] if len(layers) == 1 else layers
-    mapping = dict(base_mapping)
-    mapping.update(geom.mapping)
+    # Resolve fill per mapping, so a layer's own colour beats a base fill.
+    mapping = _apply_fill(dict(base_mapping), geom.kind)
+    mapping.update(_apply_fill(dict(geom.mapping), geom.kind))
     if geom.kind in _STAT2D_KINDS or geom.kind in {"col", "bar"}:
         from plot3 import stat2d
 
@@ -1116,6 +1230,115 @@ def _legend_title_label(current: str, legend_title, labs_math: dict) -> str:
     return pretty
 
 
+def _discrete_codes(series: pd.Series) -> tuple[np.ndarray, list[str]]:
+    """Category codes and names for shape / linetype (numbers become levels)."""
+    kind, values, cats = col_values(series)
+    if kind == "cat":
+        return np.asarray(values, dtype=np.float64), list(cats)
+    labels = series.map(lambda v: "NA" if pd.isna(v) else str(v))
+    order = sorted(set(labels), key=lambda t: (_num_key(t), t))
+    index = {name: i for i, name in enumerate(order)}
+    return labels.map(index).to_numpy(np.float64), order
+
+
+def _num_key(text: str) -> float:
+    try:
+        return float(text)
+    except ValueError:
+        return math.inf
+
+
+def _encode_dashes(spec_l: dict, geom, vals: dict, order: np.ndarray) -> None:
+    """Dash patterns for a line layer: one per group, or one for the layer."""
+    from plot3.geoms import LINETYPE_ORDER, LINETYPES, dash_pattern
+
+    mapped = vals.get("linetype")
+    if mapped is not None:
+        codes = np.asarray(mapped[0], dtype=np.float64)[order]
+        dashes = []
+        for start, _count in spec_l.get("groups") or []:
+            code = codes[int(start)]
+            name = LINETYPE_ORDER[int(code) % len(LINETYPE_ORDER)] if math.isfinite(code) else "solid"
+            pattern = LINETYPES[name]
+            dashes.append(list(pattern) if pattern else None)
+        if any(dashes):
+            spec_l["dashes"] = dashes
+        return
+    pattern = dash_pattern(getattr(geom, "linetype", None))
+    if pattern:
+        spec_l["dash"] = list(pattern)
+
+
+def _encode_shapes(spec_l: dict, geom, vals: dict, order: np.ndarray, li: int, payloads: list, compress: bool) -> None:
+    """Point symbols: per-point codes with their names, or one shape."""
+    from plot3.geoms import SHAPE_ORDER
+
+    mapped = vals.get("shape")
+    if mapped is not None:
+        codes, cats = mapped
+        if len(cats) > len(SHAPE_ORDER):
+            raise ValueError(
+                f"aes(shape=) has {len(cats)} levels; at most {len(SHAPE_ORDER)} "
+                "shapes are distinct. Map a column with fewer levels to shape"
+            )
+        ordered = np.asarray(codes, dtype=np.float64)[order]
+        packed = np.where(np.isfinite(ordered), ordered, 0).astype("<u2")
+        pid = f"p{li}sh"
+        payloads.append((pid, pack_u16(packed, compress)))
+        spec_l["shape"] = {
+            "id": pid,
+            "dtype": "u16",
+            "names": [SHAPE_ORDER[i] for i in range(len(cats))],
+        }
+    elif getattr(geom, "shape", None):
+        spec_l["shape"] = str(geom.shape)
+
+
+def _aux_legends(resolved, layer_vals, legend):
+    """Shape and linetype keys: on the colour legend when they map the same
+    column, otherwise a legend of their own."""
+    from plot3.geoms import LINETYPE_ORDER, LINETYPES, SHAPE_ORDER
+
+    extra = {}
+    for (geom, m), vals in zip(resolved, layer_vals):
+        for aes_name, key, values in (
+            ("shape", "shape", SHAPE_ORDER),
+            ("linetype", "dash", LINETYPE_ORDER),
+        ):
+            mapped = vals.get(aes_name)
+            if mapped is None or aes_name in extra:
+                continue
+            cats = mapped[1]
+            if key == "dash":
+                styles = [list(LINETYPES[values[i % len(values)]] or []) for i in range(len(cats))]
+            else:
+                styles = [values[i % len(values)] for i in range(len(cats))]
+            column = m.get(aes_name)
+            by_label = dict(zip(cats, styles))
+            if legend and column == m.get("color") and all(e["label"] in by_label for e in legend):
+                for entry in legend:
+                    entry[key] = by_label[entry["label"]]
+                extra[aes_name] = None
+            else:
+                extra[aes_name] = {
+                    "label": str(column),
+                    "entries": [{"label": c, key: st} for c, st in zip(cats, styles)],
+                }
+    # One constant symbol for every point layer (geom_point(shape="triangle"))
+    # also belongs on the colour keys.
+    if legend and "shape" not in extra:
+        constant = {
+            getattr(geom, "shape", None)
+            for geom, _m in resolved
+            if geom.kind == "point" and getattr(geom, "shape", None)
+        }
+        if len(constant) == 1 and all(not e.get("shape") for e in legend):
+            shape = constant.pop()
+            for entry in legend:
+                entry["shape"] = shape
+    return legend, extra.get("shape"), extra.get("linetype")
+
+
 def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if not g.layers:
         raise ValueError("add a geom: ggplot(df, aes(...)) + geom_point()")
@@ -1153,10 +1376,19 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     # Apply optional stat_density_3d options onto isosurface layers.
     density_stat = getattr(g, "stat_density_3d", None)
     layers_in = []
+    ref_layers = []
     for geom in g.layers:
+        if getattr(geom, "kind", None) in _REF_KINDS:
+            ref_layers.append(geom)  # drawn across the panel, not from rows
+            continue
         if getattr(geom, "kind", None) == "isosurface" and density_stat is not None:
             geom = copy_geom_with_density_n(geom, density_stat.n)
         layers_in.append(geom)
+    if not layers_in:
+        raise ValueError(
+            "geom_hline(), geom_vline(), and geom_abline() draw on a plot: "
+            "add a data layer such as geom_point()"
+        )
     transition = getattr(g, "transition", None)
     slider = getattr(g, "slider", None)
     if slider is not None and transition is not None:
@@ -1197,8 +1429,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         if getattr(geom, "_replace_mapping", False):
             m = dict(geom.mapping)
         else:
-            m = dict(g.mapping)
-            m.update(geom.mapping)
+            m = _apply_fill(dict(g.mapping), geom.kind)
+            m.update(_apply_fill(dict(geom.mapping), geom.kind))
         if "x" not in m or "y" not in m:
             raise ValueError("aes(x=, y=) are required (bar/histogram/density supply y)")
         if geom.kind == "surface" and "z" not in m:
@@ -1564,6 +1796,14 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         ) + ([m["group"]] if "group" in m else [])
         if geom.kind == "point" and "size" in m:
             cols.append(m["size"])
+        if geom.kind == "text":
+            if "label" not in m:
+                raise ValueError("geom_text() requires aes(label=)")
+            cols.append(m["label"])
+        if geom.kind == "point" and "shape" in m:
+            cols.append(m["shape"])
+        if geom.kind == "line" and "linetype" in m:
+            cols.append(m["linetype"])
         if transition is not None and getattr(transition, "column", None):
             cols.append(transition.column)
         sub = materialize_columns(frame, list(dict.fromkeys(cols)))
@@ -1697,6 +1937,14 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         if "group" in m:
             _, gv, gcats = col_values(sub[m["group"]])
             vals["group"] = (gv, gcats)
+        if geom.kind == "point" and "shape" in m:
+            vals["shape"] = _discrete_codes(sub[m["shape"]])
+        if geom.kind == "line" and "linetype" in m:
+            vals["linetype"] = _discrete_codes(sub[m["linetype"]])
+        if geom.kind == "text":
+            vals["label"] = [
+                "" if pd.isna(v) else str(v) for v in sub[m["label"]].tolist()
+            ]
         if geom.kind == "point" and "size" in m:
             skind, sv, _ = col_values(sub[m["size"]])
             if skind != "num":
@@ -1707,6 +1955,14 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 size_label = str(m["size"])
         _drop_log_rows(vals)
         layer_vals.append(vals)
+
+    # Reference lines are part of the picture: ggplot2 widens the scales so
+    # geom_hline(yintercept=0) is never off the panel.
+    for ref in ref_layers:
+        axis = {"hline": "y", "vline": "x"}.get(ref.kind)
+        if axis and axis in scales and scales[axis].kind in {"num", "dt"}:
+            values = [_ref_scale_value(scales[axis], v) for v in ref.values]
+            scales[axis].widen(np.asarray([v for v in values if v is not None], dtype=np.float64))
 
     for a in axes:
         scales[a].finish()
@@ -1826,6 +2082,21 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
 
     payloads: list[tuple[str, str]] = []
     layer_specs = []
+    # Text layers are positioned through the scales like any layer (a label
+    # at x="Sat" lands on Sat), then drawn as annotations by both renderers.
+    text_anns: list[dict] = []
+    kept_pairs = []
+    for (geom, m), vals in zip(resolved, layer_vals):
+        if geom.kind == "text":
+            if is3d:
+                raise ValueError("geom_text() is for 2D figures")
+            text_anns.extend(_text_annotations(geom, vals, color_scale, theme))
+        else:
+            kept_pairs.append(((geom, m), vals))
+    if len(kept_pairs) != len(resolved):
+        resolved = [pair for pair, _vals in kept_pairs]
+        layer_vals = [vals for _pair, vals in kept_pairs]
+
     for li, ((geom, m), vals) in enumerate(zip(resolved, layer_vals)):
         n = len(vals["x"])
         order = np.arange(n)
@@ -1834,6 +2105,13 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             group_vec = vals["group"][0]
         elif vals.get("color") and vals["color"][0] == "cat":
             group_vec = vals["color"][1]
+        if vals.get("linetype") is not None:
+            # Each linetype level is its own line, as in ggplot2.
+            lt_codes, lt_cats = vals["linetype"]
+            group_vec = (
+                lt_codes if group_vec is None
+                else np.asarray(group_vec, dtype=np.float64) * (len(lt_cats) + 1) + lt_codes
+            )
         # Precomputed breaks (implicit contours, clipped formulas) stay in order.
         if getattr(geom, "_groups", None) is not None:
             order = np.arange(n)
@@ -1862,7 +2140,10 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             "kind": geom.kind,
             "n": int(n),
             "alpha": geom.alpha,
-            "constColor": geom.const_color,
+            # Error bars, reference lines, and text default to the ink colour
+            # (black on a light theme), as in ggplot2.
+            "constColor": geom.const_color
+            or (theme["ink"] if getattr(geom, "_ink_default", False) else None),
         }
 
         def _encode_channel(name: str, values: np.ndarray, axis: str):
@@ -2024,6 +2305,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             spec_l["linewidth"] = float(getattr(geom, "linewidth", 2.0))
             if geom.kind in {"area", "poly"} and spec_l["alpha"] is None:
                 spec_l["alpha"] = 0.4 if geom.kind == "area" else 0.45
+            if geom.kind == "line":
+                _encode_dashes(spec_l, geom, vals, order)
             if geom.kind == "area":
                 scy = scales["y"]
                 baseline = getattr(geom, "_baseline", None)
@@ -2074,6 +2357,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             if spec_l["alpha"] is None:
                 spec_l["alpha"] = 0.9
         else:
+            if geom.kind == "point":
+                _encode_shapes(spec_l, geom, vals, order, li, payloads, g.compress)
             if vals.get("size_frac") is not None:
                 frac = np.asarray(vals["size_frac"], dtype=np.float64)[order]
                 present = np.isfinite(frac)
@@ -2248,6 +2533,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         if entries:
             legend = entries
 
+    legend, shape_legend, linetype_legend = _aux_legends(resolved, layer_vals, legend)
+
     base_map = dict(g.mapping)
     coord_spec = _coord_spec(coord, is3d, resolved)
     labs_math: dict[str, list] = {}
@@ -2313,7 +2600,9 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 "x": float(ann["x"]),
                 "y": float(ann["y"]),
                 "text": text,
+                "style": "area",
             })
+    annotations.extend(text_anns)
     if dropped_log:
         word = "value" if dropped_log == 1 else "values"
         notes.append(f"{dropped_log} non-positive {word} omitted on a log scale")
@@ -2345,12 +2634,18 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             "y": _take("y", _axis_label(g, base_map, resolved, "y", is3d)),
             "z": _take("z", _axis_label(g, base_map, resolved, "z", is3d)) if is3d else "",
             "color": _legend_title_label(
-                _take("color", g.labs.get("color", base_map.get("color", ""))),
+                _take(
+                    "color",
+                    g.labs.get("color", base_map.get("color") or base_map.get("fill", "")),
+                ),
                 legend_title,
                 labs_math,
             ),
         },
         "labsMath": labs_math or None,
+        "refs": _ref_specs(ref_layers, scales, theme) or None,
+        "shapeLegend": shape_legend,
+        "linetypeLegend": linetype_legend,
         "math": bool(
             labs_math
             or any(layer.get("tip") for layer in layer_specs)

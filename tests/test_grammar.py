@@ -62,9 +62,11 @@ def test_colour_and_color_aliases(cars):
     assert a["color"] == b["color"] == "cyl"
 
 
-def test_fill_aliases_colour_for_surface_aes():
+def test_fill_is_its_own_aesthetic():
+    # ggplot2: fill colours filled shapes; build_spec applies it per geom.
     a = aes(x="x", y="y", z="height", fill="height")
-    assert a["color"] == "height"
+    assert a["fill"] == "height"
+    assert "color" not in a
 
 
 def test_coord_and_facet_attach(cars, cloud):

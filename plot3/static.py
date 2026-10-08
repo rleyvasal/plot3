@@ -883,7 +883,9 @@ def _draw_2d(
             "text", x + 8 + _line_height(tick_size) / 2, box[1] + box[3] / 2,
             labs["y"], tick_size, ink2, "middle", "middle", -90, 400,
         ))
+    _draw_refs(spec, commands, window, px)
     placed: list[tuple[float, float, float, float]] = []
+    text_boxes: list[tuple[float, float, float, float]] = []
     for ann in spec.get("ann") or []:
         text = str(ann.get("text") or "")
         if not text:
@@ -898,6 +900,12 @@ def _draw_2d(
         if v < window[2] - 0.02 or v > window[3] + 0.02:
             continue
         sx, sy = px(u, v)
+        if ann.get("style") in {"text", "label"}:
+            # ggplot2: geom_text's default 3.88 mm equals the base font. Keep
+            # that ratio to this figure's base (axis text is 0.8 of it).
+            scale = (tick_size / 0.8) / (3.88 * 96.0 / 25.4)
+            _draw_text_ann(commands, ann, text, sx, sy, surface, text_boxes, scale)
+            continue
         size = tick_size
         half_w = _text_width(text, size) / 2.0 + 3.0
         half_h = 0.65 * size + 1.0
@@ -957,9 +965,10 @@ def _draw_layer_2d(layer, spec, blobs, gz, px, commands) -> None:
     ys = _norm_channel(layer, "y", blobs, gz, n)
     if kind == "point":
         radii = _point_radii(layer, blobs, gz, n, scene=False, min_dim=1.0)
+        shapes = _point_shapes(layer, blobs, gz, n)
         for i in range(n):
             cx, cy = px(float(xs[i]), float(ys[i]))
-            commands.append(("circle", cx, cy, float(radii[i]), _hex(colors[i]), None, 0, alpha))
+            _marker(commands, cx, cy, float(radii[i]), shapes[i], _hex(colors[i]), alpha)
         return
     if kind == "col":
         hw = float(layer.get("width") or 0.08) * 0.5
@@ -1002,11 +1011,18 @@ def _draw_layer_2d(layer, spec, blobs, gz, px, commands) -> None:
             commands.append(("polyline", curve, color, width, min(1.0, alpha + 0.3)))
         return
     width = float(layer.get("linewidth") or 2.0)
-    for start, count in _groups(layer, n):
+    dashes = layer.get("dashes")
+    for index, (start, count) in enumerate(_groups(layer, n)):
         if count < 2:
             continue
         curve = [px(float(xs[i]), float(ys[i])) for i in range(start, start + count)]
-        commands.append(("polyline", curve, _hex(colors[start]), width, alpha))
+        dash = dashes[index] if dashes and index < len(dashes) else layer.get("dash")
+        color = _hex(colors[start])
+        if not dash:
+            commands.append(("polyline", curve, color, width, alpha))
+            continue
+        for a, b in _dash_path(curve, dash, width):
+            commands.append(("line", a[0], a[1], b[0], b[1], color, width, alpha))
 
 
 def _poly_triangles(xs, ys, start, count, px):
@@ -1534,14 +1550,18 @@ def _legend_metrics(
     entries = list(spec.get("legend") or [])
     color = spec.get("color") or {}
     size_legend = spec.get("sizeLegend")
-    if not entries and color.get("kind") != "num" and not size_legend:
+    if (
+        not entries and color.get("kind") != "num" and not size_legend
+        and not spec.get("shapeLegend") and not spec.get("linetypeLegend")
+    ):
         return None
     ink = theme.get("ink") or "#ffffff"
     tick = fonts[0]
     row_h = _line_height(tick) + 4
     max_w = None if max_box is None else float(max_box[0])
     max_h = None if max_box is None else float(max_box[1])
-    if columns and entries and not size_legend and max_w is not None:
+    separate_keys = spec.get("shapeLegend") or spec.get("linetypeLegend")
+    if columns and entries and not size_legend and not separate_keys and max_w is not None:
         grid = _legend_grid(entries, color_label, tick, row_h, max_w, ink)
         if grid is not None:
             return grid
@@ -1573,12 +1593,13 @@ def _legend_metrics(
         color_hex = entry.get("color") or ink
         if not parts:
             parts = [str(entry.get("label") or "")]
-        rows.append(("swatch", parts[0], color_hex))
+        rows.append(("swatch", parts[0], color_hex, entry.get("shape"), entry.get("dash")))
         for extra in parts[1:]:
             rows.append(("cont", extra))
     ramp = color.get("ramp") or []
     if not entries and color.get("kind") == "num" and ramp:
         rows.append(("ramp", ramp, color.get("lo"), color.get("hi")))
+    rows.extend(_key_rows(spec, ink))
     if size_legend and size_legend.get("breaks"):
         rows.append(("size-title", str(size_legend.get("label") or "size")))
         for br in size_legend["breaks"]:
@@ -1631,7 +1652,7 @@ def _legend_grid(entries, title: str, tick: float, row_h: float, max_w: float, i
     if title:
         rows.append(("title", title))
     cells = [
-        ("swatch", label, entry.get("color") or ink)
+        ("swatch", label, entry.get("color") or ink, entry.get("shape"), entry.get("dash"))
         for label, entry in zip(labels, entries)
     ]
     body_w = ncols * col_w + (ncols - 1) * gap
@@ -1646,6 +1667,38 @@ def _legend_grid(entries, title: str, tick: float, row_h: float, max_w: float, i
         "h": box_h,
         "row_h": row_h,
     }
+
+
+def _key_rows(spec, ink: str) -> list:
+    """Rows for shape and linetype legends that are not merged with colour."""
+    rows = []
+    for key, legend in (("shape", spec.get("shapeLegend")), ("dash", spec.get("linetypeLegend"))):
+        if not legend:
+            continue
+        rows.append(("size-title", str(legend.get("label") or key)))
+        for entry in legend.get("entries") or []:
+            shape = entry.get("shape") if key == "shape" else None
+            dash = entry.get("dash") if key == "dash" else None
+            rows.append(("swatch", str(entry.get("label") or ""), ink, shape, dash))
+    return rows
+
+
+def _legend_key(commands, x, y, row) -> None:
+    """The key in front of a legend label: a square, a point shape, or a line."""
+    color = row[2]
+    shape = row[3] if len(row) > 3 else None
+    dash = row[4] if len(row) > 4 else None
+    if shape:
+        _marker(commands, x + 4.5, y + 4.5, 4.0, shape, color, 1.0)
+    elif dash is not None:
+        a, b = (x - 1, y + 4.5), (x + 11, y + 4.5)
+        if dash:
+            for p0, p1 in _dash_segments(a, b, dash, 1.6):
+                commands.append(("line", p0[0], p0[1], p1[0], p1[1], color, 1.6, 1.0))
+        else:
+            commands.append(("line", a[0], a[1], b[0], b[1], color, 1.6, 1.0))
+    else:
+        commands.append(("rect", x, y, 9, 9, color, None, 0, 1.0))
 
 
 def _legend_reserve(position, metrics, width: float, height: float, left: float = 0.0) -> tuple[float, float]:
@@ -1701,7 +1754,7 @@ def _paint_legend(commands, origin, metrics, theme, fonts) -> None:
             commands.append(("text", lx + 8, cursor, row[1], tick, ink, "start", "top", 0, 600))
             cursor += row_h
         elif row[0] == "swatch":
-            commands.append(("rect", lx + 8, cursor + 2, 9, 9, row[2], None, 0, 1.0))
+            _legend_key(commands, lx + 8, cursor + 2, row)
             commands.append(("text", lx + 22, cursor, row[1], tick, ink2, "start", "top", 0, 400))
             cursor += row_h
         elif row[0] == "cont":
@@ -1726,12 +1779,12 @@ def _paint_legend(commands, origin, metrics, theme, fonts) -> None:
             cursor += max(row_h, diameter + 3)
     cells = metrics.get("cells") or []
     ncols = int(metrics.get("ncols") or 1)
-    for index, (_kind, label, color_hex) in enumerate(cells):
+    for index, cell in enumerate(cells):
         row, col = divmod(index, ncols)
         cx = lx + 8 + col * float(metrics["col_w"])
         cy = cursor + row * row_h
-        commands.append(("rect", cx, cy + 2, 9, 9, color_hex, None, 0, 1.0))
-        commands.append(("text", cx + 14, cy, label, tick, ink2, "start", "top", 0, 400))
+        _legend_key(commands, cx, cy + 2, cell)
+        commands.append(("text", cx + 14, cy, cell[1], tick, ink2, "start", "top", 0, 400))
 
 
 def _draw_ramp(commands, x, y, w, h, ramp) -> None:
@@ -2061,6 +2114,170 @@ def _date_ticks(scale: dict, ladder: list) -> list:
         return visible
     step = -(-len(visible) // 7)
     return visible[::step]
+
+
+def _draw_text_ann(commands, ann, text, sx, sy, surface, boxes, scale: float = 1.0) -> None:
+    """geom_text / geom_label: anchored by hjust and vjust like ggplot2."""
+    size = float(ann.get("size") or 14.7) * scale
+    width = float(_text_width(text, size))
+    height = 1.2 * size
+    hj = float(ann.get("hjust", 0.5))
+    vj = float(ann.get("vjust", 0.5))
+    left = sx - hj * width
+    top = sy - (1.0 - vj) * height
+    if not ann.get("overlap", True):
+        # check_overlap=True: skip a label that would cover one already drawn.
+        for bl, bt, bw, bh in boxes:
+            if left < bl + bw and bl < left + width and top < bt + bh and bt < top + height:
+                return
+    boxes.append((left, top, width, height))
+    color = ann.get("color") or "#000000"
+    if ann.get("style") == "label":
+        pad = 0.25 * size
+        commands.append((
+            "rect", left - pad, top - pad * 0.6, width + 2 * pad, height + pad * 1.2,
+            surface, color, 0.8, 1.0,
+        ))
+    # Draw from the box centre: the renderers agree on "middle" anchoring.
+    commands.append((
+        "text", left + width / 2.0, top + height / 2.0, text, size, color,
+        "middle", "middle", 0, int(ann.get("weight") or 400),
+    ))
+
+
+def _point_shapes(layer, blobs, gz, n: int) -> list[str]:
+    node = layer.get("shape")
+    if isinstance(node, str):
+        return [node] * n
+    if not isinstance(node, dict) or "id" not in node:
+        return ["circle"] * n
+    names = node.get("names") or ["circle"]
+    codes = _decode(blobs[node["id"]], node.get("dtype") or "u16", gz)
+    return [names[int(codes[i]) % len(names)] for i in range(n)]
+
+
+def _marker(commands, cx, cy, r, shape, color, alpha) -> None:
+    """A point symbol of radius ``r`` (circle, triangle, square, diamond, plus, cross)."""
+    if shape == "triangle":
+        h = r * 1.25
+        commands.append(("polygon", [(cx, cy - h), (cx + h * 0.95, cy + h * 0.6), (cx - h * 0.95, cy + h * 0.6)], color, None, 0, alpha))
+    elif shape == "square":
+        k = r * 0.9
+        commands.append(("polygon", [(cx - k, cy - k), (cx + k, cy - k), (cx + k, cy + k), (cx - k, cy + k)], color, None, 0, alpha))
+    elif shape == "diamond":
+        k = r * 1.2
+        commands.append(("polygon", [(cx, cy - k), (cx + k, cy), (cx, cy + k), (cx - k, cy)], color, None, 0, alpha))
+    elif shape in {"plus", "cross"}:
+        k = r * 1.1
+        w = max(1.0, r * 0.45)
+        if shape == "plus":
+            segs = [((cx - k, cy), (cx + k, cy)), ((cx, cy - k), (cx, cy + k))]
+        else:
+            d = k * 0.75
+            segs = [((cx - d, cy - d), (cx + d, cy + d)), ((cx - d, cy + d), (cx + d, cy - d))]
+        for a, b in segs:
+            commands.append(("line", a[0], a[1], b[0], b[1], color, w, alpha))
+    else:
+        commands.append(("circle", cx, cy, r, color, None, 0, alpha))
+
+
+def _dash_path(points, pattern, width):
+    """Dashes along a polyline, continuing the pattern across vertices."""
+    unit = max(float(width), 1.0)
+    steps = [max(float(p), 0.5) * unit for p in pattern]
+    out = []
+    index, left = 0, steps[0]
+    for a, b in zip(points, points[1:]):
+        length = math.hypot(b[0] - a[0], b[1] - a[1])
+        if length <= 0:
+            continue
+        dx, dy = (b[0] - a[0]) / length, (b[1] - a[1]) / length
+        at = 0.0
+        while at < length:
+            step = min(left, length - at)
+            if index % 2 == 0:
+                out.append(((a[0] + dx * at, a[1] + dy * at), (a[0] + dx * (at + step), a[1] + dy * (at + step))))
+            at += step
+            left -= step
+            if left <= 1e-9:
+                index += 1
+                left = steps[index % len(steps)]
+    return out
+
+
+def _draw_refs(spec, commands, window, px) -> None:
+    """geom_hline / geom_vline / geom_abline, clipped to the panel."""
+    scales = spec.get("scales") or {}
+    sx, sy = scales.get("x") or {}, scales.get("y") or {}
+    left, right, bottom, top = window
+    for ref in spec.get("refs") or []:
+        kind = ref.get("kind")
+        if kind == "hline":
+            v = _unit(sy, ref["value"])
+            if not bottom <= v <= top:
+                continue
+            ends = [(left, v), (right, v)]
+        elif kind == "vline":
+            u = _unit(sx, ref["value"])
+            if not left <= u <= right:
+                continue
+            ends = [(u, bottom), (u, top)]
+        else:
+            ends = _abline_ends(ref, sx, sy, window)
+            if ends is None:
+                continue
+        a, b = px(*ends[0]), px(*ends[1])
+        width = float(ref.get("width") or 1.0)
+        color = ref.get("color") or "#000000"
+        alpha = float(ref.get("alpha", 1.0))
+        for p0, p1 in _dash_segments(a, b, ref.get("dash"), width):
+            commands.append(("line", p0[0], p0[1], p1[0], p1[1], color, width, alpha))
+
+
+def _abline_ends(ref, sx, sy, window):
+    """The visible piece of y = intercept + slope x, in unit coordinates."""
+    left, right, bottom, top = window
+    xlo, xhi = float(sx.get("lo", 0.0)), float(sx.get("hi", 1.0))
+    ylo, yhi = float(sy.get("lo", 0.0)), float(sy.get("hi", 1.0))
+    def unit_y(u):
+        x = xlo + u * (xhi - xlo)
+        y = float(ref["intercept"]) + float(ref["slope"]) * x
+        return (y - ylo) / ((yhi - ylo) or 1.0)
+    u0, u1 = left, right
+    v0, v1 = unit_y(u0), unit_y(u1)
+    # Clip the segment to bottom <= v <= top.
+    if v0 == v1:
+        return [(u0, v0), (u1, v1)] if bottom <= v0 <= top else None
+    t_lo = (bottom - v0) / (v1 - v0)
+    t_hi = (top - v0) / (v1 - v0)
+    t0, t1 = max(0.0, min(t_lo, t_hi)), min(1.0, max(t_lo, t_hi))
+    if t1 <= t0:
+        return None
+    return [
+        (u0 + t0 * (u1 - u0), v0 + t0 * (v1 - v0)),
+        (u0 + t1 * (u1 - u0), v0 + t1 * (v1 - v0)),
+    ]
+
+
+def _dash_segments(a, b, pattern, width):
+    """Split a line into dashes; the pattern is in multiples of the width."""
+    if not pattern:
+        return [(a, b)]
+    length = math.hypot(b[0] - a[0], b[1] - a[1])
+    if length <= 0:
+        return []
+    unit = max(float(width), 1.0)
+    steps = [max(float(p), 0.5) * unit for p in pattern]
+    dx, dy = (b[0] - a[0]) / length, (b[1] - a[1]) / length
+    out, at, index = [], 0.0, 0
+    while at < length:
+        step = steps[index % len(steps)]
+        end = min(at + step, length)
+        if index % 2 == 0:
+            out.append(((a[0] + dx * at, a[1] + dy * at), (a[0] + dx * end, a[1] + dy * end)))
+        at = end
+        index += 1
+    return out
 
 
 def _unit(scale: dict, value) -> float:
