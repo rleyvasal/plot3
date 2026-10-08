@@ -17,6 +17,7 @@ from plot3.geoms import (
     area,
     coord_3d,
     coord_equal,
+    coord_flip,
     coord_polar,
     derivative,
     facet_grid,
@@ -334,7 +335,7 @@ class ggplot:
             g.cscale = other
         elif isinstance(other, (facet_wrap, facet_grid)):
             g.facet = other
-        elif isinstance(other, (coord_3d, coord_equal, coord_polar)):
+        elif isinstance(other, (coord_3d, coord_equal, coord_polar, coord_flip)):
             g.coord = other
         elif isinstance(other, stat_density_3d):
             g.stat_density_3d = other

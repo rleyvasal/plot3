@@ -56,6 +56,8 @@ class aes(dict):
     root), so a bubble chart reads population as area. A constant
     ``geom_point(size=)`` is still one size for the whole layer.
 
+    ``xmin``/``xmax``/``xend``/``yend`` place rectangles and segments, and
+    ``sample`` is the column a Q-Q plot compares with a distribution.
     ``ymin`` and ``ymax`` are the ends of an error bar or ribbon. ``label``
     is the text of ``geom_text``. ``shape`` picks point symbols and
     ``linetype`` dash patterns per group.
@@ -92,6 +94,11 @@ class aes(dict):
         label=None,
         shape=None,
         linetype=None,
+        xmin=None,
+        xmax=None,
+        xend=None,
+        yend=None,
+        sample=None,
     ):
         super().__init__()
         colour_value = color if color is not None else colour
@@ -104,7 +111,12 @@ class aes(dict):
                      ("ymax", ymax),
                      ("label", label),
                      ("shape", shape),
-                     ("linetype", linetype)):
+                     ("linetype", linetype),
+                     ("xmin", xmin),
+                     ("xmax", xmax),
+                     ("xend", xend),
+                     ("yend", yend),
+                     ("sample", sample)):
             if v is not None:
                 self[k] = _as_column_name(v)
 
@@ -114,10 +126,12 @@ class _Geom:
     sort_x = False
 
     def __init__(self, mapping: aes | None = None, *, color=None, colour=None,
-                 alpha=None, **params):
+                 alpha=None, data=None, **params):
         self.mapping = mapping or aes()
         self.const_color = color if color is not None else colour
         self.alpha = alpha
+        # A layer's own rows (ggplot2's geom_rect(data = periods, ...)).
+        self.layer_data = data
         self.params = params
 
 
@@ -1074,6 +1088,111 @@ def annotate(geom: str, *, x=None, y=None, xmin=None, xmax=None, ymin=None,
     out._replace_mapping = True
     out._annotation = True
     return out
+
+
+class geom_tile(_Geom):
+    """Heatmap cells: a rectangle at each (x, y), coloured by ``fill``.
+
+    x and y may be categories or numbers; ``width``/``height`` default to
+    the spacing of the values. ``geom_raster`` is the same.
+    """
+
+    kind = "tile"
+
+    def __init__(self, mapping=None, *, width=None, height=None, **kw):
+        super().__init__(mapping, **kw)
+        self.width = width
+        self.height = height
+
+
+geom_raster = geom_tile
+
+
+class geom_area(_Geom):
+    """Filled area under ``y``; groups (``fill``) stack, first level on top.
+
+    ``position="stack"`` (default), ``"fill"`` (shares of 1), or ``"identity"``.
+    """
+
+    kind = "area_stat"
+
+    def __init__(self, mapping=None, *, position="stack", **kw):
+        super().__init__(mapping, **kw)
+        self.position = position
+
+
+class geom_step(_Geom):
+    """A staircase line: ``direction="hv"`` (default), ``"vh"``, or ``"mid"``."""
+
+    kind = "step"
+
+    def __init__(self, mapping=None, *, direction="hv", linewidth=2.0, linetype=None, **kw):
+        super().__init__(mapping, **kw)
+        self.direction = direction
+        self.linewidth = float(linewidth)
+        dash_pattern(linetype)
+        self.linetype = linetype
+
+
+class geom_segment(_Geom):
+    """A line from (x, y) to (xend, yend) for every row."""
+
+    kind = "segment"
+
+    def __init__(self, mapping=None, *, linewidth=1.0, linetype=None, **kw):
+        super().__init__(mapping, **kw)
+        self.linewidth = float(linewidth)
+        dash_pattern(linetype)
+        self.linetype = linetype
+
+
+class geom_rect(_Geom):
+    """A rectangle from xmin..xmax and ymin..ymax for every row (shaded periods)."""
+
+    kind = "rect"
+
+
+class geom_qq(_Geom):
+    """Q-Q plot: sorted ``aes(sample=)`` against normal quantiles."""
+
+    kind = "qq"
+
+    def __init__(self, mapping=None, *, size=None, **kw):
+        super().__init__(mapping, **kw)
+        self.size = size
+
+
+class geom_qq_line(_Geom):
+    """The reference line of a Q-Q plot, through the quartiles (as in R)."""
+
+    kind = "qq_line"
+
+    def __init__(self, mapping=None, *, linewidth=1.5, linetype=None, **kw):
+        super().__init__(mapping, **kw)
+        self.linewidth = float(linewidth)
+        dash_pattern(linetype)
+        self.linetype = linetype
+
+
+stat_qq = geom_qq
+stat_qq_line = geom_qq_line
+
+
+class stat_ecdf(_Geom):
+    """Empirical cumulative distribution of ``x`` as a step line, per group."""
+
+    kind = "ecdf"
+
+    def __init__(self, mapping=None, *, pad=True, linewidth=2.0, **kw):
+        super().__init__(mapping, **kw)
+        self.pad = bool(pad)
+        self.linewidth = float(linewidth)
+
+
+class coord_flip:
+    """Swap x and y: horizontal bars and boxplots, long category names on y."""
+
+    kind = "flip"
 
 
 class geom_histogram(_Geom):

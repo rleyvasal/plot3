@@ -687,3 +687,344 @@ def summary(geom: _Geom, mapping: dict, data: Any):
         return dot
     raise ValueError("stat_summary(geom=) is 'pointrange', 'errorbar', 'linerange', 'col', or 'point'")
 
+
+
+# ── tiles, areas, steps, segments, rectangles ────────────────────────────────
+
+
+def _rect_rows(lefts, rights, bottoms, tops, keep_cols: dict):
+    """Rectangles as 4-point polygons (left edge up, right edge down)."""
+    xs, ys, groups = [], [], []
+    extra = {name: [] for name in keep_cols}
+    for i in range(len(lefts)):
+        values = (lefts[i], rights[i], bottoms[i], tops[i])
+        if not all(np.isfinite(values)):
+            continue
+        groups.append([len(xs), 4])
+        xs += [lefts[i], lefts[i], rights[i], rights[i]]
+        ys += [bottoms[i], tops[i], tops[i], bottoms[i]]
+        for name, column in keep_cols.items():
+            extra[name] += [column[i]] * 4
+    return xs, ys, groups, extra
+
+
+def tile(geom: _Geom, mapping: dict, data: Any) -> _Geom:
+    """geom_tile / geom_raster: a heatmap cell per row."""
+    xcol, ycol = mapping.get("x"), mapping.get("y")
+    if not xcol or not ycol:
+        raise ValueError("geom_tile() requires aes(x=, y=) and usually fill=")
+    colour = mapping.get("color")
+    colour = colour if colour and has_column(data, colour) else None
+    frame = _frame(data, [xcol, ycol, colour])
+    xaxis, yaxis = _axis(frame[xcol]), _axis(frame[ycol])
+    width = getattr(geom, "width", None)
+    height = getattr(geom, "height", None)
+    w = xaxis.step() if width is None else float(width) * (1.0 if xaxis.kind != "cat" else 1.0)
+    h = yaxis.step() if height is None else float(height)
+    xs, ys = xaxis.values, yaxis.values
+    keep = {colour: frame[colour].tolist()} if colour else {}
+    rx, ry, groups, extra = _rect_rows(xs - w / 2, xs + w / 2, ys - h / 2, ys + h / 2, keep)
+    out_frame = pd.DataFrame({"x": xaxis.out(np.asarray(rx)), "y": yaxis.out(np.asarray(ry))})
+    out_map = {"x": "x", "y": "y"}
+    if colour:
+        out_frame[colour] = extra[colour]
+        out_map["colour"] = colour
+    out = _layer("poly", out_frame, out_map, geom, _groups=groups, linewidth=0.01)
+    out.alpha = geom.alpha if geom.alpha is not None else 1.0
+    _title(out, "x", xcol)
+    _title(out, "y", ycol)
+    _levels_hook(out, xaxis)
+    if yaxis.kind == "cat" and yaxis.levels is not None:
+        out._y_levels = list(yaxis.levels)
+    return out
+
+
+def area(geom: _Geom, mapping: dict, data: Any):
+    """geom_area: filled from 0, groups stacked on a shared x grid (ggplot2)."""
+    xcol, ycol = mapping.get("x"), mapping.get("y")
+    if not xcol or not ycol:
+        raise ValueError("geom_area() requires aes(x=, y=)")
+    colour = mapping.get("color")
+    colour = colour if colour and colour not in {xcol, ycol} and has_column(data, colour) else None
+    frame = _frame(data, [xcol, ycol, colour])
+    axis = _axis(frame[xcol])
+    if axis.kind == "cat":
+        raise ValueError("geom_area() needs a numeric or date x")
+    groups, levels = _colour_groups(frame, colour)
+    kind, _w = position_kind(getattr(geom, "position", None), "stack")
+    grid = np.unique(axis.values[np.isfinite(axis.values)])
+    yv = frame[ycol].to_numpy(np.float64)
+    series = []
+    for g in range(len(levels)):
+        rows = np.flatnonzero(groups == g)
+        order = np.argsort(axis.values[rows])
+        gx, gy = axis.values[rows][order], yv[rows][order]
+        ok = np.isfinite(gx) & np.isfinite(gy)
+        gx, gy = gx[ok], gy[ok]
+        # Outside a group's own x range it adds nothing to the stack.
+        series.append(np.interp(grid, gx, gy, left=0.0, right=0.0) if gx.size else np.zeros_like(grid))
+    bottoms = [np.zeros_like(grid) for _ in series]
+    tops = [s.copy() for s in series]
+    if kind in {"stack", "fill"} and len(series) > 1:
+        running = np.zeros_like(grid)
+        for g in reversed(range(len(series))):  # first level on top
+            bottoms[g] = running.copy()
+            running = running + series[g]
+            tops[g] = running.copy()
+        if kind == "fill":
+            total = np.where(running > 0, running, 1.0)
+            bottoms = [b / total for b in bottoms]
+            tops = [t / total for t in tops]
+    colour_values = frame[colour].to_numpy() if colour else None
+    pieces = []
+    for g in range(len(series)):
+        rows = np.flatnonzero(groups == g)
+        value = colour_values[rows[0]] if colour and rows.size else None
+        pieces.append(_band(grid, bottoms[g], tops[g], value, colour, axis))
+    out = _bands_layer(pieces, colour, geom, axis, 0.85)
+    if out is None:
+        raise ValueError("geom_area() needs at least two x values")
+    out._baseline_zero = True
+    _title(out, "x", xcol)
+    _title(out, "y", "proportion" if kind == "fill" else ycol)
+    return out
+
+
+def step(geom: _Geom, mapping: dict, data: Any) -> _Geom:
+    """geom_step: horizontal then vertical ("hv"), "vh", or "mid"."""
+    xcol, ycol = mapping.get("x"), mapping.get("y")
+    if not xcol or not ycol:
+        raise ValueError("geom_step() requires aes(x=, y=)")
+    direction = str(getattr(geom, "direction", "hv"))
+    if direction not in {"hv", "vh", "mid"}:
+        raise ValueError("geom_step(direction=) is 'hv', 'vh', or 'mid'")
+    colour = mapping.get("color")
+    colour = colour if colour and has_column(data, colour) else None
+    group = mapping.get("group")
+    split = colour or (group if group and has_column(data, group) else None)
+    frame = _frame(data, [xcol, ycol, split])
+    axis = _axis(frame[xcol])
+    groups, levels = _colour_groups(frame, split)
+    xs_all, ys_all = axis.values, frame[ycol].to_numpy(np.float64)
+    out_x, out_y, out_c, starts = [], [], [], []
+    for g in range(len(levels)):
+        rows = np.flatnonzero(groups == g)
+        order = rows[np.argsort(xs_all[rows], kind="stable")]
+        px, py = _step_path(xs_all[order], ys_all[order], direction)
+        if len(px) < 2:
+            continue
+        starts.append([len(out_x), len(px)])
+        out_x += px
+        out_y += py
+        if colour:
+            out_c += [frame[colour].iloc[order[0]]] * len(px)
+    frame_out = pd.DataFrame({"x": axis.out(np.asarray(out_x)), "y": out_y})
+    out_map = {"x": "x", "y": "y"}
+    if colour:
+        frame_out[colour] = out_c
+        out_map["colour"] = colour
+    out = _layer("line", frame_out, out_map, geom, _groups=starts,
+                 linewidth=float(getattr(geom, "linewidth", 2.0) or 2.0))
+    out.linetype = getattr(geom, "linetype", None)
+    _title(out, "x", xcol)
+    _title(out, "y", getattr(geom, "_y_name", None) or ycol)
+    _levels_hook(out, axis)
+    return out
+
+
+def _step_path(xs, ys, direction):
+    px, py = [], []
+    for i in range(len(xs)):
+        if i == 0:
+            px.append(float(xs[0]))
+            py.append(float(ys[0]))
+            continue
+        x0, y0, x1, y1 = float(xs[i - 1]), float(ys[i - 1]), float(xs[i]), float(ys[i])
+        if direction == "hv":
+            px += [x1, x1]
+            py += [y0, y1]
+        elif direction == "vh":
+            px += [x0, x1]
+            py += [y1, y1]
+        else:
+            mid = (x0 + x1) / 2
+            px += [mid, mid, x1]
+            py += [y0, y1, y1]
+    return px, py
+
+
+def segment(geom: _Geom, mapping: dict, data: Any) -> _Geom:
+    """geom_segment: a line from (x, y) to (xend, yend) for every row."""
+    need = ["x", "y", "xend", "yend"]
+    if any(not mapping.get(k) for k in need):
+        raise ValueError("geom_segment() requires aes(x=, y=, xend=, yend=)")
+    colour = mapping.get("color")
+    colour = colour if colour and has_column(data, colour) else None
+    frame = _frame(data, [mapping[k] for k in need] + [colour])
+    cols = [frame[mapping[k]].to_numpy(np.float64) for k in need]
+    out_x, out_y, out_c, starts = [], [], [], []
+    for i in range(len(frame)):
+        x, y, xe, ye = (c[i] for c in cols)
+        if not all(np.isfinite([x, y, xe, ye])):
+            continue
+        starts.append([len(out_x), 2])
+        out_x += [x, xe]
+        out_y += [y, ye]
+        if colour:
+            out_c += [frame[colour].iloc[i]] * 2
+    frame_out = pd.DataFrame({"x": out_x, "y": out_y})
+    out_map = {"x": "x", "y": "y"}
+    if colour:
+        frame_out[colour] = out_c
+        out_map["colour"] = colour
+    out = _layer("line", frame_out, out_map, geom, _groups=starts,
+                 linewidth=float(getattr(geom, "linewidth", 1.0) or 1.0), _ink_default=not colour)
+    out.linetype = getattr(geom, "linetype", None)
+    _title(out, "x", mapping["x"])
+    _title(out, "y", mapping["y"])
+    return out
+
+
+def rect(geom: _Geom, mapping: dict, data: Any) -> _Geom:
+    """geom_rect: a rectangle from xmin..xmax and ymin..ymax for every row."""
+    need = ["xmin", "xmax", "ymin", "ymax"]
+    if any(not mapping.get(k) for k in need):
+        raise ValueError("geom_rect() requires aes(xmin=, xmax=, ymin=, ymax=)")
+    colour = mapping.get("color")
+    colour = colour if colour and has_column(data, colour) else None
+    frame = _frame(data, [mapping[k] for k in need] + [colour])
+    x0, x1, y0, y1 = (frame[mapping[k]].to_numpy(np.float64) for k in need)
+    keep = {colour: frame[colour].tolist()} if colour else {}
+    rx, ry, groups, extra = _rect_rows(x0, x1, y0, y1, keep)
+    out_frame = pd.DataFrame({"x": rx, "y": ry})
+    out_map = {"x": "x", "y": "y"}
+    if colour:
+        out_frame[colour] = extra[colour]
+        out_map["colour"] = colour
+    out = _layer("poly", out_frame, out_map, geom, _groups=groups, linewidth=0.01)
+    out.alpha = geom.alpha if geom.alpha is not None else 0.6
+    _title(out, "x", mapping["xmin"])
+    _title(out, "y", mapping["ymin"])
+    return out
+
+
+# ── distributions: Q-Q and ECDF ──────────────────────────────────────────────
+
+
+def _ppoints(n: int) -> np.ndarray:
+    """R's ppoints: (i - a) / (n + 1 - 2a), a = 3/8 up to 10 points, else 1/2."""
+    a = 3.0 / 8.0 if n <= 10 else 0.5
+    return (np.arange(1, n + 1) - a) / (n + 1 - 2 * a)
+
+
+def _sample_groups(geom, mapping, data, who):
+    sample = mapping.get("sample") or mapping.get("y")
+    if not sample:
+        raise ValueError(f"{who}() requires aes(sample=)")
+    colour = mapping.get("color")
+    colour = colour if colour and colour != sample and has_column(data, colour) else None
+    frame = _frame(data, [sample, colour])
+    groups, levels = _colour_groups(frame, colour)
+    values = frame[sample].to_numpy(np.float64)
+    out = []
+    for g in range(len(levels)):
+        rows = np.flatnonzero(groups == g)
+        v = np.sort(values[rows][np.isfinite(values[rows])])
+        label = frame[colour].iloc[rows[0]] if colour and rows.size else None
+        if v.size:
+            out.append((v, label))
+    return sample, colour, out
+
+
+def qq(geom: _Geom, mapping: dict, data: Any) -> _Geom:
+    """geom_qq / stat_qq: sample quantiles against the normal distribution."""
+    from plot3.special import qnorm
+
+    sample, colour, parts = _sample_groups(geom, mapping, data, "geom_qq")
+    xs, ys, cs = [], [], []
+    for values, label in parts:
+        theory = np.asarray(qnorm(_ppoints(values.size)), dtype=np.float64)
+        xs += theory.tolist()
+        ys += values.tolist()
+        cs += [label] * values.size
+    frame = pd.DataFrame({"x": xs, "y": ys})
+    out_map = {"x": "x", "y": "y"}
+    if colour:
+        frame[colour] = cs
+        out_map["colour"] = colour
+    out = _layer("point", frame, out_map, geom)
+    out.size = getattr(geom, "size", None)
+    _title(out, "x", "theoretical")
+    _title(out, "y", "sample")
+    return out
+
+
+def qq_line(geom: _Geom, mapping: dict, data: Any) -> _Geom:
+    """geom_qq_line: the line through the first and third quartiles."""
+    from plot3.special import qnorm
+
+    sample, colour, parts = _sample_groups(geom, mapping, data, "geom_qq_line")
+    xs, ys, cs, starts = [], [], [], []
+    q_theory = np.asarray(qnorm(np.array([0.25, 0.75])), dtype=np.float64)
+    for values, label in parts:
+        if values.size < 2:
+            continue
+        q_sample = np.quantile(values, [0.25, 0.75])  # R's quantile type 7
+        slope = (q_sample[1] - q_sample[0]) / (q_theory[1] - q_theory[0])
+        intercept = q_sample[0] - slope * q_theory[0]
+        theory = np.asarray(qnorm(_ppoints(values.size)), dtype=np.float64)
+        ends = np.array([theory.min(), theory.max()])
+        starts.append([len(xs), 2])
+        xs += ends.tolist()
+        ys += (intercept + slope * ends).tolist()
+        cs += [label] * 2
+    frame = pd.DataFrame({"x": xs, "y": ys})
+    out_map = {"x": "x", "y": "y"}
+    if colour:
+        frame[colour] = cs
+        out_map["colour"] = colour
+    out = _layer("line", frame, out_map, geom, _groups=starts,
+                 linewidth=float(getattr(geom, "linewidth", 1.5) or 1.5), _ink_default=not colour)
+    out.linetype = getattr(geom, "linetype", None)
+    _title(out, "x", "theoretical")
+    _title(out, "y", "sample")
+    return out
+
+
+def ecdf(geom: _Geom, mapping: dict, data: Any) -> _Geom:
+    """stat_ecdf: the empirical cumulative distribution as a step line."""
+    xcol = mapping.get("x")
+    if not xcol:
+        raise ValueError("stat_ecdf() requires aes(x=)")
+    colour = mapping.get("color")
+    colour = colour if colour and colour != xcol and has_column(data, colour) else None
+    frame = _frame(data, [xcol, colour])
+    groups, levels = _colour_groups(frame, colour)
+    values = frame[xcol].to_numpy(np.float64)
+    finite = values[np.isfinite(values)]
+    span = float(finite.max() - finite.min()) if finite.size else 1.0
+    pad = 0.04 * (span or 1.0) if getattr(geom, "pad", True) else 0.0
+    rows_out = []
+    for g in range(len(levels)):
+        rows = np.flatnonzero(groups == g)
+        v = np.sort(values[rows][np.isfinite(values[rows])])
+        if v.size == 0:
+            continue
+        # F(x) at each distinct value: ties make one step, not several.
+        distinct = np.unique(v)
+        heights = np.searchsorted(v, distinct, side="right") / v.size
+        xs = np.concatenate([[distinct[0] - pad], distinct, [distinct[-1] + pad]])
+        ys = np.concatenate([[0.0], heights, [1.0]])
+        label = frame[colour].iloc[rows[0]] if colour else None
+        for x, y in zip(xs, ys):
+            rows_out.append({"__x": x, "__y": y, **({colour: label} if colour else {})})
+    table = pd.DataFrame(rows_out)
+    step_geom = _Geom(color=geom.const_color, alpha=geom.alpha)
+    step_geom.kind = "step"
+    step_geom.direction = "hv"
+    step_geom.linewidth = getattr(geom, "linewidth", 2.0)
+    step_geom._y_name = "ECDF"
+    out = step(step_geom, {"x": "__x", "y": "__y", **({"color": colour} if colour else {})}, table)
+    _title(out, "x", xcol)
+    _title(out, "y", "ECDF")
+    return out

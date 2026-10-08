@@ -2016,12 +2016,14 @@ def _paint_legend(commands, origin, metrics, theme, fonts) -> None:
             commands.append(("text", lx + 22, cursor, row[1], tick, ink2, "start", "top", 0, 400))
             cursor += row_h
         elif row[0] == "ramp":
-            _draw_ramp(commands, lx + 8, cursor + 2, 110, 8, row[1])
+            # The bar fits the box: a narrow legend must not cut off its end label.
+            bar = max(40.0, min(110.0, float(metrics["w"]) - 16.0))
+            _draw_ramp(commands, lx + 8, cursor + 2, bar, 8, row[1])
             # Three significant figures, as the viewer shows them.
             lo = _short_number(row[2])
             hi = _short_number(row[3])
             commands.append(("text", lx + 8, cursor + 12, lo, max(9, tick - 1), ink2, "start", "top", 0, 400))
-            commands.append(("text", lx + 118, cursor + 12, hi, max(9, tick - 1), ink2, "end", "top", 0, 400))
+            commands.append(("text", lx + 8 + bar, cursor + 12, hi, max(9, tick - 1), ink2, "end", "top", 0, 400))
             cursor += 28
         else:
             diameter = max(4.0, row[2] * 16.0)

@@ -335,6 +335,7 @@ def _histogram_breaks(
 _FILL_KINDS = frozenset({
     "col", "bar", "histogram", "boxplot", "box", "violin", "poly", "area",
     "density", "surface", "isosurface", "density_3d_stat", "ribbon",
+    "tile", "rect", "area_stat",
 })
 
 
@@ -444,7 +445,8 @@ def _ref_specs(ref_layers, scales, theme) -> list[dict]:
 
 
 _STAT2D_KINDS = frozenset(
-    {"jitter", "errorbar", "linerange", "pointrange", "ribbon", "smooth", "summary"}
+    {"jitter", "errorbar", "linerange", "pointrange", "ribbon", "smooth", "summary",
+     "tile", "area_stat", "step", "segment", "rect", "qq", "qq_line", "ecdf"}
 )
 
 
@@ -501,6 +503,13 @@ def expand_stat_geom(
             return stat2d.smooth(geom, mapping, data)
         elif geom.kind == "summary":
             return stat2d.summary(geom, mapping, data)
+        else:
+            handler = {
+                "tile": stat2d.tile, "area_stat": stat2d.area, "step": stat2d.step,
+                "segment": stat2d.segment, "rect": stat2d.rect, "qq": stat2d.qq,
+                "qq_line": stat2d.qq_line, "ecdf": stat2d.ecdf,
+            }[geom.kind]
+            return handler(geom, mapping, data)
     if geom.kind == "bar":
         if "x" not in mapping:
             raise ValueError("geom_bar() requires aes(x=)")
@@ -1262,6 +1271,18 @@ def _hex_or_none(colour):
         return colour
 
 
+def _label_text(value) -> str:
+    """geom_text label: numbers to 4 significant figures, text as given."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return ""
+    if isinstance(value, (float, np.floating)):
+        number = float(value)
+        if abs(number) >= 1e4:
+            return f"{number:,.0f}"
+        return f"{number:.4g}".replace("-", "−")
+    return str(value)
+
+
 def _layer_name(geom) -> str:
     """The geom as the user wrote it, for messages: geom_point, geom_line."""
     name = type(geom).__name__
@@ -1476,7 +1497,9 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     # Function layers and vector fields sample their own grid, so a figure
     # may have no data frame.
     needs_data = any(
-        getattr(layer, "kind", None) not in {"function", "vector"}
+        getattr(layer, "kind", None) not in {"function", "vector", "hline", "vline", "abline"}
+        and getattr(layer, "layer_data", None) is None
+        and not getattr(layer, "_annotation", False)
         for layer in g.layers
     )
     if g.data is None and needs_data:
@@ -1537,10 +1560,11 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         addon_map.setdefault(int(index), []).append(addon)
     expanded = []
     for index, geom in enumerate(layers_in):
+        layer_data = getattr(geom, "layer_data", None)
         result = expand_stat_geom(
             geom,
             g.mapping,
-            data,
+            data if layer_data is None else layer_data,
             domains,
             transition,
             slider,
@@ -1554,6 +1578,16 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     from plot3.calculus import mark_intersections
 
     expanded = mark_intersections(expanded)
+    from plot3.geoms import coord_flip as _coord_flip
+
+    if isinstance(coord, _coord_flip):
+        # Stats ran upright; now every layer exchanges x and y.
+        from plot3.flip import flip_layers, flip_refs, flipped_figure
+
+        expanded = flip_layers(expanded, g)
+        g = flipped_figure(g)
+        ref_layers = flip_refs(ref_layers)
+        coord = None
     resolved = []  # per layer: (geom, mapping)
     for geom in expanded:
         # Function layers carry their own columns; don't inherit colour/group.
@@ -1675,12 +1709,12 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             return "log10"
         return None
 
-    def _absorb_level_positions(v: np.ndarray, levels: list[str]) -> np.ndarray:
-        if _axis_trans("x") == "log10":
-            raise ValueError("scale_x_log10() cannot be used with categorical x")
-        sc = scales.get("x")
+    def _absorb_level_positions(v: np.ndarray, levels: list[str], axis: str = "x") -> np.ndarray:
+        if _axis_trans(axis) == "log10":
+            raise ValueError(f"scale_{axis}_log10() cannot be used with categorical {axis}")
+        sc = scales.get(axis)
         if sc is None or (sc.kind == "num" and not math.isfinite(sc.lo)):
-            sc = scales["x"] = Scale("cat")
+            sc = scales[axis] = Scale("cat")
         elif sc.kind != "cat":
             raise ValueError(
                 "aes x: layers disagree on scale type (cat vs num)"
@@ -1689,12 +1723,15 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         sc.cats = merged
         where = {str(level): merged.index(str(level)) for level in levels}
         flat = np.asarray(v, dtype=np.float64)
-        base = np.rint(flat)
+        # Nearest category, clamped: a tile's outer edge sits at n - 0.5,
+        # which rounds past the last level. Keep the offset from it.
+        top = max(len(levels) - 1, 0)
         out = np.full(flat.shape, np.nan)
-        for i, (p, k) in enumerate(zip(flat, base)):
-            if not math.isfinite(p) or not 0 <= int(k) < len(levels):
+        for i, p in enumerate(flat):
+            if not math.isfinite(p) or not levels:
                 continue
-            out[i] = where[str(levels[int(k)])] + (p - k)
+            k = int(min(max(math.floor(p + 0.5), 0), top))
+            out[i] = where[str(levels[k])] + (p - k)
         return out
 
     def _absorb_position(axis: str, kind: str, v: np.ndarray, cats: list[str]):
@@ -1873,6 +1910,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             layer_vals.append(_vals_from_function_anim(anim))
             continue
         frame = getattr(geom, "data_override", None)
+        if frame is None:
+            frame = getattr(geom, "layer_data", None)
         if frame is None:
             frame = data
         if geom.kind == "box":
@@ -2053,12 +2092,16 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         vals = {}
         for a in axes:
             kind, v, cats = col_values(sub[m[a]])
-            levels = getattr(geom, "_violin_levels", None) if a == "x" else None
+            levels = (
+                getattr(geom, "_violin_levels", None) if a == "x"
+                else getattr(geom, "_y_levels", None) if a == "y"
+                else None
+            )
             if levels is not None and kind == "num":
                 # Numeric positions on a categorical axis (violins, dodged
-                # bars, error bars). Join the shared category list by name, so
-                # bars and the error bars on them agree whatever their order.
-                vals[a] = _absorb_level_positions(v, list(levels))
+                # bars, error bars, heatmap rows, a flipped plot). Join the
+                # shared category list by name, so layers agree on order.
+                vals[a] = _absorb_level_positions(v, list(levels), a)
                 continue
             vals[a] = _absorb_position(a, kind, v, cats)
         # Histogram: domain is full bin edges, not just bin centres.
@@ -2102,9 +2145,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         if geom.kind == "line" and "linetype" in m:
             vals["linetype"] = _discrete_codes(sub[m["linetype"]])
         if geom.kind == "text":
-            vals["label"] = [
-                "" if pd.isna(v) else str(v) for v in sub[m["label"]].tolist()
-            ]
+            vals["label"] = [_label_text(v) for v in sub[m["label"]].tolist()]
         if geom.kind == "point" and "size" in m:
             skind, sv, _ = col_values(sub[m["size"]])
             if skind != "num":
