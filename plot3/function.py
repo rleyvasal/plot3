@@ -309,6 +309,8 @@ def _expand_curve(geom: _Geom, formula: Formula, axes: _Axes, domains: dict) -> 
         formula, axes, samples, lo, hi, source, count
     )
     values = _curve_values(formula, axes, samples)
+    if getattr(geom, "n", None) is None:
+        samples, values = _refine_curve(formula, axes, samples, values)
     view_axis = "x" if axes.computed == "x" else "y"
     view_lim = _limit_pair(getattr(geom, view_axis + "lim", None), view_axis + "lim")
     view_name = axes.x if view_axis == "x" else axes.y
@@ -344,6 +346,60 @@ def _expand_curve(geom: _Geom, formula: Formula, axes: _Axes, domains: dict) -> 
     if note:
         out._notes = [note]
     return out
+
+
+_REFINE_ROUNDS = 8
+_REFINE_MAX_EXTRA = 4000
+
+
+def _refine_curve(formula, axes, samples, values):
+    """More samples where the curve bends sharply between them.
+
+    A narrow peak can fall between evenly spaced samples and be drawn short
+    (exp(-2000 x^2) topping out at 0.71). Wherever three neighbours bend by
+    more than a small share of the curve's height, the two gaps around the
+    middle one get a midpoint, and again, up to a few thousand points.
+    Poles (non-finite values) are left to the clipping that follows.
+    """
+    samples = np.asarray(samples, dtype=np.float64)
+    values = np.asarray(values, dtype=np.float64)
+    finite = np.isfinite(values)
+    if finite.sum() < 3:
+        return samples, values
+    span = float(np.nanmax(values[finite]) - np.nanmin(values[finite]))
+    if not np.isfinite(span) or span <= 0:
+        return samples, values
+    tol = 0.002 * span
+    added = 0
+    for _ in range(_REFINE_ROUNDS):
+        v = values
+        left, mid, right = v[:-2], v[1:-1], v[2:]
+        bend = np.abs(left - 2.0 * mid + right)
+        # Only peaks and valleys: a curve climbing toward a pole bends hard
+        # too, and the clipping that follows must see it as it is.
+        turning = ((mid >= left) & (mid >= right)) | ((mid <= left) & (mid <= right))
+        flagged = np.flatnonzero(np.isfinite(bend) & (bend > tol) & turning) + 1
+        if flagged.size == 0:
+            break
+        gaps = np.unique(np.concatenate([flagged - 1, flagged]))
+        gaps = gaps[(gaps >= 0) & (gaps < samples.size - 1)]
+        gaps = gaps[np.isfinite(values[gaps]) & np.isfinite(values[gaps + 1])]
+        # A big jump across zero is a pole between the samples (tan x).
+        jump = (np.sign(values[gaps]) != np.sign(values[gaps + 1])) & (
+            np.abs(values[gaps] - values[gaps + 1]) > 0.5 * span
+        )
+        gaps = gaps[~jump]
+        # Gaps already finer than float noise cannot be split usefully.
+        width = samples[gaps + 1] - samples[gaps]
+        gaps = gaps[width > 1e-12 * max(1.0, float(np.abs(samples).max()))]
+        if gaps.size == 0 or added + gaps.size > _REFINE_MAX_EXTRA:
+            break
+        mids = 0.5 * (samples[gaps] + samples[gaps + 1])
+        mid_values = _curve_values(formula, axes, mids)
+        samples = np.insert(samples, gaps + 1, mids)
+        values = np.insert(values, gaps + 1, mid_values)
+        added += gaps.size
+    return samples, values
 
 
 def _curve_values(formula: Formula, axes: _Axes, samples: np.ndarray) -> np.ndarray:

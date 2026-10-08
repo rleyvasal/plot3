@@ -533,7 +533,8 @@ def _ref_specs(ref_layers, scales, theme) -> list[dict]:
 _STAT2D_KINDS = frozenset(
     {"jitter", "errorbar", "linerange", "pointrange", "ribbon", "smooth", "summary",
      "tile", "area_stat", "step", "segment", "rect", "qq", "qq_line", "ecdf",
-     "crossbar", "errorbarh", "polygon"}
+     "crossbar", "errorbarh", "polygon", "bin_2d", "hex", "density_2d",
+     "density_2d_filled", "contour", "ellipse"}
 )
 
 
@@ -607,7 +608,10 @@ def expand_stat_geom(
                 "segment": stat2d.segment, "rect": stat2d.rect, "qq": stat2d.qq,
                 "qq_line": stat2d.qq_line, "ecdf": stat2d.ecdf,
                 "crossbar": stat2d.crossbar, "errorbarh": stat2d.errorbarh,
-                "polygon": stat2d.polygon,
+                "polygon": stat2d.polygon, "bin_2d": stat2d.bin_2d,
+                "hex": stat2d.hex_bins, "density_2d": stat2d.density_2d,
+                "density_2d_filled": stat2d.density_2d, "contour": stat2d.contour,
+                "ellipse": stat2d.ellipse,
             }[geom.kind]
             return handler(geom, mapping, data)
     if geom.kind == "bar":
@@ -2782,8 +2786,17 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 "scale_colour_gradient() is for numbers; this colour is categorical. "
                 "Use scale_colour_manual() or scale_colour_brewer()"
             )
+        default_discrete = next(
+            (getattr(geom, "_default_discrete") for geom, _m in resolved
+             if getattr(geom, "_default_discrete", None)), None,
+        )
         if user_scale is not None:
             cat_colours = user_scale.colours(list(color_scale[1]), theme["cat"])
+        elif default_discrete:
+            # Ordered bands (geom_density_2d_filled): viridis, as ggplot2.
+            from plot3.scaling import scale_colour_viridis_d
+
+            cat_colours = scale_colour_viridis_d(default_discrete).colours(list(color_scale[1]), theme["cat"])
         else:
             from plot3.scaling import extend_palette
 

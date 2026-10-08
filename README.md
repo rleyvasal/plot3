@@ -128,6 +128,8 @@ ggplot(trial, aes(x="dose", y="response")) + geom_point() + geom_smooth()       
 | Labels beside points | `geom_text(position=position_nudge(y=0.3))`, or `nudge_y=` |
 | Shapes and maps | `geom_polygon(aes(group="id", fill="region"))`, concave shapes included |
 | Frequency lines | `geom_freqpoly(aes(colour="arm"), binwidth=0.5)` |
+| Big scatters, 2D distributions | `geom_hex()`, `geom_bin_2d()`, `geom_density_2d()`, `geom_density_2d_filled()`, `stat_ellipse()` (95% by group) |
+| Contours of a grid | `geom_contour(aes(x=, y=, z=))` |
 
 `aes()` reads expressions over your columns, as ggplot2 does:
 `aes(ymin="mean - se")`, `aes(y="log10(count)")`, `aes(colour="factor(cyl)")`,
@@ -404,13 +406,14 @@ tree) is shortened to twice its width so it does not become a thin column;
 | Points and lines | `geom_point`, `geom_jitter`, `geom_line`, `geom_path`, `geom_step`, `geom_segment`, `geom_text`, `geom_label` |
 | Bars and areas | `geom_col`, `geom_bar`, `geom_histogram`, `geom_freqpoly`, `geom_area`, `geom_ribbon`, `geom_rect`, `geom_tile`/`geom_raster`, `geom_polygon` |
 | Distributions | `geom_boxplot`, `geom_violin`, `geom_density`, `geom_qq`, `geom_qq_line`, `stat_ecdf`, `stat_summary` |
+| 2D distributions | `geom_bin_2d`, `geom_hex`, `geom_density_2d` / `stat_density_2d`, `geom_density_2d_filled`, `geom_contour`, `stat_ellipse` |
 | Uncertainty and fits | `geom_errorbar`, `geom_errorbarh`, `geom_crossbar`, `geom_pointrange`, `geom_linerange`, `geom_smooth(method="loess"/"lm")` |
 | Reference | `geom_hline`, `geom_vline`, `geom_abline`, `geom_rug`, `annotate("text"/"label"/"rect"/"segment"/"point")` |
 | Positions | `position="stack"/"dodge"/"fill"/"identity"/"jitter"`, `position_dodge(width)`, `position_stack()`, `position_fill()`, `position_jitter()`, `position_jitterdodge()`, `position_nudge()` |
 | Functions | `geom_function`, `geom_vector_field`, `area`, `tangent`, `derivative` |
 | Scales | see [Scales](#scales) |
 | Coordinates | `coord_cartesian`, `coord_flip`, `coord_equal` / `coord_fixed`, `coord_polar`, `coord_3d` |
-| Facets and layout | `facet_wrap`, `facet_grid`, `labeller="label_both"` / `labeller(var=dict)`, `p1 | p2`, `p1 / p2`, `plot_layout`, `plot_annotation` |
+| Facets and layout | `facet_wrap`, `facet_grid`, `labeller="label_both"` / `labeller(var=dict)`, `p1 \| p2`, `p1 / p2`, `plot_layout(widths, heights, height)`, `plot_annotation` |
 | Labels and themes | `labs(title, subtitle, caption, tag, x, y, colour, fill, alpha)`, `ggtitle`, `xlab`, `ylab`, `guides`, `theme_*`, `theme()`, `element_text`, `element_line`, `element_rect`, `element_blank` |
 | Animation | `transition_time`, `transition_states`, `slider` |
 | 3D | `geom_point3d`, `geom_surface`, `geom_isosurface`, `geom_box3d`, `stat_density_3d`, `read_bin` |
@@ -435,7 +438,7 @@ tree) is shortened to twice its width so it does not become a thin column;
 ## Development
 
 ```bash
-pytest -q                       # ~600 tests, including every example in this README
+pytest -q                       # ~670 tests, including every example in this README
 python examples/showcase_2d.py  # 2D gallery in the browser
 python examples/showcase_3d.py  # 3D gallery
 ```

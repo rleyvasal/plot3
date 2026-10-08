@@ -260,6 +260,30 @@ def _qt1(p: float, df: float) -> float:
 qt = _elementwise(_qt1)
 
 
+def _qf1(p: float, df1: float, df2: float) -> float:
+    """Quantile of the F distribution, from the incomplete beta by bisection."""
+    if math.isnan(p) or not (df1 > 0 and df2 > 0) or not 0.0 <= p <= 1.0:
+        return math.nan
+    if p == 0.0:
+        return 0.0
+    if p == 1.0:
+        return math.inf
+    lo, hi = 0.0, 1.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if _betainc1(mid, df1 / 2.0, df2 / 2.0) < p:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo <= 1e-15:
+            break
+    x = 0.5 * (lo + hi)
+    return df2 * x / (df1 * (1.0 - x))
+
+
+qf = _elementwise(_qf1)
+
+
 def pexp(q, rate=1.0):
     q, rate = _f(q), _f(rate)
     with np.errstate(all="ignore"):

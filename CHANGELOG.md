@@ -4,9 +4,18 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.4.0 — 2026-10-08
+
+ggplot2's everyday grammar, its defaults, and lidar scenes: R code ports
+with fewer changes and saves the way ggplot2 draws it.
 
 ### Added
+
+- 2D distributions: `geom_bin_2d`, `geom_hex`, `geom_density_2d`
+  (`stat_density_2d`), `geom_density_2d_filled`, `geom_contour` for gridded
+  `z`, and `stat_ellipse(type="t" / "norm" / "euclid", level=)`.
+- `plot_layout(height=)`; multi-panel figures in the viewer are as tall as
+  their rows of plots (400 px per row, 480 px at least) instead of 560 px.
 
 - `arrow(angle, length, ends, type)` for `geom_segment`, `geom_path`,
   `geom_line`, and `annotate("segment")`, in the viewer and saved files.
@@ -97,6 +106,9 @@ under **Changed**.
 - The viewer's size legend overlapped the colour bar's numbers.
 - Faceted viewer figures showed only colour squares in the legend: shapes,
   line types, colour bars, and size legends now appear.
+- `geom_function` drew narrow peaks short when they fell between samples
+  (`exp(-2000 x^2)` topped out at 0.71); it now samples more finely around
+  peaks and valleys, unless you set `n=`.
 - Infinite values were dropped silently; they now get a note, *Removed 1 row
   containing non-finite values*.
 - Boxplots grouped by a second variable (`aes(x="arm", colour="sex")`)

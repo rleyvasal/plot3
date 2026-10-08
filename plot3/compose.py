@@ -20,11 +20,14 @@ from typing import Any
 
 
 class plot_layout:
-    """``widths`` / ``heights``: relative sizes of the side-by-side or stacked parts."""
+    """``widths`` / ``heights``: relative sizes of the side-by-side or stacked
+    parts. ``height`` is the whole figure's height in the notebook viewer
+    (pixels, or a CSS length such as ``"60vh"``)."""
 
-    def __init__(self, *, widths=None, heights=None):
+    def __init__(self, *, widths=None, heights=None, height=None):
         self.widths = None if widths is None else [float(w) for w in widths]
         self.heights = None if heights is None else [float(h) for h in heights]
+        self.height = None if height is None else (height if isinstance(height, str) else f"{int(height)}px")
         for sizes in (self.widths, self.heights):
             if sizes is not None and any(v <= 0 for v in sizes):
                 raise ValueError("plot_layout() sizes must be positive")
@@ -80,7 +83,21 @@ class Composition:
         self.items = list(items)
         self.sizes = sizes
         self.annotation = annotation
-        self.height = "560px"
+        # None: tall enough for its rows of plots (see figure_height).
+        self.height = None
+
+    def rows(self) -> int:
+        """How many plots stand above one another."""
+        counts = [item.rows() if isinstance(item, Composition) else 1 for item in self.items]
+        return sum(counts) if self.direction == "col" else max(counts)
+
+    def figure_height(self) -> str:
+        """The viewer's height: as set, or 400 px per row of plots (480 px at
+        least, a single plot's height), plus room for a figure title."""
+        if self.height:
+            return self.height
+        extra = 40 if getattr(self.annotation, "title", None) else 0
+        return f"{max(480, 400 * self.rows()) + extra}px"
 
     @property
     def theme_family(self):
@@ -117,7 +134,9 @@ class Composition:
                 raise ValueError(
                     f"plot_layout() got {len(sizes)} sizes for {len(self.items)} parts"
                 )
-            out.sizes = sizes
+            out.sizes = sizes if sizes is not None else self.sizes
+            if other.height is not None:
+                out.height = other.height
             return out
         if isinstance(other, plot_annotation):
             out.annotation = other
@@ -239,7 +258,7 @@ iframe{{flex:1;width:100%;height:100%;border:0;background:{theme["surface"]}}}
             f'<div class="plot3-fig"><iframe srcdoc="{_htmlesc.escape(self.html(), quote=True)}" '
             'sandbox="allow-scripts allow-same-origin allow-pointer-lock allow-downloads" '
             'allow="fullscreen; clipboard-write" '
-            f'style="width:100%;height:{self.height};border:0;border-radius:6px;'
+            f'style="width:100%;height:{self.figure_height()};border:0;border-radius:6px;'
             f'background:{theme["surface"]}" title="plot3 figure"></iframe></div>'
         )
 

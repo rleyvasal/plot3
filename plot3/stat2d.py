@@ -779,8 +779,12 @@ def tile(geom: _Geom, mapping: dict, data: Any) -> _Geom:
     if colour:
         out_frame[colour] = extra[colour]
         out_map["colour"] = colour
-    out = _layer("poly", out_frame, out_map, geom, _groups=groups, linewidth=0.01)
-    out.alpha = geom.alpha if geom.alpha is not None else 1.0
+    alpha = geom.alpha if geom.alpha is not None else 1.0
+    # Opaque cells get a hairline in their own colour: neighbours then meet
+    # without the pale antialiased seam between them.
+    out = _layer("poly", out_frame, out_map, geom, _groups=groups,
+                 linewidth=0.6 if alpha >= 0.9 else 0.01)
+    out.alpha = alpha
     _title(out, "x", xcol)
     _title(out, "y", ycol)
     _levels_hook(out, xaxis)
@@ -1212,6 +1216,303 @@ def polygon(geom: _Geom, mapping: dict, data: Any) -> _Geom:
     out = _layer("poly", out_frame, out_map, geom, _groups=starts,
                  linewidth=float(getattr(geom, "linewidth", 0.5)), _polygon=True)
     out.alpha = geom.alpha if geom.alpha is not None else 1.0
+    _title(out, "x", xcol)
+    _title(out, "y", ycol)
+    return out
+
+
+# ── 2D distributions: bins, hexagons, densities, contours, ellipses ──────────
+
+
+def _xy_numeric(geom: _Geom, mapping: dict, data: Any, name: str, extra=()):
+    xcol, ycol = mapping.get("x"), mapping.get("y")
+    if not xcol or not ycol:
+        raise ValueError(f"{name}() requires aes(x=, y=)")
+    frame = _frame(data, [xcol, ycol, *[c for c in extra if c]])
+    xs = frame[xcol].to_numpy(np.float64)
+    ys = frame[ycol].to_numpy(np.float64)
+    ok = np.isfinite(xs) & np.isfinite(ys)
+    if not ok.any():
+        raise ValueError(f"{name}() needs numeric x and y")
+    return frame.loc[ok].reset_index(drop=True), xcol, ycol, xs[ok], ys[ok]
+
+
+def _bin_edges(values: np.ndarray, bins, binwidth) -> np.ndarray:
+    lo, hi = float(values.min()), float(values.max())
+    if hi <= lo:
+        lo, hi = lo - 0.5, hi + 0.5
+    if binwidth is not None:
+        w = float(binwidth)
+        start = math.floor(lo / w) * w
+        count = max(1, int(math.ceil((hi - start) / w + 1e-9)))
+        return start + w * np.arange(count + 1)
+    return np.linspace(lo, hi, int(bins) + 1)
+
+
+def bin_2d(geom: _Geom, mapping: dict, data: Any) -> _Geom:
+    """geom_bin_2d: rows counted in rectangles, drawn as tiles by count."""
+    frame, xcol, ycol, xs, ys = _xy_numeric(geom, mapping, data, "geom_bin_2d")
+    bins = getattr(geom, "bins", 30)
+    bw = getattr(geom, "binwidth", None)
+    bx, by = (bins, bins) if not isinstance(bins, (tuple, list)) else bins
+    wx, wy = (bw, bw) if not isinstance(bw, (tuple, list)) else bw
+    ex, ey = _bin_edges(xs, bx, wx), _bin_edges(ys, by, wy)
+    counts, _, _ = np.histogram2d(xs, ys, bins=[ex, ey])
+    cx, cy = 0.5 * (ex[:-1] + ex[1:]), 0.5 * (ey[:-1] + ey[1:])
+    ii, jj = np.nonzero(counts)
+    cells = pd.DataFrame({"x": cx[ii], "y": cy[jj], "count": counts[ii, jj]})
+    proxy = _Geom(alpha=geom.alpha)
+    proxy.kind = "tile"
+    proxy.width = float(np.median(np.diff(ex)))
+    proxy.height = float(np.median(np.diff(ey)))
+    out = tile(proxy, {"x": "x", "y": "y", "color": "count"}, cells)
+    out._colour_title = "count"
+    _title(out, "x", xcol)
+    _title(out, "y", ycol)
+    return out
+
+
+def hex_bins(geom: _Geom, mapping: dict, data: Any) -> _Geom:
+    """geom_hex: rows counted in hexagons (pointy side up), filled by count."""
+    frame, xcol, ycol, xs, ys = _xy_numeric(geom, mapping, data, "geom_hex")
+    bins = getattr(geom, "bins", 30)
+    bw = getattr(geom, "binwidth", None)
+    if bw is not None:
+        w, h = (bw, bw) if not isinstance(bw, (tuple, list)) else (float(bw[0]), float(bw[1]))
+    else:
+        bx, by = (bins, bins) if not isinstance(bins, (tuple, list)) else bins
+        w = (xs.max() - xs.min()) / bx or 1.0
+        h = (ys.max() - ys.min()) / by or 1.0
+    # In (u, v), with u = x / w and v = y / h * sqrt(3)/2, the hexagons are
+    # regular, so the nearest centre is the hexagon a point falls in.
+    u = (xs - xs.min()) / w
+    v = (ys - ys.min()) / h
+    k = math.sqrt(3.0) / 2.0
+    row0 = np.floor(v)
+    best_r = np.zeros_like(u)
+    best_c = np.zeros_like(u)
+    best_d = np.full(u.shape, np.inf)
+    for dr in (0.0, 1.0):
+        r = row0 + dr
+        offset = np.where(np.mod(r, 2) == 1, 0.5, 0.0)
+        c = np.round(u - offset)
+        d = (u - (c + offset)) ** 2 + ((v - r) * k) ** 2
+        better = d < best_d
+        best_r, best_c, best_d = np.where(better, r, best_r), np.where(better, c, best_c), np.where(better, d, best_d)
+    keys, counts = np.unique(np.stack([best_r, best_c], axis=1), axis=0, return_counts=True)
+    rows = []
+    for (r, c), n in zip(keys, counts):
+        cx = xs.min() + (c + (0.5 if int(r) % 2 else 0.0)) * w
+        cy = ys.min() + r * h
+        for dx, dy in ((0, 2 / 3), (0.5, 1 / 3), (0.5, -1 / 3), (0, -2 / 3), (-0.5, -1 / 3), (-0.5, 1 / 3)):
+            rows.append((cx + dx * w, cy + dy * h, f"{int(r)}:{int(c)}", float(n)))
+    cells = pd.DataFrame(rows, columns=["x", "y", "hex", "count"])
+    proxy = _Geom(alpha=geom.alpha)
+    proxy.kind = "polygon"
+    proxy.linewidth = 0.3
+    out = polygon(proxy, {"x": "x", "y": "y", "group": "hex", "color": "count"}, cells)
+    out._colour_title = "count"
+    _title(out, "x", xcol)
+    _title(out, "y", ycol)
+    return out
+
+
+def _bandwidth(values: np.ndarray) -> float:
+    """MASS::bandwidth.nrd / 4: the normal kernel's sd, as kde2d uses it."""
+    sd = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
+    q75, q25 = np.percentile(values, [75, 25])
+    spread = min(sd, (q75 - q25) / 1.34) or sd or 1.0
+    return 1.06 * spread * values.size ** (-0.2)
+
+
+def _kde2d(xs, ys, n, lims=None, h=None):
+    """Gaussian kernel density on an n x n grid (MASS::kde2d)."""
+    x0, x1 = (xs.min(), xs.max()) if lims is None else lims[:2]
+    y0, y1 = (ys.min(), ys.max()) if lims is None else lims[2:]
+    gx, gy = np.linspace(x0, x1, n), np.linspace(y0, y1, n)
+    hx, hy = (_bandwidth(xs), _bandwidth(ys)) if h is None else (float(h[0]) / 4, float(h[1]) / 4)
+    kx = np.exp(-0.5 * ((gx[:, None] - xs[None, :]) / hx) ** 2) / (hx * math.sqrt(2 * math.pi))
+    ky = np.exp(-0.5 * ((gy[:, None] - ys[None, :]) / hy) ** 2) / (hy * math.sqrt(2 * math.pi))
+    z = (ky @ kx.T) / xs.size  # (ny, nx), the shape the contour code takes
+    return gx, gy, z
+
+
+def _levels(z: np.ndarray, bins, breaks) -> list[float]:
+    if breaks is not None:
+        return [float(b) for b in breaks]
+    from plot3.scales import nice_ticks
+
+    lo, hi = float(np.nanmin(z)), float(np.nanmax(z))
+    return [t for t in nice_ticks(lo, hi, int(bins or 10)) if lo < t < hi]
+
+
+def _contour_layer(geom, pieces, colour_col, xcol, ycol, default_colour):
+    from plot3.contour import _contour_lines
+
+    rows, starts, values = [], [], []
+    for gx, gy, z, level_value in pieces:
+        for level in _levels(z, getattr(geom, "bins", None), getattr(geom, "breaks", None)):
+            for line in _contour_lines(gx, gy, z, level):
+                if len(line) < 2:
+                    continue
+                starts.append([len(rows), len(line)])
+                rows.extend((x, y) for x, y in line)
+                values.extend([level_value] * len(line))
+    if not rows:
+        raise ValueError("no contour lines: the surface is flat")
+    frame = pd.DataFrame(rows, columns=["x", "y"])
+    mapping = {"x": "x", "y": "y"}
+    if colour_col:
+        frame[colour_col] = values
+        mapping["colour"] = colour_col
+    out = _layer("line", frame, mapping, geom, _groups=starts,
+                 linewidth=float(getattr(geom, "linewidth", 1.0) or 1.0))
+    if not colour_col and geom.const_color is None:
+        out.const_color = default_colour
+    _title(out, "x", xcol)
+    _title(out, "y", ycol)
+    return out
+
+
+def density_2d(geom: _Geom, mapping: dict, data: Any):
+    """geom_density_2d: contour lines of a 2D kernel density, per group."""
+    colour = mapping.get("color")
+    colour = colour if colour and has_column(data, colour) else None
+    frame, xcol, ycol, xs, ys = _xy_numeric(geom, mapping, data, "geom_density_2d", [colour])
+    n = int(getattr(geom, "n", 100))
+    lims = (xs.min(), xs.max(), ys.min(), ys.max())
+    groups, levels = _colour_groups(frame, colour)
+    if getattr(geom, "kind", "") == "density_2d_filled":
+        return _density_bands(geom, xs, ys, n, lims, xcol, ycol)
+    pieces = []
+    for g, level in enumerate(levels):
+        pick = groups == g
+        if pick.sum() < 3:
+            continue
+        gx, gy, z = _kde2d(xs[pick], ys[pick], n, lims, getattr(geom, "h", None))
+        pieces.append((gx, gy, z, level))
+    return _contour_layer(geom, pieces, colour if levels != [None] else None, xcol, ycol, "#3366FF")
+
+
+def _density_bands(geom, xs, ys, n, lims, xcol, ycol):
+    """geom_density_2d_filled: the density in bands between contour levels,
+    one colour per band (viridis, as ggplot2), drawn as fine cells."""
+    from plot3.scales import fmt_ticks
+
+    n = min(n, 60)
+    gx, gy, z = _kde2d(xs, ys, n, lims, getattr(geom, "h", None))
+    top = float(z.max())
+    # Fewer bands than lines by default, so the legend stays beside the panel.
+    inner = _levels(z, getattr(geom, "bins", None) or 6, getattr(geom, "breaks", None))
+    edges = [0.0] + [v for v in inner if v > 0] + [top]
+    band = np.clip(np.searchsorted(edges, z, side="left") - 1, 0, len(edges) - 2)
+    labels = fmt_ticks(edges[:-1]) + [f"{top:.3g}"]
+    names = [f"({labels[i]}, {labels[i + 1]}]" for i in range(len(edges) - 1)]
+    X, Y = np.meshgrid(gx, gy)
+    cells = pd.DataFrame({"x": X.ravel(), "y": Y.ravel(), "level": [names[b] for b in band.ravel()]})
+    proxy = _Geom(alpha=geom.alpha)
+    proxy.kind = "tile"
+    proxy.width = float(gx[1] - gx[0])
+    proxy.height = float(gy[1] - gy[0])
+    out = tile(proxy, {"x": "x", "y": "y", "color": "level"}, cells)
+    # Bands in order, lowest first, whatever their labels sort as.
+    out.data_override["level"] = pd.Categorical(out.data_override["level"], categories=names)
+    out._default_discrete = "viridis"
+    out._colour_title = "level"
+    _title(out, "x", xcol)
+    _title(out, "y", ycol)
+    return out
+
+
+def contour(geom: _Geom, mapping: dict, data: Any):
+    """geom_contour: contour lines of z on a regular x-y grid."""
+    xcol, ycol, zcol = mapping.get("x"), mapping.get("y"), mapping.get("z")
+    if not xcol or not ycol or not zcol:
+        raise ValueError("geom_contour() requires aes(x=, y=, z=) on gridded data")
+    frame = _frame(data, [xcol, ycol, zcol])
+    gx = np.unique(frame[xcol].to_numpy(np.float64))
+    gy = np.unique(frame[ycol].to_numpy(np.float64))
+    if gx.size < 2 or gy.size < 2:
+        raise ValueError("geom_contour() needs a grid: several x and several y values")
+    z = np.full((gy.size, gx.size), np.nan)
+    ix = np.searchsorted(gx, frame[xcol].to_numpy(np.float64))
+    iy = np.searchsorted(gy, frame[ycol].to_numpy(np.float64))
+    z[iy, ix] = frame[zcol].to_numpy(np.float64)
+    out = _contour_layer(geom, [(gx, gy, z, None)], None, xcol, ycol, "#3366FF")
+    out._contour_z = zcol
+    return out
+
+
+def _robust_t(points: np.ndarray, nu: float = 5.0, iterations: int = 100):
+    """Centre and scatter under a multivariate t (MASS::cov.trob)."""
+    centre = points.mean(axis=0)
+    cov = np.cov(points, rowvar=False)
+    p = points.shape[1]
+    for _ in range(iterations):
+        diff = points - centre
+        try:
+            inv = np.linalg.inv(cov)
+        except np.linalg.LinAlgError:
+            break
+        d2 = np.einsum("ij,jk,ik->i", diff, inv, diff)
+        w = (nu + p) / (nu + d2)
+        new_centre = (w[:, None] * points).sum(axis=0) / w.sum()
+        diff = points - new_centre
+        new_cov = (w[:, None] * diff).T @ diff / len(points)
+        done = np.allclose(new_centre, centre, rtol=1e-8) and np.allclose(new_cov, cov, rtol=1e-8)
+        centre, cov = new_centre, new_cov
+        if done:
+            break
+    return centre, cov
+
+
+def ellipse(geom: _Geom, mapping: dict, data: Any):
+    """stat_ellipse: a confidence ellipse per group (ggplot2's stat_ellipse).
+
+    ``type="t"`` (default) uses a robust multivariate t fit, ``"norm"`` the
+    sample covariance, and ``"euclid"`` a circle of radius ``level``.
+    """
+    from plot3.special import _qf1
+
+    colour = mapping.get("color")
+    colour = colour if colour and has_column(data, colour) else None
+    group = mapping.get("group")
+    group = group if group and has_column(data, group) else None
+    frame, xcol, ycol, xs, ys = _xy_numeric(geom, mapping, data, "stat_ellipse", [colour, group])
+    groups, levels = _colour_groups(frame, colour or group)
+    level = float(getattr(geom, "level", 0.95))
+    kind = getattr(geom, "type", "t")
+    segments = int(getattr(geom, "segments", 51))
+    angles = np.linspace(0, 2 * np.pi, segments)
+    unit = np.column_stack([np.cos(angles), np.sin(angles)])
+    rows, starts, tags = [], [], []
+    for g, lev in enumerate(levels):
+        pts = np.column_stack([xs[groups == g], ys[groups == g]])
+        if len(pts) < 3:
+            continue
+        if kind == "euclid":
+            centre, shape, radius = pts.mean(axis=0), np.eye(2), level
+        else:
+            centre, shape = _robust_t(pts) if kind == "t" else (pts.mean(axis=0), np.cov(pts, rowvar=False))
+            radius = math.sqrt(2.0 * _qf1(level, 2.0, len(pts) - 1.0))
+        try:
+            chol = np.linalg.cholesky(shape)
+        except np.linalg.LinAlgError:
+            continue
+        curve = centre + radius * unit @ chol.T
+        starts.append([len(rows), len(curve)])
+        rows.extend(map(tuple, curve))
+        tags.extend([lev] * len(curve))
+    if not rows:
+        raise ValueError("stat_ellipse() needs at least 3 points per group")
+    out_frame = pd.DataFrame(rows, columns=["x", "y"])
+    out_map = {"x": "x", "y": "y"}
+    tag = colour or group
+    if colour:
+        out_frame[colour] = tags
+        out_map["colour"] = colour
+    out = _layer("line", out_frame, out_map, geom, _groups=starts,
+                 linewidth=float(getattr(geom, "linewidth", 1.0) or 1.0), _ink_default=not colour)
     _title(out, "x", xcol)
     _title(out, "y", ycol)
     return out

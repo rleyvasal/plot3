@@ -992,6 +992,88 @@ class geom_polygon(_Geom):
         self.linewidth = float(linewidth)
 
 
+class geom_bin_2d(_Geom):
+    """Counts in rectangles over x and y, as a heatmap: big scatters made
+    readable. ``bins`` (30) per axis, or ``binwidth``; a pair sets each axis."""
+
+    kind = "bin_2d"
+
+    def __init__(self, mapping=None, *, bins=30, binwidth=None, **kw):
+        super().__init__(mapping, **kw)
+        self.bins = bins
+        self.binwidth = binwidth
+
+
+class geom_hex(_Geom):
+    """Counts in hexagons over x and y (ggplot2's geom_hex)."""
+
+    kind = "hex"
+
+    def __init__(self, mapping=None, *, bins=30, binwidth=None, **kw):
+        super().__init__(mapping, **kw)
+        self.bins = bins
+        self.binwidth = binwidth
+
+
+class geom_density_2d(_Geom):
+    """Contour lines of a 2D kernel density (MASS::kde2d bandwidths), one set
+    per colour group. ``bins`` (about 10 levels) or ``breaks`` sets them;
+    ``n`` is the grid, ``h`` the bandwidths (as in kde2d)."""
+
+    kind = "density_2d"
+
+    def __init__(self, mapping=None, *, bins=None, breaks=None, n=100, h=None, linewidth=1.0, **kw):
+        super().__init__(mapping, **kw)
+        self.bins = bins
+        self.breaks = breaks
+        self.n = int(n)
+        self.h = h
+        self.linewidth = float(linewidth)
+
+
+class geom_density_2d_filled(geom_density_2d):
+    """The 2D density in bands, one viridis colour per band, as ggplot2's
+    geom_density_2d_filled."""
+
+    kind = "density_2d_filled"
+
+
+geom_density2d = geom_density_2d
+stat_density_2d = geom_density_2d
+
+
+class geom_contour(_Geom):
+    """Contour lines of ``z`` on a regular grid of ``x`` and ``y``:
+    ``aes(x=, y=, z=)``, one row per grid point. ``bins`` or ``breaks``
+    sets the levels."""
+
+    kind = "contour"
+
+    def __init__(self, mapping=None, *, bins=None, breaks=None, linewidth=1.0, **kw):
+        super().__init__(mapping, **kw)
+        self.bins = bins
+        self.breaks = breaks
+        self.linewidth = float(linewidth)
+
+
+class stat_ellipse(_Geom):
+    """A confidence ellipse per group: ``type="t"`` (robust, the default),
+    ``"norm"``, or ``"euclid"``, at ``level`` (0.95)."""
+
+    kind = "ellipse"
+
+    def __init__(self, mapping=None, *, level=0.95, type="t", segments=51, linewidth=1.0, **kw):  # noqa: A002
+        super().__init__(mapping, **kw)
+        if type not in {"t", "norm", "euclid"}:
+            raise ValueError('stat_ellipse(type=) is "t", "norm", or "euclid"')
+        if not 0 < float(level) < 1 and type != "euclid":
+            raise ValueError("stat_ellipse(level=) is between 0 and 1")
+        self.level = float(level)
+        self.type = type
+        self.segments = int(segments)
+        self.linewidth = float(linewidth)
+
+
 class geom_freqpoly(_Geom):
     """A histogram drawn as a line through the bar tops (ggplot2
     ``geom_freqpoly``), one per colour group, ending at zero on both sides.
