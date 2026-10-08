@@ -199,6 +199,57 @@ def _grouped_histogram(geom, data, xcol, group_col, edges, centers, closed, stat
     return out
 
 
+def _freqpoly(geom, mapping: dict, data):
+    """geom_freqpoly: the histogram's counts at bin centres, as a line per
+    colour group, padded with a zero bin each side (ggplot2's pad = TRUE)."""
+    from plot3 import stat2d
+
+    if "x" not in mapping:
+        raise ValueError("geom_freqpoly() requires aes(x=)")
+    xcol = mapping["x"]
+    stat = _hist_stat(mapping)
+    values = numeric_array(data, xcol, dropna=True)
+    if values.size == 0:
+        raise ValueError(f"geom_freqpoly(): no numeric values in {xcol!r}")
+    edges = _histogram_breaks(
+        values, bins=getattr(geom, "bins", None), binwidth=getattr(geom, "binwidth", None),
+        boundary=getattr(geom, "boundary", None), method=getattr(geom, "method", "fd"),
+    )
+    width = float(np.median(np.diff(edges)))
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    xs = np.concatenate([[centres[0] - width], centres, [centres[-1] + width]])
+    colour = mapping.get("color")
+    colour = colour if colour and colour != xcol and has_column(data, colour) else None
+    frame = materialize_columns(data, [xcol] + ([colour] if colour else []))
+    pieces = []
+    if colour:
+        kind, _codes, _cats = col_values(frame[colour])
+        levels = ordered_levels(frame[colour].tolist()) if kind == "cat" else [None]
+    else:
+        levels = [None]
+    rows, starts = [], []
+    for level in levels:
+        part = frame if level is None else frame[frame[colour] == level]
+        vals = part[xcol].to_numpy(np.float64)
+        vals = vals[np.isfinite(vals)]
+        if getattr(geom, "closed", "right") == "left":
+            counts = _hist_counts_left_closed(vals, edges)
+        else:
+            counts, _ = np.histogram(vals, bins=edges)
+        if stat == "density":
+            counts = _density_scale(counts, edges)
+        ys = np.concatenate([[0.0], np.asarray(counts, dtype=np.float64), [0.0]])
+        starts.append([len(rows), len(xs)])
+        for x, y in zip(xs, ys):
+            rows.append({"x": float(x), "y": float(y), **({colour: level} if level is not None else {})})
+    out_frame = pd.DataFrame(rows)
+    out_map = {"x": "x", "y": "y", **({"colour": colour} if levels != [None] else {})}
+    out = stat2d._layer("line", out_frame, out_map, geom, _groups=starts,
+                        linewidth=float(getattr(geom, "linewidth", None) or 2.0))
+    out._axis_labels = {"x": xcol, "y": stat}
+    return out
+
+
 def _hist_counts_left_closed(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
     """Count with left-closed / right-open bins (ggplot2 ``closed = "left"``)."""
     values = np.asarray(values, dtype=np.float64)
@@ -368,7 +419,7 @@ def _histogram_breaks(
 # Filled shapes take their colour from aes(fill=). Points, lines, error bars,
 # and text use aes(colour=) only (ggplot2's default shapes ignore fill).
 _FILL_KINDS = frozenset({
-    "col", "bar", "histogram", "boxplot", "box", "violin", "poly", "area",
+    "col", "bar", "histogram", "boxplot", "box", "violin", "poly", "polygon", "area",
     "density", "surface", "isosurface", "density_3d_stat", "ribbon",
     "tile", "rect", "area_stat",
 })
@@ -481,7 +532,8 @@ def _ref_specs(ref_layers, scales, theme) -> list[dict]:
 
 _STAT2D_KINDS = frozenset(
     {"jitter", "errorbar", "linerange", "pointrange", "ribbon", "smooth", "summary",
-     "tile", "area_stat", "step", "segment", "rect", "qq", "qq_line", "ecdf"}
+     "tile", "area_stat", "step", "segment", "rect", "qq", "qq_line", "ecdf",
+     "crossbar", "errorbarh", "polygon"}
 )
 
 
@@ -526,6 +578,13 @@ def expand_stat_geom(
         from plot3.stats3d import box3d_layers
 
         return box3d_layers(geom, mapping, data)
+    if geom.kind == "point" and getattr(geom, "position", None) not in (None, "identity"):
+        # position_jitter(), position_jitterdodge(), position_nudge().
+        if "z" in mapping:
+            raise ValueError("geom_point(position=) moves points in 2D figures only")
+        from plot3 import stat2d
+
+        return stat2d.jitter(geom, mapping, data)
     if geom.kind in _STAT2D_KINDS or geom.kind in {"col", "bar"}:
         from plot3 import stat2d
 
@@ -547,6 +606,8 @@ def expand_stat_geom(
                 "tile": stat2d.tile, "area_stat": stat2d.area, "step": stat2d.step,
                 "segment": stat2d.segment, "rect": stat2d.rect, "qq": stat2d.qq,
                 "qq_line": stat2d.qq_line, "ecdf": stat2d.ecdf,
+                "crossbar": stat2d.crossbar, "errorbarh": stat2d.errorbarh,
+                "polygon": stat2d.polygon,
             }[geom.kind]
             return handler(geom, mapping, data)
     if geom.kind == "bar":
@@ -571,6 +632,8 @@ def expand_stat_geom(
         out.alpha = geom.alpha
         out._axis_labels = {"y": "count"}
         return out
+    if geom.kind == "freqpoly":
+        return _freqpoly(geom, mapping, data)
     if geom.kind == "histogram":
         if "x" not in mapping:
             raise ValueError("geom_histogram() requires aes(x=)")
@@ -676,6 +739,31 @@ def expand_stat_geom(
                     out_row[colour_col] = key_tuple[1]
                 outlier_rows.append(out_row)
         frame = pd.DataFrame(rows)
+        box_width = float(getattr(geom, "width", 0.75))
+        dodge_levels = None
+        if len(group_cols) > 1 and not frame.empty:
+            # ggplot2 dodges boxes by a second grouping: F and M side by side
+            # within each arm, sharing the 0.75 slot.
+            from plot3.stat2d import _axis, _dodge_offsets
+
+            kind_c, _codes, _cats = col_values(frame[colour_col])
+            if kind_c == "cat":
+                x_axis = _axis(materialize_columns(data, [xcol])[xcol])
+                if x_axis.kind == "cat" and x_axis.levels is not None:
+                    x_index = {str(v): i for i, v in enumerate(x_axis.levels)}
+                    c_levels = [str(v) for v in ordered_levels(frame[colour_col].tolist())]
+                    c_index = {v: i for i, v in enumerate(c_levels)}
+                    if len(c_levels) > 1:
+                        offsets = _dodge_offsets(len(c_levels), box_width)
+
+                        def dodged(x_value, c_value):
+                            return x_index[str(x_value)] + offsets[c_index[str(c_value)]]
+
+                        frame[xcol] = [dodged(a, b) for a, b in zip(frame[xcol], frame[colour_col])]
+                        for row in outlier_rows:
+                            row[xcol] = dodged(row[xcol], row[colour_col])
+                        box_width = box_width / len(c_levels) * 0.9
+                        dodge_levels = list(x_axis.levels)
         if frame.empty:
             frame = pd.DataFrame(
                 columns=[
@@ -695,7 +783,9 @@ def expand_stat_geom(
             alpha=geom.alpha,
         )
         out.kind = "box"
-        out.width = float(getattr(geom, "width", 0.75))
+        out.width = box_width
+        if dodge_levels is not None:
+            out._violin_levels = dodge_levels
         out.outlier_size = float(getattr(geom, "outlier_size", 3.0))
         out.data_override = frame
         out.const_color = geom.const_color
@@ -819,6 +909,7 @@ def expand_stat_geom(
         out.const_color = geom.const_color
         out.alpha = geom.alpha if geom.alpha is not None else 0.45
         out._violin_levels = levels
+        out._is_violin = True
         return out
     if geom.kind == "surface":
         if "x" not in mapping or "y" not in mapping or "z" not in mapping:
@@ -1702,6 +1793,10 @@ def _aux_legends(resolved, layer_vals, legend, shape_scale=None, linetype_scale=
 def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if not g.layers:
         raise ValueError("add a geom: ggplot(df, aes(...)) + geom_point()")
+    # aes(ymin="mean - se"), aes(colour="factor(cyl)"): computed columns.
+    from plot3.aesexpr import add_expression_columns
+
+    g = add_expression_columns(g)
     # Function layers and vector fields sample their own grid, so a figure
     # may have no data frame.
     needs_data = any(
@@ -2162,7 +2257,12 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             sub = sub.dropna(subset=[xcol, *y_stat_cols])
             vals = {}
             kind, v, cats = col_values(sub[xcol])
-            vals["x"] = _absorb_position("x", kind, v, cats)
+            box_levels = getattr(geom, "_violin_levels", None)
+            if box_levels is not None and kind == "num":
+                # Dodged boxes: numeric positions on the category axis.
+                vals["x"] = _absorb_level_positions(v, list(box_levels), "x")
+            else:
+                vals["x"] = _absorb_position("x", kind, v, cats)
             for col_name in y_stat_cols:
                 kind_y, v_y, cats_y = col_values(sub[col_name])
                 if kind_y != "num":
@@ -2193,7 +2293,10 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             if outliers is not None and len(outliers):
                 ox_kind, ox, ox_cats = col_values(outliers[xcol])
                 oy_kind, oy, oy_cats = col_values(outliers[y_name])
-                vals["ox"] = _absorb_position("x", ox_kind, ox, ox_cats)
+                if box_levels is not None and ox_kind == "num":
+                    vals["ox"] = _absorb_level_positions(ox, list(box_levels), "x")
+                else:
+                    vals["ox"] = _absorb_position("x", ox_kind, ox, ox_cats)
                 vals["oy"] = _absorb_position("y", oy_kind, oy, oy_cats)
                 if "color" in m and m["color"] in outliers.columns:
                     okind, ocv, occats = col_values(outliers[m["color"]])
@@ -2395,6 +2498,12 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             vals["linetype"] = _discrete_codes(sub[m["linetype"]])
         if geom.kind == "text":
             vals["label"] = [_label_text(v) for v in sub[m["label"]].tolist()]
+            # A nudged label sits where it is drawn: the scales make room for
+            # it, as ggplot2 trains them after position_nudge().
+            for axis_name, shift in (("x", getattr(geom, "nudge_x", 0.0)), ("y", getattr(geom, "nudge_y", 0.0))):
+                sc = scales.get(axis_name)
+                if shift and sc is not None and sc.kind == "num" and axis_name in vals:
+                    sc.widen(np.asarray(vals[axis_name], dtype=np.float64) + float(shift))
         if geom.kind == "point" and "size" in m:
             skind, sv, _ = col_values(sub[m["size"]])
             if skind != "num":
@@ -2673,13 +2782,18 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             ),
         }
 
+        if getattr(geom, "_polygon", False):
+            # Any simple shape, concave too: renderers fill it whole rather
+            # than as a violin's strip.
+            spec_l["polygon"] = True
         if spec_l["constColor"] is None and not vals.get("color") and not is3d:
             # No colour of its own: black marks and grey35 bars on a light
             # theme, as ggplot2 draws them.
             spec_l["constColor"] = _hex_or_none(
-                theme.get("bar") if geom.kind in {"col"} else theme.get("mark")
+                theme.get("bar") if geom.kind in {"col"} or getattr(geom, "_polygon", False)
+                else theme.get("mark")
             )
-            is_violin = getattr(geom, "_violin_levels", None) is not None
+            is_violin = bool(getattr(geom, "_is_violin", False))
             if (geom.kind == "box" or is_violin) and theme.get("mark") == "#000000":
                 # ggplot2's boxes and violins: white inside, a dark outline.
                 spec_l["plainFill"] = True

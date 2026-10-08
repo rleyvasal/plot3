@@ -247,33 +247,83 @@ def positioned_bars(geom: _Geom, mapping: dict, data: Any) -> _Geom:
 # ── jitter ───────────────────────────────────────────────────────────────────
 
 
+def _point_position(geom: _Geom):
+    """(kind, settings) for how points move: jitter, jitterdodge, or nudge."""
+    pos = getattr(geom, "position", None)
+    if geom.kind == "jitter":
+        return "jitter", geom
+    if isinstance(pos, str):
+        kind = pos.strip().lower()
+        if kind not in {"identity", "jitter"}:
+            raise ValueError(
+                f"geom_point(position={pos!r}): use 'identity', 'jitter', position_jitter(), "
+                "position_jitterdodge(), or position_nudge()"
+            )
+        return kind, None
+    if pos is None:
+        return "identity", None
+    return str(getattr(pos, "kind", "identity")), pos
+
+
 def jitter(geom: _Geom, mapping: dict, data: Any) -> _Geom:
+    """geom_jitter, and geom_point with position_jitter(),
+    position_jitterdodge(), or position_nudge()."""
+    name = "geom_jitter" if geom.kind == "jitter" else "geom_point"
     xcol, ycol = mapping.get("x"), mapping.get("y")
     if not xcol or not ycol:
-        raise ValueError("geom_jitter() requires aes(x=, y=)")
-    keep = [c for c in (mapping.get("color"), mapping.get("size"), mapping.get("group")) if c]
+        raise ValueError(f"{name}() requires aes(x=, y=)")
+    kind, pos = _point_position(geom)
+    dodge = mapping.get("color") or mapping.get("__fillgroup") or mapping.get("group")
+    dodge = dodge if dodge and has_column(data, dodge) else None
+    keep = [c for c in (mapping.get("color"), mapping.get("size"), mapping.get("group"),
+                        mapping.get("shape"), dodge) if c]
     frame = _frame(data, [xcol, ycol, *keep])
     axis = _axis(frame[xcol])
     yaxis = _axis(frame[ycol])
-    rng = np.random.default_rng(getattr(geom, "seed", 0))
-    width = getattr(geom, "width", None)
-    height = getattr(geom, "height", None)
-    # ggplot2: 40% of the resolution in each direction, both ways.
-    width = 0.4 * axis.step() if width is None else float(width) * (axis.step() if axis.kind == "cat" else 1.0)
-    height = 0.4 * yaxis.step() if height is None else float(height)
-    xs = axis.values + rng.uniform(-width, width, len(frame))
-    ys = yaxis.values + (rng.uniform(-height, height, len(frame)) if height > 0 else 0.0)
+    rng = np.random.default_rng(getattr(pos if pos is not None else geom, "seed", 0))
+    xs, ys = axis.values.astype(np.float64), yaxis.values.astype(np.float64)
+    if kind == "nudge":
+        xs = xs + float(getattr(pos, "x", 0.0))
+        ys = ys + float(getattr(pos, "y", 0.0))
+    elif kind == "jitterdodge":
+        # ggplot2: dodge by group within each x, then jitter inside the
+        # group's slot (40% of the spacing, shared among n + 2 slots).
+        groups, levels = _colour_groups(frame, dodge)
+        n = max(1, len(levels))
+        step = axis.step()
+        xs = xs + _dodge_offsets(n, step * float(pos.dodge_width))[groups]
+        width = 0.4 * step if pos.jitter_width is None else float(pos.jitter_width)
+        width = width / (n + 2)
+        xs = xs + rng.uniform(-width, width, len(frame))
+        if pos.jitter_height > 0:
+            ys = ys + rng.uniform(-pos.jitter_height, pos.jitter_height, len(frame))
+    else:
+        source = pos if pos is not None else geom
+        width = getattr(source, "width", None)
+        height = getattr(source, "height", None)
+        # ggplot2: 40% of the resolution in each direction, both ways.
+        width = 0.4 * axis.step() if width is None else float(width) * (axis.step() if axis.kind == "cat" else 1.0)
+        height = 0.4 * yaxis.step() if height is None else float(height)
+        xs = xs + rng.uniform(-width, width, len(frame))
+        if height > 0:
+            ys = ys + rng.uniform(-height, height, len(frame))
     out_frame = pd.DataFrame({"x": axis.out(xs), "y": yaxis.out(ys)})
     mapping_out = {"x": "x", "y": "y"}
-    for key, col in (("colour", mapping.get("color")), ("size", mapping.get("size")), ("group", mapping.get("group"))):
+    for key, col in (("colour", mapping.get("color")), ("size", mapping.get("size")),
+                     ("group", mapping.get("group")), ("shape", mapping.get("shape"))):
         if col:
             out_frame[col] = frame[col].to_numpy()
             mapping_out[key] = col
     out = _layer("point", out_frame, mapping_out, geom)
     out.size = getattr(geom, "size", None)
+    out.shape = getattr(geom, "shape", None)
     out = _levels_hook(out, axis)
+    if yaxis.kind == "cat" and yaxis.levels is not None and kind != "nudge":
+        raise ValueError(f"{name}() needs a numeric y to jitter")
     if yaxis.kind == "cat" and yaxis.levels is not None:
-        raise ValueError("geom_jitter() needs a numeric y")
+        out._y_levels = list(yaxis.levels)
+    _title(out, "x", xcol)
+    _title(out, "y", ycol)
     return out
 
 
@@ -1028,4 +1078,140 @@ def ecdf(geom: _Geom, mapping: dict, data: Any) -> _Geom:
     out = step(step_geom, {"x": "__x", "y": "__y", **({"color": colour} if colour else {})}, table)
     _title(out, "x", xcol)
     _title(out, "y", "ECDF")
+    return out
+
+
+# ── crossbars, horizontal error bars, polygons ───────────────────────────────
+
+
+def crossbar(geom: _Geom, mapping: dict, data: Any):
+    """geom_crossbar: a box from ymin to ymax and a thick line at y."""
+    frame, xcol, lo, hi, ycol, colour, dodge = _range_frame(geom, mapping, data, True)
+    fill = mapping.get("__fillgroup")
+    fill = fill if fill and has_column(data, fill) and fill != colour else None
+    if fill and fill not in frame.columns:
+        frame = _frame(data, [xcol, lo, hi, ycol, colour, fill])
+    dodge = dodge or fill
+    axis = _axis(frame[xcol])
+    groups, levels = _colour_groups(frame, dodge)
+    xs = _dodged_x(geom, axis, groups, len(levels))
+    dodge_kind, _w = position_kind(getattr(geom, "position", None), "identity")
+    slot = axis.step() * (1.0 / len(levels) if dodge_kind == "dodge" else 1.0)
+    half = 0.5 * slot * float(getattr(geom, "width", 0.9))
+    y_lo, y_hi = frame[lo].to_numpy(np.float64), frame[hi].to_numpy(np.float64)
+    y_mid = frame[ycol].to_numpy(np.float64)
+    box_x, box_y, box_c, box_starts = [], [], [], []
+    mid_x, mid_y, mid_c, mid_starts = [], [], [], []
+    tag = colour or fill
+    tags = frame[tag].tolist() if tag else None
+    for i in range(len(frame)):
+        x, a, b, m = xs[i], y_lo[i], y_hi[i], y_mid[i]
+        if not all(math.isfinite(v) for v in (x, a, b, m)):
+            continue
+        box_starts.append([len(box_x), 5])
+        box_x += [x - half, x + half, x + half, x - half, x - half]
+        box_y += [a, a, b, b, a]
+        mid_starts.append([len(mid_x), 2])
+        mid_x += [x - half, x + half]
+        mid_y += [m, m]
+        if tags is not None:
+            box_c += [tags[i]] * 5
+            mid_c += [tags[i]] * 2
+    layers = []
+    linewidth = float(getattr(geom, "linewidth", 1.0) or 1.0)
+    if fill:
+        # Filled boxes under dark lines, as ggplot2 draws crossbars.
+        fill_frame = pd.DataFrame({"x": axis.out(np.asarray(box_x)), "y": box_y, fill: box_c})
+        body = _layer("poly", fill_frame, {"x": "x", "y": "y", "colour": fill}, geom,
+                      _groups=box_starts, linewidth=0.0, _polygon=True)
+        body.alpha = geom.alpha if geom.alpha is not None else 1.0
+        layers.append(_levels_hook(body, axis))
+    line_colour = colour if colour else None
+    for xs_part, ys_part, cs_part, starts, width in (
+        (box_x, box_y, box_c, box_starts, linewidth),
+        (mid_x, mid_y, mid_c, mid_starts, linewidth * float(getattr(geom, "fatten", 2.5))),
+    ):
+        part = pd.DataFrame({"x": axis.out(np.asarray(xs_part)), "y": ys_part})
+        part_map = {"x": "x", "y": "y"}
+        if line_colour:
+            part[line_colour] = cs_part
+            part_map["colour"] = line_colour
+        line = _layer("line", part, part_map, geom, _groups=starts, linewidth=width,
+                      _ink_default=not line_colour)
+        if not line_colour:
+            line.const_color = geom.const_color
+        _title(line, "y", ycol)
+        layers.append(_levels_hook(line, axis))
+    return layers
+
+
+def errorbarh(geom: _Geom, mapping: dict, data: Any) -> _Geom:
+    """geom_errorbarh: from xmin to xmax at y, with caps up and down."""
+    ycol, lo, hi = mapping.get("y"), mapping.get("xmin"), mapping.get("xmax")
+    if not ycol or not lo or not hi:
+        raise ValueError("geom_errorbarh() requires aes(y=, xmin=, xmax=)")
+    colour = mapping.get("color")
+    colour = colour if colour and has_column(data, colour) else None
+    frame = _frame(data, [ycol, lo, hi, colour])
+    yaxis = _axis(frame[ycol])
+    cap = 0.5 * yaxis.step() * float(getattr(geom, "height", 0.5))
+    x_lo, x_hi = frame[lo].to_numpy(np.float64), frame[hi].to_numpy(np.float64)
+    ys = yaxis.values.astype(np.float64)
+    rows_x, rows_y, rows_c, starts = [], [], [], []
+    tags = frame[colour].tolist() if colour else None
+    for i in range(len(frame)):
+        y, a, b = ys[i], x_lo[i], x_hi[i]
+        if not all(math.isfinite(v) for v in (y, a, b)):
+            continue
+        starts.append([len(rows_x), 6])
+        rows_x += [a, a, a, b, b, b]
+        rows_y += [y - cap, y + cap, y, y, y - cap, y + cap]
+        if tags is not None:
+            rows_c += [tags[i]] * 6
+    out_frame = pd.DataFrame({"x": rows_x, "y": yaxis.out(np.asarray(rows_y))})
+    out_map = {"x": "x", "y": "y"}
+    if colour:
+        out_frame[colour] = rows_c
+        out_map["colour"] = colour
+    out = _layer("line", out_frame, out_map, geom, _groups=starts,
+                 linewidth=float(getattr(geom, "linewidth", 1.0) or 1.0), _ink_default=not colour)
+    if yaxis.kind == "cat" and yaxis.levels is not None:
+        out._y_levels = list(yaxis.levels)
+    _title(out, "x", lo)
+    _title(out, "y", ycol)
+    return out
+
+
+def polygon(geom: _Geom, mapping: dict, data: Any) -> _Geom:
+    """geom_polygon: one closed shape per group, corners in row order."""
+    xcol, ycol = mapping.get("x"), mapping.get("y")
+    if not xcol or not ycol:
+        raise ValueError("geom_polygon() requires aes(x=, y=)")
+    colour = mapping.get("color")
+    colour = colour if colour and has_column(data, colour) else None
+    group = mapping.get("group")
+    group = group if group and has_column(data, group) else None
+    frame = _frame(data, [xcol, ycol, colour, group]).reset_index(drop=True)
+    key_cols = [c for c in (group, colour) if c]
+    if key_cols:
+        keys = frame[key_cols].astype(str).agg("\x1f".join, axis=1)
+        order = pd.unique(keys)
+        rank = {k: i for i, k in enumerate(order)}
+        frame = frame.iloc[np.argsort(keys.map(rank).to_numpy(), kind="stable")].reset_index(drop=True)
+        keys = frame[key_cols].astype(str).agg("\x1f".join, axis=1).to_numpy()
+        cut = np.flatnonzero(keys[1:] != keys[:-1]) + 1
+        bounds = np.concatenate([[0], cut, [len(frame)]])
+    else:
+        bounds = np.array([0, len(frame)])
+    starts = [[int(a), int(b - a)] for a, b in zip(bounds[:-1], bounds[1:]) if b - a >= 3]
+    out_frame = pd.DataFrame({"x": frame[xcol].to_numpy(np.float64), "y": frame[ycol].to_numpy(np.float64)})
+    out_map = {"x": "x", "y": "y"}
+    if colour:
+        out_frame[colour] = frame[colour].to_numpy()
+        out_map["colour"] = colour
+    out = _layer("poly", out_frame, out_map, geom, _groups=starts,
+                 linewidth=float(getattr(geom, "linewidth", 0.5)), _polygon=True)
+    out.alpha = geom.alpha if geom.alpha is not None else 1.0
+    _title(out, "x", xcol)
+    _title(out, "y", ycol)
     return out

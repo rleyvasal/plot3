@@ -1720,6 +1720,20 @@ if (!S.is3d) {
       for (const [s0, cnt] of (L.groups || [[0, n]])) {
         if (cnt < 2) continue;
         const r = cols[s0*3], gch = cols[s0*3+1], b = cols[s0*3+2];
+        if (L.polygon) {
+          // geom_polygon / crossbar bodies: any simple shape, concave too,
+          // triangulated by three.js (earcut).
+          if (cnt < 3) continue;
+          const pts = [];
+          for (let i = 0; i < cnt; i++) pts.push(new THREE.Vector2(L.x.data[s0+i], L.y.data[s0+i]));
+          const sg = new THREE.ShapeGeometry(new THREE.Shape(pts));
+          const mesh = new THREE.Mesh(sg, new THREE.MeshBasicMaterial({
+            color: new THREE.Color(r, gch, b), transparent: true,
+            opacity: L.alpha == null ? 1 : L.alpha, side: THREE.DoubleSide, depthWrite: false }));
+          scene.add(mesh);
+          if (isCat) regCat(L.color.data[s0] % S.color.cats.length, mesh);
+          continue;
+        }
         if (L.kind === 'area') {
           // Triangle strip under the curve down to baseline y0.
           const pos = new Float32Array((cnt - 1) * 6 * 3);

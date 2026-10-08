@@ -117,13 +117,25 @@ ggplot(trial, aes(x="dose", y="response")) + geom_point() + geom_smooth()       
 
 | Need | Use |
 |---|---|
-| Error bars from your own columns | `geom_errorbar(aes(ymin=, ymax=))`, `geom_pointrange`, `geom_linerange` |
+| Error bars from your own columns | `geom_errorbar(aes(ymin="mean - se", ymax="mean + se"))`, `geom_pointrange`, `geom_linerange`, `geom_crossbar`, `geom_errorbarh(aes(xmin=, xmax=))` |
 | Summaries | `stat_summary(fun_data="mean_se" / "mean_cl_normal" / "mean_sdl" / "median_hilow")` |
 | Heatmaps | `geom_tile(aes(x=, y=, fill=))` (or `geom_raster`), with `geom_text(aes(label=))` |
 | Stacked areas | `geom_area(aes(fill=))`, `position="fill"` for shares |
 | Steps, segments, rectangles | `geom_step()`, `geom_segment(aes(xend=, yend=), arrow=arrow())`, `geom_rect(aes(xmin=, xmax=, ymin=, ymax=))` |
 | Horizontal layout | `+ coord_flip()` (bars, boxplots, densities, error bars) |
 | Several datasets | `geom_rect(aes(...), data=periods)`: any layer can bring its own data |
+| Points over grouped boxes | `geom_boxplot(aes(colour="sex"), outliers=False) + geom_point(position=position_jitterdodge())` |
+| Labels beside points | `geom_text(position=position_nudge(y=0.3))`, or `nudge_y=` |
+| Shapes and maps | `geom_polygon(aes(group="id", fill="region"))`, concave shapes included |
+| Frequency lines | `geom_freqpoly(aes(colour="arm"), binwidth=0.5)` |
+
+`aes()` reads expressions over your columns, as ggplot2 does:
+`aes(ymin="mean - se")`, `aes(y="log10(count)")`, `aes(colour="factor(cyl)")`,
+`aes(colour="dose > 5")`, `aes(label="round(estimate, 2)")`. They use `+ - * /
+^`, comparisons, and `log`, `log10`, `log2`, `exp`, `sqrt`, `abs`, `round`,
+`floor`, `ceiling`, `factor`, `as.numeric`, `ifelse`, `pmin`, `pmax`, `mean`,
+`median`, `sd`, `min`, `max`, `sum`; nothing else runs. The expression names
+the axis or legend.
 
 Rows with missing values are dropped, and plot3 says so: *Removed 3 rows
 containing missing values (geom_point)*.
@@ -371,11 +383,11 @@ tree) is shortened to twice its width so it does not become a thin column;
 | Figure | `ggplot(data, aes(...))`, `data >> ggplot(aes(...))`, `+`, `p.show()`, `p.save()`, `ggsave()` |
 | Aesthetics | `aes(x, y, z, colour, fill, size, shape, linetype, group, label, ymin, ymax, xmin, xmax, xend, yend, sample)` |
 | Points and lines | `geom_point`, `geom_jitter`, `geom_line`, `geom_path`, `geom_step`, `geom_segment`, `geom_text`, `geom_label` |
-| Bars and areas | `geom_col`, `geom_bar`, `geom_histogram`, `geom_area`, `geom_ribbon`, `geom_rect`, `geom_tile`/`geom_raster` |
+| Bars and areas | `geom_col`, `geom_bar`, `geom_histogram`, `geom_freqpoly`, `geom_area`, `geom_ribbon`, `geom_rect`, `geom_tile`/`geom_raster`, `geom_polygon` |
 | Distributions | `geom_boxplot`, `geom_violin`, `geom_density`, `geom_qq`, `geom_qq_line`, `stat_ecdf`, `stat_summary` |
-| Uncertainty and fits | `geom_errorbar`, `geom_pointrange`, `geom_linerange`, `geom_smooth(method="loess"/"lm")` |
+| Uncertainty and fits | `geom_errorbar`, `geom_errorbarh`, `geom_crossbar`, `geom_pointrange`, `geom_linerange`, `geom_smooth(method="loess"/"lm")` |
 | Reference | `geom_hline`, `geom_vline`, `geom_abline`, `geom_rug`, `annotate("text"/"label"/"rect"/"segment"/"point")` |
-| Positions | `position="stack"/"dodge"/"fill"/"identity"`, `position_dodge(width)`, `position_stack()`, `position_fill()` |
+| Positions | `position="stack"/"dodge"/"fill"/"identity"/"jitter"`, `position_dodge(width)`, `position_stack()`, `position_fill()`, `position_jitter()`, `position_jitterdodge()`, `position_nudge()` |
 | Functions | `geom_function`, `geom_vector_field`, `area`, `tangent`, `derivative` |
 | Scales | see [Scales](#scales) |
 | Coordinates | `coord_cartesian`, `coord_flip`, `coord_equal`, `coord_polar`, `coord_3d` |

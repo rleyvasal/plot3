@@ -117,8 +117,12 @@ def test_missing_column_names_the_closest_match():
     d = pd.DataFrame({"x": [1.0], "weight": [2.0]})
     with pytest.raises(ColumnNotFound, match="Did you mean 'weight'"):
         build_spec(ggplot(d, aes("x", "wieght")) + geom_point())
-    with pytest.raises(KeyError, match="add it as a column first"):
+    # An expression names the column it is missing.
+    with pytest.raises(KeyError, match="No column 'mean'"):
         build_spec(ggplot(d, aes("x", "mean - se")) + geom_point())
+    # Something that is not an expression aes() can read lists what it can.
+    with pytest.raises(KeyError, match="As an expression, aes"):
+        build_spec(ggplot(d, aes("x", "open(x)")) + geom_point())
 
 
 def test_infinite_values_are_dropped_and_reported():

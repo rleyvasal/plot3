@@ -182,10 +182,12 @@ class geom_point(_Geom):
 
     kind = "point"
 
-    def __init__(self, mapping=None, *, size=None, shape=None, **kw):
+    def __init__(self, mapping=None, *, size=None, shape=None, position="identity", **kw):
         super().__init__(mapping, **kw)
         self.size = size
         self.shape = None if shape is None else shape_name(shape)
+        # "jitter", position_jitter(), position_jitterdodge(), position_nudge().
+        self.position = position
 
 
 class geom_point3d(geom_point):
@@ -857,6 +859,44 @@ class position_dodge:
         self.width = None if width is None else float(width)
 
 
+class position_jitter:
+    """Random offsets so overplotted points separate: ``geom_point(position=
+    position_jitter(width=0.2, height=0))``. ``None`` is 40% of the spacing
+    between values, as in ggplot2; ``seed`` keeps saved figures the same."""
+
+    kind = "jitter"
+
+    def __init__(self, width=None, height=None, seed=0):
+        self.width = width
+        self.height = height
+        self.seed = seed
+
+
+class position_jitterdodge:
+    """Points beside each other by group within each x, then jittered: dots
+    over dodged boxplots. ``jitter_width`` defaults to 40% of the x spacing
+    shared among the groups; ``dodge_width`` matches geom_boxplot's 0.75."""
+
+    kind = "jitterdodge"
+
+    def __init__(self, jitter_width=None, jitter_height=0.0, dodge_width=0.75, seed=0):
+        self.jitter_width = jitter_width
+        self.jitter_height = float(jitter_height)
+        self.dodge_width = float(dodge_width)
+        self.seed = seed
+
+
+class position_nudge:
+    """Shift by a fixed amount: labels just above their points with
+    ``geom_text(position=position_nudge(y=0.5))``."""
+
+    kind = "nudge"
+
+    def __init__(self, x=0.0, y=0.0):
+        self.x = float(x)
+        self.y = float(y)
+
+
 class position_stack:
     """Stacked, first group on top (ggplot2 order)."""
 
@@ -887,6 +927,66 @@ class geom_jitter(_Geom):
         self.height = height
         self.seed = seed
         self.size = size
+
+
+class geom_crossbar(_Geom):
+    """A box from ``ymin`` to ``ymax`` with a line at ``y``: a mean and its
+    interval. Requires ``aes(x=, y=, ymin=, ymax=)``. ``fill`` colours the
+    box (its outline stays dark), ``colour`` the lines. ``fatten`` is how
+    much thicker the middle line is, as in ggplot2."""
+
+    kind = "crossbar"
+
+    def __init__(self, mapping=None, *, width=0.9, linewidth=1.0, fatten=2.5,
+                 position="identity", **kw):
+        super().__init__(mapping, **kw)
+        self.width = float(width)
+        self.linewidth = float(linewidth)
+        self.fatten = float(fatten)
+        self.position = position
+
+
+class geom_errorbarh(_Geom):
+    """Horizontal error bars from ``xmin`` to ``xmax`` at ``y``, with caps.
+    Requires ``aes(y=, xmin=, xmax=)``. ``height`` is the cap height as a
+    fraction of the y spacing."""
+
+    kind = "errorbarh"
+
+    def __init__(self, mapping=None, *, height=0.5, linewidth=1.0, **kw):
+        super().__init__(mapping, **kw)
+        self.height = float(height)
+        self.linewidth = float(linewidth)
+
+
+class geom_polygon(_Geom):
+    """Filled polygons, one per ``group`` (or colour), corners in row order:
+    maps, hulls, any closed shape. Concave shapes fill correctly."""
+
+    kind = "polygon"
+
+    def __init__(self, mapping=None, *, linewidth=0.5, **kw):
+        super().__init__(mapping, **kw)
+        self.linewidth = float(linewidth)
+
+
+class geom_freqpoly(_Geom):
+    """A histogram drawn as a line through the bar tops (ggplot2
+    ``geom_freqpoly``), one per colour group, ending at zero on both sides.
+    Takes the histogram's ``bins``, ``binwidth``, and ``boundary``, and
+    ``aes(y="after_stat(density)")`` for the density scale."""
+
+    kind = "freqpoly"
+
+    def __init__(self, mapping=None, *, bins=None, binwidth=None, method="fd",
+                 boundary=None, closed="right", linewidth=None, **kw):
+        super().__init__(mapping, **kw)
+        self.bins = bins
+        self.binwidth = binwidth
+        self.method = method
+        self.boundary = boundary
+        self.closed = closed
+        self.linewidth = linewidth
 
 
 class geom_errorbar(_Geom):
@@ -1109,7 +1209,7 @@ class geom_text(_Geom):
 
     def __init__(
         self, mapping=None, *, size=3.88, hjust=0.5, vjust=0.5, nudge_x=0.0,
-        nudge_y=0.0, check_overlap=False, fontface="plain", **kw,
+        nudge_y=0.0, check_overlap=False, fontface="plain", position="identity", **kw,
     ):
         super().__init__(mapping, **kw)
         self.size = float(size)
@@ -1117,6 +1217,10 @@ class geom_text(_Geom):
         self.vjust = float(vjust)
         self.nudge_x = float(nudge_x)
         self.nudge_y = float(nudge_y)
+        if getattr(position, "kind", None) == "nudge":
+            # position_nudge() is nudge_x / nudge_y, as in ggplot2.
+            self.nudge_x += position.x
+            self.nudge_y += position.y
         self.check_overlap = bool(check_overlap)
         if fontface not in {"plain", "bold", "italic", "bold.italic"}:
             raise ValueError("fontface is 'plain', 'bold', 'italic', or 'bold.italic'")

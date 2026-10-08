@@ -32,6 +32,14 @@ under **Changed**.
 - Histograms on the density scale: `aes(y="after_stat(density)")` (also
   `"..density.."`), per group when grouped.
 - `geom_boxplot(outliers=False)` and `outlier_shape=None` hide outlier points.
+- Expressions in `aes()`: `aes(ymin="mean - se")`, `aes(colour="factor(cyl)")`,
+  `aes(y="log10(count)")`, comparisons, and a short list of functions,
+  evaluated over the data's columns (no other code runs), on pandas and
+  polars data and per-layer `data=`.
+- `geom_freqpoly`, `geom_crossbar`, `geom_errorbarh`, and `geom_polygon`
+  (concave shapes fill correctly, in the viewer and saved files).
+- `position_jitter()`, `position_jitterdodge()`, and `position_nudge()`
+  (`geom_point(position=...)`; `geom_text(position=position_nudge(...))`).
 - An unknown parameter warns, with the closest known one:
   *Ignoring unknown parameter in geom_point(): colr (did you mean color?)*.
 
@@ -79,6 +87,9 @@ under **Changed**.
   line types, colour bars, and size legends now appear.
 - Infinite values were dropped silently; they now get a note, *Removed 1 row
   containing non-finite values*.
+- Boxplots grouped by a second variable (`aes(x="arm", colour="sex")`)
+  overlapped; they now sit side by side, as ggplot2 dodges them.
+- Nudged labels could fall outside the panel; the scales now make room.
 - The viewer drew its 2D grid over the data, hiding whisker stems on
   category lines; the grid is now behind the data. Box outlines in the
   viewer were 1 px and missing their right, top, and bottom sides.

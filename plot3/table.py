@@ -279,10 +279,12 @@ class ColumnNotFound(KeyError):
             guess = difflib.get_close_matches(name, names, n=1)
             if guess:
                 text += f" Did you mean {guess[0]!r}?"
-            elif any(ch in name for ch in " +-*/()"):
+            elif any(ch in name for ch in " +-*/()^<>=!"):
                 text += (
-                    " aes() takes column names: add it as a column first, "
-                    "for example df.assign(lo=df['mean'] - df['se'])."
+                    " As an expression, aes() reads columns, numbers, + - * / ^, "
+                    "comparisons, and log, log10, log2, exp, sqrt, abs, round, "
+                    "floor, ceiling, factor, as.numeric, ifelse, pmin, pmax, "
+                    "mean, median, sd, min, max, sum."
                 )
             parts.append(text)
         if names:

@@ -1267,6 +1267,16 @@ def _draw_layer_2d(layer, spec, blobs, gz, px, commands) -> None:
             commands.append(("polygon", curve + [base_r, base_l], color, None, 0, alpha))
             commands.append(("polyline", curve, color, width, min(1.0, alpha + 0.3)))
         return
+    if kind == "poly" and layer.get("polygon"):
+        # geom_polygon, crossbar bodies: SVG fills any simple shape itself.
+        width = float(layer.get("linewidth") if layer.get("linewidth") is not None else 0.5)
+        for start, count in _groups(layer, n):
+            if count < 3:
+                continue
+            color = _hex(colors[start])
+            corners = [px(float(xs[i]), float(ys[i])) for i in range(start, start + count)]
+            commands.append(("polygon", corners, color, color if width > 0 else None, width, alpha))
+        return
     if kind == "poly":
         width = float(layer.get("linewidth") or 1.5)
         for start, count in _groups(layer, n):
