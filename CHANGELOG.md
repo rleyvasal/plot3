@@ -24,6 +24,11 @@ under **Changed**.
   on black.
 - `coord_3d(elev=, azim=, zoom=)` sets the starting camera, in the viewer
   and in saved files.
+- `coord_cartesian(xlim=, ylim=, expand=)`: zoom without dropping rows, so
+  statistics use all the data. Marks past the panel are clipped.
+- `geom_rug(sides=, length=)`, with group colours, under `coord_flip` too.
+- `ggtitle()`, `xlab()`, `ylab()`, `guides(colour="none")` (and `fill`,
+  `size`, `shape`, `linetype`), and `theme_void()`.
 
 ### Changed
 
@@ -36,6 +41,9 @@ under **Changed**.
 - Default 3D point sizes are visible: about 5 px for a few hundred points,
   down to a fine grain for millions (they were about 1 px at any density).
 - Size legends show round breaks (5, 10, 15) instead of the data maximum.
+- `geom_boxplot(aes(fill=))` draws filled boxes with dark outlines, whiskers,
+  and medians, as ggplot2 does; `aes(colour=)` keeps coloured outlines.
+- 2D marks are clipped to the panel in saved files, as in ggplot2.
 - Saved 3D figures use the viewer's perspective camera instead of an
   orthographic one, so what you save looks like what you orbit. The box is
   centred by its outline, and gets a top margin when an axis is labelled
@@ -51,6 +59,9 @@ under **Changed**.
 - The viewer drew per-point colours (colour gradients, height colours) paler
   than their colour bar; colours now match it exactly.
 - The viewer's size legend overlapped the colour bar's numbers.
+- The viewer drew its 2D grid over the data, hiding whisker stems on
+  category lines; the grid is now behind the data. Box outlines in the
+  viewer were 1 px and missing their right, top, and bottom sides.
 
 ## 0.3.0 — 2026-10-07
 

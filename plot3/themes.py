@@ -68,6 +68,12 @@ _THEMES = {
         grid="#000000", axis="#000000", cat=_CAT_LIDAR, seq=_LIDAR,
         frame="none", void=True, ramp3d="lidar",
     ),
+    # ggplot2 theme_void: the data alone, no axes, ticks, grid, or box.
+    "void": dict(
+        surface="#ffffff", ink="#000000", ink2="#222222", muted="#4d4d4d",
+        grid="#ffffff", axis="#ffffff", cat=_CAT_LIGHT, seq=_SEQ,
+        frame="none", void=True,
+    ),
     # ggplot2 theme_minimal: white page, light grid, no axis box.
     "minimal": dict(
         surface="#ffffff", ink="#000000", ink2="#222222", muted="#4d4d4d",

@@ -17,11 +17,13 @@ from plot3.geoms import (
     area,
     coord_3d,
     coord_equal,
+    coord_cartesian,
     coord_flip,
     coord_polar,
     derivative,
     facet_grid,
     facet_wrap,
+    guides,
     labs,
     scale_colour_continuous,
     scale_x_log10,
@@ -317,6 +319,8 @@ class ggplot:
             g._addons.append((len(g.layers) - 1, other))
         elif isinstance(other, labs):
             g.labs.update(other)
+        elif isinstance(other, guides):
+            g.guides = {**(getattr(g, "guides", None) or {}), **other.hidden}
         elif isinstance(other, _Theme):
             g.theme_name = other.name
             g.theme_explicit = True
@@ -335,7 +339,7 @@ class ggplot:
             g.cscale = other
         elif isinstance(other, (facet_wrap, facet_grid)):
             g.facet = other
-        elif isinstance(other, (coord_3d, coord_equal, coord_polar, coord_flip)):
+        elif isinstance(other, (coord_3d, coord_equal, coord_polar, coord_flip, coord_cartesian)):
             g.coord = other
         elif isinstance(other, stat_density_3d):
             g.stat_density_3d = other

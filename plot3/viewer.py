@@ -18,6 +18,7 @@ body{display:flex;flex-direction:column}
   z-index:0;font-weight:700;line-height:1;letter-spacing:-0.04em;opacity:0.13;
   pointer-events:none;user-select:none}
 #axes{position:absolute;inset:0;pointer-events:none;z-index:2}
+#grid{position:absolute;inset:0;pointer-events:none;z-index:0}
 #legend{position:absolute;right:10px;top:36px;z-index:4;padding:6px 9px;
   border-radius:6px;font-size:11px;line-height:1.7;max-width:min(46%,280px);
   box-sizing:border-box}
@@ -71,6 +72,7 @@ body{display:flex;flex-direction:column}
 <div id="fig">
   <div id="title"></div>
   <div id="year"></div>
+  <svg id="grid"></svg>
   <div id="canvas-host"></div>
   <svg id="axes"></svg>
   <div id="legend" style="display:none"></div>
@@ -102,6 +104,8 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 
 // Captured before the viewer touches the DOM. Saving the live tree would
 // duplicate the canvas and the legend when the file is opened again.
@@ -380,7 +384,7 @@ function keyLegendsHTML() {
 const szHTML = sizeLegendHTML() + keyLegendsHTML();
 // Class entries and a height colour bar together (geom_box3d on a cloud).
 function barHTML() {
-  if (S.labs.colorBar == null || !S.color || S.color.kind !== 'num') return '';
+  if (S.labs.colorBar == null || !S.color || S.color.kind !== 'num' || S.color.guide === false) return '';
   return '<div class="sz-block"><b style="color:' + T.ink + '">' + plot3Esc(S.labs.colorBar) +
     '</b><div id="ramp" style="background:linear-gradient(90deg,' + S.color.ramp.join(',') +
     ')"></div><span style="float:left">' + (+S.color.lo.toPrecision(3)) +
@@ -404,7 +408,7 @@ if (S.legend) {
     tip.style.display = 'none';
     redraw();
   });
-} else if (S.color.kind === 'num') {
+} else if (S.color.kind === 'num' && S.color.guide !== false) {
   showLegendBox();
   legEl.innerHTML = '<b style="color:'+T.ink+'">' + richLabel('color', S.labs.color||'') +
     '</b><div id="ramp" style="background:linear-gradient(90deg,' +
@@ -574,6 +578,8 @@ function fromScale(ax, norm) {
 
 const host = document.getElementById('canvas-host');
 const svg = document.getElementById('axes');
+// The 2D grid sits behind the data, as in ggplot2; axes and labels above it.
+const gridSvg = document.getElementById('grid');
 const tip = document.getElementById('tip');
 tip.style.background = T.surface;
 tip.style.border = '1px solid ' + T.axis;
@@ -1470,7 +1476,9 @@ let renderNow = () => {};
 
 if (!S.is3d) {
   // ═════════════════════════ 2D: ortho + pan/zoom ═════════════════════════
-  const M = { l: 58, r: 12, t: 30, b: 40 };
+  // theme_void: no tick labels or axis titles to make room for.
+  const VOID2 = !!T.void;
+  const M = VOID2 ? { l: 12, r: 12, t: 30, b: 12 } : { l: 58, r: 12, t: 30, b: 40 };
   if (S.labs.subtitle) M.t += 16;
   const X_ANGLE = THEME_OPTS.xAngle || 0;
   if (X_ANGLE > 0 && S.scales.x) {
@@ -1480,7 +1488,9 @@ if (!S.is3d) {
     M.b += Math.max(0, longest * Math.sin(X_ANGLE * Math.PI / 180) - 8);
   }
   let W = 100, H = 100;
-  const cam = new THREE.OrthographicCamera(-0.03, 1.03, 1.03, -0.03, -10, 10);
+  // coord_cartesian(expand=False): the limits are the panel's edges.
+  const PAD2 = (S.coord && S.coord.expand === false) ? 0 : 0.03;
+  const cam = new THREE.OrthographicCamera(-PAD2, 1 + PAD2, 1 + PAD2, -PAD2, -10, 10);
   // Equal aspect: one data unit has the same length on x and y. The panel
   // stays the cell's shape; the camera shows extra range on the looser axis.
   const coord2d = S.coord || { aspect: 'data', ratio: 1 };
@@ -1493,7 +1503,7 @@ if (!S.is3d) {
   function equalBase() {
     // Nx / Ny so pixels per x unit = ratio * pixels per y unit.
     const target = (W / Math.max(H, 1)) * (spanOf('y') / spanOf('x')) / equalRatio;
-    const pad = 0.03;
+    const pad = PAD2;
     const need = 1 + 2 * pad;
     let Nx = need, Ny = need;
     if (Nx / Ny < target) Nx = Ny * target;
@@ -1630,9 +1640,12 @@ if (!S.is3d) {
       const cap = hw * 0.55;
       const pos = new Float32Array(n * 6 * 3);
       const col = new Float32Array(n * 6 * 3);
-      // 6 segments × 2 endpoints × 3 = 36 floats per box
-      const linePos = new Float32Array(n * 36);
-      const lineCol = new Float32Array(n * 36);
+      // 9 segments × 2 endpoints × 3 = 54 floats per box
+      const linePos = new Float32Array(n * 54);
+      const lineCol = new Float32Array(n * 54);
+      // aes(fill=): a filled box with a dark outline, whiskers, and median.
+      const filled = !!L.fillMapped;
+      const inkRGB = hex2rgb(T.ink2 || '#333333');
       let p = 0, c = 0, lp = 0, lc = 0;
       function pushSeg(x0,y0,x1,y1,r,g,b) {
         linePos[lp++]=x0; linePos[lp++]=y0; linePos[lp++]=0;
@@ -1650,26 +1663,34 @@ if (!S.is3d) {
         const tri = [x0,lower,0, x1,lower,0, x1,upper,0, x0,lower,0, x1,upper,0, x0,upper,0];
         for (let k = 0; k < 18; k++) pos[p++] = tri[k];
         for (let k = 0; k < 6; k++) { col[c++]=r; col[c++]=gch; col[c++]=b; }
-        // whisker stem + caps + median
-        pushSeg(x, ymin, x, lower, r, gch, b);
-        pushSeg(x, upper, x, ymax, r, gch, b);
-        pushSeg(x - cap, ymin, x + cap, ymin, r, gch, b);
-        pushSeg(x - cap, ymax, x + cap, ymax, r, gch, b);
-        pushSeg(x0, middle, x1, middle, r, gch, b);
-        // side borders of the box (outline)
-        pushSeg(x0, lower, x0, upper, r, gch, b);
+        // whisker stem + caps + median, and the box outline
+        const [lr, lg2, lb] = filled ? inkRGB : [r, gch, b];
+        pushSeg(x, ymin, x, lower, lr, lg2, lb);
+        pushSeg(x, upper, x, ymax, lr, lg2, lb);
+        pushSeg(x - cap, ymin, x + cap, ymin, lr, lg2, lb);
+        pushSeg(x - cap, ymax, x + cap, ymax, lr, lg2, lb);
+        pushSeg(x0, middle, x1, middle, lr, lg2, lb);
+        pushSeg(x0, lower, x0, upper, lr, lg2, lb);
+        pushSeg(x1, lower, x1, upper, lr, lg2, lb);
+        pushSeg(x0, lower, x1, lower, lr, lg2, lb);
+        pushSeg(x0, upper, x1, upper, lr, lg2, lb);
       }
       const bg = new THREE.BufferGeometry();
       bg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
       bg.setAttribute('color', new THREE.BufferAttribute(col, 3));
       scene.add(new THREE.Mesh(bg, new THREE.MeshBasicMaterial({
-        vertexColors: true, transparent: true, opacity: Math.min(1, (L.alpha||0.9)*0.35),
+        vertexColors: true, transparent: true,
+        opacity: filled ? Math.min(1, (L.alpha || 0.9) * 0.9) : Math.min(1, (L.alpha||0.9)*0.35),
         side: THREE.DoubleSide, depthWrite: false })));
-      const lg = new THREE.BufferGeometry();
-      lg.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
-      lg.setAttribute('color', new THREE.BufferAttribute(lineCol, 3));
-      scene.add(new THREE.LineSegments(lg, new THREE.LineBasicMaterial({
-        vertexColors: true, transparent: true, opacity: L.alpha || 0.95 })));
+      // Fat lines: WebGL draws plain lines 1 px wide whatever is asked.
+      const lg = new LineSegmentsGeometry();
+      lg.setPositions(linePos);
+      lg.setColors(lineCol);
+      const boxLine = new LineMaterial({
+        vertexColors: true, linewidth: 1.4, worldUnits: false,
+        transparent: true, opacity: L.alpha || 0.95 });
+      lineMats.push(boxLine);
+      scene.add(new LineSegments2(lg, boxLine));
       // outliers
       const nOut = L.nOut || 0;
       if (nOut > 0 && L.ox && L.oy) {
@@ -1831,15 +1852,15 @@ if (!S.is3d) {
     const y1 = dataLo('y') + cam.top    * spanOf('y');
     const px = v => M.l + (v - x0) / (x1 - x0) * W;
     const py = v => M.t + H - (v - y0) / (y1 - y0) * H;
-    let s = '';
+    let s = '', grid = '';
     // cap tick count by panel size so labels never collide
-    const xt = thin(ticksFor('x', x0, x1), Math.max(5, Math.floor(W / 80)));
-    const yt = thin(ticksFor('y', y0, y1), Math.max(5, Math.floor(H / 40)));
+    const xt = VOID2 ? [] : thin(ticksFor('x', x0, x1), Math.max(5, Math.floor(W / 80)));
+    const yt = VOID2 ? [] : thin(ticksFor('y', y0, y1), Math.max(5, Math.floor(H / 40)));
     const showGrid = THEME_OPTS.panelGrid !== false;
     for (const [t, lab] of xt) {
       const X = px(t);
       if (X < M.l - 1 || X > M.l + W + 1) continue;
-      if (showGrid) s += `<line x1="${X}" y1="${M.t}" x2="${X}" y2="${M.t+H}" stroke="${T.grid}"/>`;
+      if (showGrid) grid += `<line x1="${X}" y1="${M.t}" x2="${X}" y2="${M.t+H}" stroke="${T.grid}"/>`;
       if (X_ANGLE > 0) {
         const ty = M.t + H + 8;
         s += `<text x="${X}" y="${ty}" fill="${T.muted}" text-anchor="end" dominant-baseline="middle" transform="rotate(${-X_ANGLE} ${X} ${ty})">${lab}</text>`;
@@ -1850,10 +1871,35 @@ if (!S.is3d) {
     for (const [t, lab] of yt) {
       const Y = py(t);
       if (Y < M.t - 1 || Y > M.t + H + 1) continue;
-      if (showGrid) s += `<line x1="${M.l}" y1="${Y}" x2="${M.l+W}" y2="${Y}" stroke="${T.grid}"/>`;
+      if (showGrid) grid += `<line x1="${M.l}" y1="${Y}" x2="${M.l+W}" y2="${Y}" stroke="${T.grid}"/>`;
       s += `<text x="${M.l-7}" y="${Y+4}" fill="${T.muted}" text-anchor="end">${lab}</text>`;
     }
-    s += `<rect x="${M.l}" y="${M.t}" width="${W}" height="${H}" fill="none" stroke="${T.axis}"/>`;
+    if (!VOID2) s += `<rect x="${M.l}" y="${M.t}" width="${W}" height="${H}" fill="none" stroke="${T.axis}"/>`;
+    // geom_rug: a short tick at the panel edge for every value.
+    const rugs = S.rugs || [];
+    if (rugs.length) {
+      s += `<clipPath id="p3rugclip"><rect x="${M.l}" y="${M.t}" width="${W}" height="${H}"/></clipPath><g clip-path="url(#p3rugclip)">`;
+      for (const r of rugs) {
+        const onX = r.side === 'b' || r.side === 't';
+        const reach = (r.length || 0.03) * (onX ? H : W);
+        const w = r.width || 0.75, a = r.alpha == null ? 1 : r.alpha;
+        (r.values || []).forEach((v, i) => {
+          const c = r.colors ? r.colors[i] : r.color;
+          if (onX) {
+            const X = px(v);
+            if (X < M.l || X > M.l + W) return;
+            const Y0 = r.side === 'b' ? M.t + H : M.t, Y1 = r.side === 'b' ? Y0 - reach : Y0 + reach;
+            s += `<line x1="${X}" y1="${Y0}" x2="${X}" y2="${Y1}" stroke="${c}" stroke-width="${w}" stroke-opacity="${a}"/>`;
+          } else {
+            const Y = py(v);
+            if (Y < M.t || Y > M.t + H) return;
+            const X0 = r.side === 'l' ? M.l : M.l + W, X1 = r.side === 'l' ? X0 + reach : X0 - reach;
+            s += `<line x1="${X0}" y1="${Y}" x2="${X1}" y2="${Y}" stroke="${c}" stroke-width="${w}" stroke-opacity="${a}"/>`;
+          }
+        });
+      }
+      s += '</g>';
+    }
     // geom_hline / geom_vline / geom_abline, clipped to the panel so they
     // follow pan and zoom without spilling into the margins.
     const refs = S.refs || [];
@@ -1887,7 +1933,7 @@ if (!S.is3d) {
         for (const p of pts) s += `<line x1="${tx}" y1="${ty}" x2="${p[0]}" y2="${p[1]}" stroke="${r.color}" stroke-width="${w}" stroke-linecap="round"/>`;
       }
     }
-    if (!S.facetChild) {
+    if (!S.facetChild && !VOID2) {
       // A facet panel leaves the shared axis titles to the figure around it.
       s += `<text x="${M.l+W/2}" y="${M.t+H+M.b-10}" fill="${T.ink2}" text-anchor="middle">${plot3Esc(withFrame(S.labs.x))}</text>`;
       s += `<text x="14" y="${M.t+H/2}" fill="${T.ink2}" text-anchor="middle" transform="rotate(-90 14 ${M.t+H/2})">${plot3Esc(withFrame(S.labs.y))}</text>`;
@@ -1924,6 +1970,7 @@ if (!S.is3d) {
       s += '<text x="' + AX + '" y="' + AY + '" fill="' + T.ink + '" text-anchor="middle" dominant-baseline="middle" font-size="12" font-weight="600" paint-order="stroke" stroke="' + T.surface + '" stroke-width="4" stroke-linejoin="round">' + plot3Esc(ann.text) + '</text>';
     }
     svg.innerHTML = s;
+    if (gridSvg) gridSvg.innerHTML = grid;
   }
 
   function layout() {
@@ -1933,8 +1980,11 @@ if (!S.is3d) {
     if (equalAspect) applyEqual();
     host.style.left = M.l + 'px'; host.style.top = M.t + 'px';
     renderer.setSize(W, H);
-    svg.setAttribute('width', figEl.clientWidth);
-    svg.setAttribute('height', figEl.clientHeight);
+    for (const layer of [svg, gridSvg]) {
+      if (!layer) continue;
+      layer.setAttribute('width', figEl.clientWidth);
+      layer.setAttribute('height', figEl.clientHeight);
+    }
     for (const lm of lineMats) lm.resolution.set(W, H);
     draw();
   }
@@ -2037,7 +2087,7 @@ if (!S.is3d) {
       equalZoom = 1; equalCx = 0.5; equalCy = 0.5;
       applyEqual();
     } else {
-      cam.left = -0.03; cam.right = 1.03; cam.bottom = -0.03; cam.top = 1.03;
+      cam.left = -PAD2; cam.right = 1 + PAD2; cam.bottom = -PAD2; cam.top = 1 + PAD2;
     }
     draw();
   });
@@ -2855,10 +2905,11 @@ function installSave() {
     if (parts.length < 3 || parts.some(n => !isFinite(n))) return null;
     return parts;
   }
-  function paintAxes(ctx) {
-    if (!svg) return;
+  function paintAxes(ctx, from) {
+    const root = from || svg;
+    if (!root) return;
     const font = '12px ' + (getComputedStyle(document.body).fontFamily || 'sans-serif');
-    const nodes = svg.querySelectorAll('line, rect, text');
+    const nodes = root.querySelectorAll('line, rect, text');
     for (let i = 0; i < nodes.length; i++) {
       const el = nodes[i];
       const tag = el.tagName.toLowerCase();
@@ -2958,6 +3009,7 @@ function installSave() {
       ctx.drawImage(layer.canvas, yearBox.x, yearBox.y, yw, yh);
       if (kind === 'svg') yearURL = layer.canvas.toDataURL('image/png');
     }
+    paintAxes(ctx, gridSvg);
     if (hostR.width > 1 && hostR.height > 1)
       ctx.drawImage(renderer.domElement, hx, hy, hostR.width, hostR.height);
     paintAxes(ctx);
@@ -2982,6 +3034,7 @@ function installSave() {
           + '" width="' + num(yearBox.w) + '" height="' + num(yearBox.h)
           + '" href="' + yearURL + '"/>';
       }
+      if (gridSvg && gridSvg.innerHTML.trim()) body += '<g>' + gridSvg.innerHTML + '</g>';
       body += '<image x="' + num(hx) + '" y="' + num(hy)
         + '" width="' + num(hostR.width) + '" height="' + num(hostR.height)
         + '" href="' + glURL + '"/>';

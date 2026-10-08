@@ -16,6 +16,7 @@ from plot3.geoms import (
     _Geom,
     aes,
     coord_3d,
+    coord_cartesian,
     coord_equal,
     coord_polar,
     geom_col,
@@ -665,6 +666,8 @@ def expand_stat_geom(
         out._stat_y_cols = ("ymin", "lower", "middle", "upper", "ymax")
         out._outlier_frame = pd.DataFrame(outlier_rows)
         out._y_name = ycol
+        raw = {**dict(base_mapping), **dict(geom.mapping)}
+        out._fill_mapped = "fill" in raw and "color" not in raw
         return out
     if geom.kind == "density":
         if "x" not in mapping:
@@ -1002,6 +1005,8 @@ def _coord_spec(coord, is3d: bool, resolved, scales=None) -> dict | None:
         return coord.to_spec()
     if isinstance(coord, coord_equal):
         return coord.to_spec()
+    if isinstance(coord, coord_cartesian):
+        return None if coord.expand else {"aspect": "data", "expand": False}
     if coord is not None:
         raise ValueError(
             "coord_3d() requires a 3D figure (map aes(z=...) on layers)"
@@ -1280,6 +1285,109 @@ def _limits_in_scale(pscale, sc) -> tuple[float | None, float | None]:
     if a is not None and b is not None and b < a:
         a, b = b, a
     return a, b
+
+
+class _Limits:
+    """A pair of limits shaped like a position scale, for _limits_in_scale."""
+
+    kind = "continuous"
+
+    def __init__(self, limits):
+        self.limits = tuple(limits)
+
+
+def _rug_series(rug, g):
+    """(axis, values) for each side a rug draws."""
+    from plot3.table import as_table, materialize_columns
+
+    mapping = _apply_fill(dict(g.mapping), "point")
+    mapping.update(_apply_fill(dict(rug.mapping), "point"))
+    data = getattr(rug, "layer_data", None)
+    data = g.data if data is None else as_table(data)
+    if data is None:
+        return []
+    out = []
+    for axis in dict.fromkeys("x" if side in "bt" else "y" for side in rug.sides):
+        column = mapping.get(axis)
+        if not column:
+            continue
+        frame = materialize_columns(data, [column])
+        out.append((axis, frame[column]))
+    return out
+
+
+def _rug_positions(scale, series) -> np.ndarray:
+    """Values in the scale's own units; NaN where they have no place."""
+    kind, pos, cats = col_values(series)
+    if scale.kind == "cat":
+        index = {c: i for i, c in enumerate(scale.cats)}
+        if kind == "cat":
+            lookup = np.array([index.get(c, np.nan) for c in cats] + [np.nan], dtype=np.float64)
+            codes = np.where(np.isfinite(pos), pos, len(cats)).astype(np.int64)
+            return lookup[codes]
+        return np.array([index.get(str(v), np.nan) for v in series], dtype=np.float64)
+    if kind == "cat":
+        return np.full(len(pos), np.nan)
+    if getattr(scale, "trans", None) == "log10":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(pos > 0, np.log10(pos), np.nan)
+    return pos
+
+
+def _rug_specs(rug_layers, g, scales, theme, cspec, cat_colours) -> list[dict]:
+    """geom_rug ticks per side, in scale units, with a colour per tick when
+    the rug maps a colour that the figure's legend already shows."""
+    from plot3.table import as_table, materialize_columns
+
+    out = []
+    for rug in rug_layers:
+        mapping = _apply_fill(dict(g.mapping), "point")
+        mapping.update(_apply_fill(dict(rug.mapping), "point"))
+        colour_of = None
+        column = mapping.get("color")
+        if not rug.const_color and column and cspec and cspec.get("kind") == "cat":
+            data = getattr(rug, "layer_data", None)
+            data = g.data if data is None else as_table(data)
+            levels = materialize_columns(data, [column])[column]
+            index = {str(c): i for i, c in enumerate(cspec.get("cats") or [])}
+            colour_of = [
+                cat_colours[index[str(v)] % len(cat_colours)] if str(v) in index else None
+                for v in levels
+            ]
+        base = _hex_or_none(rug.const_color) or theme["ink"]
+        series = dict(_rug_series(rug, g))
+        for side in rug.sides:
+            axis = "x" if side in "bt" else "y"
+            if axis not in series or axis not in scales:
+                continue
+            values = _rug_positions(scales[axis], series[axis])
+            keep = np.isfinite(values)
+            item = {
+                "side": side,
+                "values": [float(v) for v in values[keep]],
+                "color": base,
+                "length": float(rug.length),
+                "width": float(rug.linewidth) * 1.5,
+                "alpha": 1.0 if rug.alpha is None else float(rug.alpha),
+            }
+            if colour_of is not None:
+                item["colors"] = [colour_of[i] or base for i in np.flatnonzero(keep)]
+            out.append(item)
+    return out
+
+
+def _apply_guides(spec: dict, hidden: dict) -> None:
+    """guides(colour="none") and friends: drop those legends from the spec."""
+    if hidden.get("color"):
+        spec["legend"] = None
+        if spec.get("color") and spec["color"].get("kind") == "num":
+            spec["color"]["guide"] = False
+    if hidden.get("size"):
+        spec["sizeLegend"] = None
+    if hidden.get("shape"):
+        spec["shapeLegend"] = None
+    if hidden.get("linetype"):
+        spec["linetypeLegend"] = None
 
 
 def _hex_or_none(colour):
@@ -1590,17 +1698,21 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     density_stat = getattr(g, "stat_density_3d", None)
     layers_in = []
     ref_layers = []
+    rug_layers = []
     for geom in g.layers:
         if getattr(geom, "kind", None) in _REF_KINDS:
             ref_layers.append(geom)  # drawn across the panel, not from rows
+            continue
+        if getattr(geom, "kind", None) == "rug":
+            rug_layers.append(geom)  # ticks on the panel edges
             continue
         if getattr(geom, "kind", None) == "isosurface" and density_stat is not None:
             geom = copy_geom_with_density_n(geom, density_stat.n)
         layers_in.append(geom)
     if not layers_in:
         raise ValueError(
-            "geom_hline(), geom_vline(), and geom_abline() draw on a plot: "
-            "add a data layer such as geom_point()"
+            "geom_hline(), geom_vline(), geom_abline(), and geom_rug() draw on a "
+            "plot: add a data layer such as geom_point()"
         )
     transition = getattr(g, "transition", None)
     slider = getattr(g, "slider", None)
@@ -1650,6 +1762,9 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         expanded = flip_layers(expanded, g)
         g = flipped_figure(g)
         ref_layers = flip_refs(ref_layers)
+        from plot3.flip import flip_rugs
+
+        rug_layers = flip_rugs(rug_layers)
         coord = None
     resolved = []  # per layer: (geom, mapping)
     for geom in expanded:
@@ -1678,6 +1793,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         )
     if is3d and getattr(g, "facet", None) is not None:
         raise ValueError("facet_wrap() is not supported with 3D figures yet")
+    if is3d and rug_layers:
+        raise ValueError("geom_rug() is for 2D figures")
     # A point cloud with no colour of its own is coloured by height, as
     # lidar viewers draw it: aes(colour=) or colour="steelblue" turns it off.
     height_title = None
@@ -2241,6 +2358,13 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             values = [_ref_scale_value(scales[axis], v) for v in ref.values]
             scales[axis].widen(np.asarray([v for v in values if v is not None], dtype=np.float64))
 
+    # A rug's values belong on the axes too, as ggplot2 trains its scales.
+    for rug in rug_layers:
+        for axis, series in _rug_series(rug, g):
+            if axis in scales and scales[axis].kind in {"num", "dt"}:
+                values = _rug_positions(scales[axis], series)
+                scales[axis].widen(values[np.isfinite(values)])
+
     for a in axes:
         scales[a].finish()
 
@@ -2300,6 +2424,22 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 hi = lo + 1.0
             scales[axis_name].lo = lo
             scales[axis_name].hi = hi
+
+    # coord_cartesian(xlim=, ylim=): the view only; every row was used above.
+    if isinstance(coord, coord_cartesian):
+        for axis_name, lim in (("x", coord.xlim), ("y", coord.ylim)):
+            sc = scales.get(axis_name)
+            if lim is None or sc is None or sc.kind not in {"num", "dt"}:
+                continue
+            lo, hi = _limits_in_scale(_Limits(lim), sc)
+            if lo is not None:
+                sc.lo = lo
+            if hi is not None:
+                sc.hi = hi
+            if sc.hi <= sc.lo:
+                sc.hi = sc.lo + 1.0
+            if getattr(sc, "custom", None) is not None and sc.custom.trans == "reverse":
+                sc.lo, sc.hi = sc.hi, sc.lo
 
     # Numeric colour limits: robust 2-98 percentile by default so skewed data
     # (lidar intensity) actually varies; override via scale_colour_continuous.
@@ -2482,11 +2622,17 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             if not np.isfinite(values).all():
                 fill = sc.lo if math.isfinite(sc.lo) else 0.0
                 values = np.where(np.isfinite(values), values, fill)
+            # 16-bit positions clamp to the scale. Rows past it (a
+            # coord_cartesian zoom) keep their place as floats, and the
+            # panel clips them.
+            lo_v, hi_v = min(sc.lo, sc.hi), max(sc.lo, sc.hi)
+            slack = 1e-9 * max(abs(hi_v - lo_v), 1.0)
+            inside = bool(values.size == 0 or (values.min() >= lo_v - slack and values.max() <= hi_v + slack))
             enc = encode_norm(
                 values,
                 sc.lo,
                 sc.hi,
-                quantize=g.quantize,
+                quantize=g.quantize and inside,
                 compress=g.compress,
             )
             pid = f"p{li}{name}"
@@ -2532,6 +2678,10 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 _encode_channel(name, vals[name][order], "x" if name == "x" else "y")
             # Keep y as middle for shared hover helpers.
             spec_l["y"] = spec_l["middle"]
+            if getattr(geom, "_fill_mapped", False):
+                # ggplot2: aes(fill=) fills the box; outline, whiskers, and
+                # median stay dark.
+                spec_l["fillMapped"] = True
             if vals.get("ox") is not None:
                 n_out = len(vals["ox"])
                 spec_l["nOut"] = int(n_out)
@@ -3019,6 +3169,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         "facetChild": bool(getattr(g, "_facet_child", False)) or None,
         "labsMath": labs_math or None,
         "refs": _ref_specs(ref_layers, scales, theme) or None,
+        "rugs": _rug_specs(rug_layers, g, scales, theme, cspec, cat_colours) or None,
         "arrows": arrows or None,
         "shapeLegend": shape_legend,
         "linetypeLegend": linetype_legend,
@@ -3052,6 +3203,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if entries_title and spec.get("legend") and cspec and cspec.get("kind") == "num":
         spec["labs"]["colorBar"] = spec["labs"].get("color") or ""
         spec["labs"]["color"] = entries_title
+    _apply_guides(spec, getattr(g, "guides", None) or {})
     return spec, payloads
 
 

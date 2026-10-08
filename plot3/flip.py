@@ -228,3 +228,18 @@ def _swap(geom) -> _Geom:
         out._x_domain = None
     out.sort_x = False
     return out
+
+
+_SIDE_SWAP = {"b": "l", "l": "b", "t": "r", "r": "t"}
+
+
+def flip_rugs(rugs: list) -> list:
+    """geom_rug under coord_flip: x values move to the left side, y to the bottom."""
+    out = []
+    for rug in rugs:
+        clone = copy.copy(rug)
+        clone.mapping = aes()
+        clone.mapping.update(swap_mapping(rug.mapping))
+        clone.sides = "".join(_SIDE_SWAP[side] for side in rug.sides)
+        out.append(clone)
+    return out

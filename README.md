@@ -192,11 +192,25 @@ Limits on a continuous axis drop the rows outside them and say how many.
 ```
 
 Themes: `theme_bw` (default for saved files), `theme_classic`,
-`theme_minimal`, `theme_light`, `theme_dark` (default in the interactive
-viewer). Each takes `base_size` (points) and `base_family`. `theme()` sets
+`theme_minimal`, `theme_void` (the data alone), `theme_light`, `theme_dark`
+(default in the interactive viewer), and `theme_lidar` (driving scenes). Each takes `base_size` (points) and `base_family`. `theme()` sets
 `legend_position` (`"right"`, `"bottom"`, `"none"`, or `(x, y)` inside the
 panel), `legend_title=False`, `panel_grid=False`, `axis_text_x_angle`,
 `plot_title_hjust`, `base_size`, and `base_family`.
+
+`ggtitle("Response", subtitle=)`, `xlab()`, and `ylab()` are shortcuts for
+`labs()`. `guides(colour="none")` hides one legend (also `fill`, `size`,
+`shape`, `linetype`) and keeps the others.
+
+Zoom without dropping data with `coord_cartesian`: a smoother or boxplot is
+still computed from every row, while `xlim()` and `scale_x_continuous(limits=)`
+remove the rows outside first.
+
+```python
+(ggplot(trial, aes(x="dose", y="response"))
+ + geom_point() + geom_smooth(method="lm") + geom_rug(alpha=0.4)
+ + coord_cartesian(xlim=(2, 6)))
+```
 
 ## Facets and multi-panel figures
 
@@ -358,15 +372,15 @@ tree) is shortened to twice its width so it does not become a thin column;
 | Bars and areas | `geom_col`, `geom_bar`, `geom_histogram`, `geom_area`, `geom_ribbon`, `geom_rect`, `geom_tile`/`geom_raster` |
 | Distributions | `geom_boxplot`, `geom_violin`, `geom_density`, `geom_qq`, `geom_qq_line`, `stat_ecdf`, `stat_summary` |
 | Uncertainty and fits | `geom_errorbar`, `geom_pointrange`, `geom_linerange`, `geom_smooth(method="loess"/"lm")` |
-| Reference | `geom_hline`, `geom_vline`, `geom_abline`, `annotate("text"/"label"/"rect"/"segment"/"point")` |
+| Reference | `geom_hline`, `geom_vline`, `geom_abline`, `geom_rug`, `annotate("text"/"label"/"rect"/"segment"/"point")` |
 | Positions | `position="stack"/"dodge"/"fill"/"identity"`, `position_dodge(width)`, `position_stack()`, `position_fill()` |
 | Functions | `geom_function`, `geom_vector_field`, `area`, `tangent`, `derivative` |
 | Scales | see [Scales](#scales) |
-| Coordinates | `coord_flip`, `coord_equal`, `coord_polar`, `coord_3d` |
+| Coordinates | `coord_cartesian`, `coord_flip`, `coord_equal`, `coord_polar`, `coord_3d` |
 | Facets and layout | `facet_wrap`, `facet_grid`, `p1 | p2`, `p1 / p2`, `plot_layout`, `plot_annotation` |
-| Labels and themes | `labs(title, subtitle, caption, tag, x, y, colour, fill)`, `theme_*`, `theme()` |
+| Labels and themes | `labs(title, subtitle, caption, tag, x, y, colour, fill)`, `ggtitle`, `xlab`, `ylab`, `guides`, `theme_*`, `theme()` |
 | Animation | `transition_time`, `transition_states`, `slider` |
-| 3D | `geom_point3d`, `geom_surface`, `geom_isosurface`, `stat_density_3d`, `read_bin` |
+| 3D | `geom_point3d`, `geom_surface`, `geom_isosurface`, `geom_box3d`, `stat_density_3d`, `read_bin` |
 
 ## Differences from ggplot2
 

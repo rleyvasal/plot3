@@ -1018,10 +1018,13 @@ def _box_3d(x, y, w, h, labs, fonts, extra_right=0.0, extra_bottom=0.0):
 
 def _box_2d(spec, x, y, w, h, labs, fonts, extra_right=0.0, extra_bottom=0.0):
     tick, title, note = fonts
-    left = _y_gutter(spec, labs, fonts, w)
+    void = bool((spec.get("theme") or {}).get("void"))
+    left = 10.0 if void else _y_gutter(spec, labs, fonts, w)
     x_name = labs.get("x") or ""
     bottom = 6 + _line_height(tick) + (4 + _line_height(tick) if x_name else 0) + 8
     bottom += _x_label_drop(spec, tick)
+    if void:
+        bottom = 10.0
     note_lines = _note_lines(spec.get("notes") or [], note, w)
     if note_lines:
         bottom += len(note_lines) * _note_line_height(note) + 4
@@ -1069,7 +1072,8 @@ def _draw_2d(
     # A grid painted in the page colour is invisible, and at print
     # resolution the antialiased edge still shows. Skip it.
     opts = spec.get("themeOpts") or {}
-    if opts.get("panelGrid", True) and _rgb(grid) != _rgb(surface):
+    void = bool(theme.get("void"))
+    if not void and opts.get("panelGrid", True) and _rgb(grid) != _rgb(surface):
         for value, _lab in _ticks(scales.get("x") or {}):
             u = _unit(scales.get("x") or {}, value)
             if u < window[0] - 0.02 or u > window[1] + 0.02:
@@ -1084,11 +1088,16 @@ def _draw_2d(
             commands.append(("line", box[0], y0, box[0] + box[2], y0, grid, 1, 1.0))
 
     gz = bool(spec.get("gz"))
+    # Marks stay inside the panel, as ggplot2 clips them (coord_cartesian
+    # zooms past the data; a big point at the edge is cut, not spilled).
+    commands.append(("clip", box[0], box[1], box[2], box[3]))
     for layer in spec.get("layers") or []:
         _draw_layer_2d(layer, spec, blobs, gz, px, commands)
+    _draw_rugs(spec, commands, box, px, window)
+    commands.append(("unclip",))
 
     _draw_frame(commands, box, axis, frame)
-    for value, lab in _ticks(scales.get("x") or {}):
+    for value, lab in (() if void else _ticks(scales.get("x") or {})):
         u = _unit(scales.get("x") or {}, value)
         if u < window[0] - 0.02 or u > window[1] + 0.02:
             continue
@@ -1110,7 +1119,7 @@ def _draw_2d(
                 "text", sx, box[1] + box[3] + 4, str(lab), tick_size, muted,
                 "middle", "top", 0, 400,
             ))
-    y_ticks = _thin_y_ticks(_ticks(scales.get("y") or {}), scales.get("y") or {}, box[3], tick_size)
+    y_ticks = [] if void else _thin_y_ticks(_ticks(scales.get("y") or {}), scales.get("y") or {}, box[3], tick_size)
     for value, lab in y_ticks:
         v = _unit(scales.get("y") or {}, value)
         if v < window[2] - 0.02 or v > window[3] + 0.02:
@@ -1122,13 +1131,13 @@ def _draw_2d(
             "text", box[0] - 6, sy, str(lab), tick_size, muted,
             "end", "middle", 0, 400,
         ))
-    if labs.get("x"):
+    if labs.get("x") and not void:
         commands.append((
             "text", box[0] + box[2] / 2,
             box[1] + box[3] + 6 + _line_height(tick_size) + _x_label_drop(spec, tick_size),
             labs["x"], tick_size, ink2, "middle", "top", 0, 400,
         ))
-    if labs.get("y"):
+    if labs.get("y") and not void:
         commands.append((
             "text", x + 8 + _line_height(tick_size) / 2, box[1] + box[3] / 2,
             labs["y"], tick_size, ink2, "middle", "middle", -90, 400,
@@ -1304,6 +1313,9 @@ def _draw_boxes(layer, blobs, gz, n, colors, alpha, px, commands, spec) -> None:
     ymax = _norm_channel(layer, "ymax", blobs, gz, n)
     xs = _norm_channel(layer, "x", blobs, gz, n)
     fill_alpha = min(1.0, alpha * 0.35)
+    # aes(fill=): a filled box with a dark outline, whiskers, and median.
+    filled = bool(layer.get("fillMapped"))
+    line_ink = _hex(_rgb((spec.get("theme") or {}).get("ink2") or "#333333"))
     for i in range(n):
         color = _hex(colors[i])
         x = float(xs[i])
@@ -1317,13 +1329,17 @@ def _draw_boxes(layer, blobs, gz, n, colors, alpha, px, commands, spec) -> None:
             abs(corners[1][0] - corners[0][0]),
             abs(corners[1][1] - corners[0][1]),
         )
-        commands.append(("rect", rect[0], rect[1], rect[2], rect[3], color, color, 1, fill_alpha))
-        commands.append(("rect", rect[0], rect[1], rect[2], rect[3], None, color, 1, alpha))
-        _seg(commands, px(x, float(ymin[i])), px(x, float(lower[i])), color, alpha)
-        _seg(commands, px(x, float(upper[i])), px(x, float(ymax[i])), color, alpha)
-        _seg(commands, px(x - cap, float(ymin[i])), px(x + cap, float(ymin[i])), color, alpha)
-        _seg(commands, px(x - cap, float(ymax[i])), px(x + cap, float(ymax[i])), color, alpha)
-        _seg(commands, px(x - hw, float(middle[i])), px(x + hw, float(middle[i])), ink, alpha)
+        stroke = line_ink if filled else color
+        commands.append((
+            "rect", rect[0], rect[1], rect[2], rect[3], color, color, 1,
+            min(1.0, alpha * 0.9) if filled else fill_alpha,
+        ))
+        commands.append(("rect", rect[0], rect[1], rect[2], rect[3], None, stroke, 1, alpha))
+        _seg(commands, px(x, float(ymin[i])), px(x, float(lower[i])), stroke, alpha)
+        _seg(commands, px(x, float(upper[i])), px(x, float(ymax[i])), stroke, alpha)
+        _seg(commands, px(x - cap, float(ymin[i])), px(x + cap, float(ymin[i])), stroke, alpha)
+        _seg(commands, px(x - cap, float(ymax[i])), px(x + cap, float(ymax[i])), stroke, alpha)
+        _seg(commands, px(x - hw, float(middle[i])), px(x + hw, float(middle[i])), line_ink if filled else ink, alpha)
     n_out = int(layer.get("nOut") or 0)
     if n_out <= 0 or layer.get("ox") is None:
         return
@@ -1894,6 +1910,9 @@ def _legend_metrics(
     entries = list(spec.get("legend") or [])
     color = spec.get("color") or {}
     size_legend = spec.get("sizeLegend")
+    if color.get("guide") is False:
+        # guides(colour="none"): the colours stay, the bar goes.
+        color = {}
     if (
         not entries and color.get("kind") != "num" and not size_legend
         and not spec.get("shapeLegend") and not spec.get("linetypeLegend")
@@ -2514,6 +2533,9 @@ def _projector(ext, box, direction=None, zoom: float = 1.0):
 
 def _view_window(spec, plot_w, plot_h):
     coord = spec.get("coord") or {}
+    if coord.get("expand") is False:
+        # coord_cartesian(expand=False): the limits are the panel's edges.
+        return (0.0, 1.0, 0.0, 1.0)
     if coord.get("aspect") != "equal":
         return (-_PAD, 1 + _PAD, -_PAD, 1 + _PAD)
     ratio = float(coord.get("ratio") or 1.0) or 1.0
@@ -2686,6 +2708,38 @@ def _draw_arrows(spec, commands, px) -> None:
         else:
             for barb in barbs:
                 commands.append(("line", tip[0], tip[1], barb[0], barb[1], color, width, 1.0))
+
+
+def _draw_rugs(spec, commands, box, px, window) -> None:
+    """geom_rug: a short tick at the panel edge for every value."""
+    scales = spec.get("scales") or {}
+    left, right, bottom, top = window
+    for rug in spec.get("rugs") or []:
+        side = rug.get("side")
+        axis = "x" if side in {"b", "t"} else "y"
+        scale = scales.get(axis) or {}
+        reach = float(rug.get("length") or 0.03) * (box[3] if axis == "x" else box[2])
+        width = float(rug.get("width") or 0.75)
+        alpha = float(rug.get("alpha", 1.0))
+        colors = rug.get("colors")
+        base = rug.get("color") or "#000000"
+        for i, value in enumerate(rug.get("values") or []):
+            u = _unit(scale, value)
+            color = _hex(colors[i]) if colors else base
+            if axis == "x":
+                if not left <= u <= right:
+                    continue
+                sx, _sy = px(u, bottom)
+                y0 = box[1] + box[3] if side == "b" else box[1]
+                y1 = y0 - reach if side == "b" else y0 + reach
+                commands.append(("line", sx, y0, sx, y1, color, width, alpha))
+            else:
+                if not bottom <= u <= top:
+                    continue
+                _sx, sy = px(left, u)
+                x0 = box[0] if side == "l" else box[0] + box[2]
+                x1 = x0 + reach if side == "l" else x0 - reach
+                commands.append(("line", x0, sy, x1, sy, color, width, alpha))
 
 
 def _draw_refs(spec, commands, window, px) -> None:

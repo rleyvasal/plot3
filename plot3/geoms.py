@@ -1280,6 +1280,46 @@ class coord_flip:
     kind = "flip"
 
 
+class coord_cartesian:
+    """Zoom to ``xlim`` / ``ylim`` without dropping data, as ggplot2 does.
+
+    ``scale_x_continuous(limits=)`` and ``xlim()`` remove the rows outside
+    the limits before statistics run, so a boxplot or smoother changes.
+    ``coord_cartesian`` computes everything from all rows and only moves the
+    view. ``expand=False`` removes the small margin around the limits.
+    """
+
+    kind = "cartesian"
+
+    def __init__(self, xlim=None, ylim=None, expand=True):
+        for name, lim in (("xlim", xlim), ("ylim", ylim)):
+            if lim is not None and (not isinstance(lim, (tuple, list)) or len(lim) != 2):
+                raise ValueError(f"coord_cartesian({name}=) is a pair such as (0, 10)")
+        self.xlim = None if xlim is None else tuple(xlim)
+        self.ylim = None if ylim is None else tuple(ylim)
+        self.expand = bool(expand)
+
+
+class geom_rug(_Geom):
+    """Short ticks at the panel edges, one per row, showing where values fall.
+
+    ``sides`` is any of "b", "l", "t", "r" (default "bl": x along the
+    bottom, y along the left). ``length`` is a fraction of the panel, as
+    ggplot2's ``unit(0.03, "npc")``.
+    """
+
+    kind = "rug"
+
+    def __init__(self, mapping=None, *, sides="bl", length=0.03, linewidth=0.5, **kw):
+        super().__init__(mapping, **kw)
+        sides = str(sides)
+        if not sides or any(ch not in "bltr" for ch in sides):
+            raise ValueError('geom_rug(sides=) uses "b", "l", "t", "r", for example "bl"')
+        self.sides = sides
+        self.length = float(length)
+        self.linewidth = float(linewidth)
+
+
 class geom_histogram(_Geom):
     """Histogram of a continuous ``x`` (ggplot2 ``geom_histogram`` / ``stat_bin``).
 
@@ -1525,6 +1565,48 @@ class labs(dict):
                      ("tag", tag)):
             if v is not None:
                 self[k] = v
+
+
+def ggtitle(label, subtitle=None) -> labs:
+    """The plot title (and subtitle): ``labs(title=, subtitle=)``."""
+    return labs(title=label, subtitle=subtitle)
+
+
+def xlab(label) -> labs:
+    """The x axis title. ``xlab("")`` removes it."""
+    return labs(x=label)
+
+
+def ylab(label) -> labs:
+    """The y axis title. ``ylab("")`` removes it."""
+    return labs(y=label)
+
+
+_GUIDE_KEYS = {"colour": "color", "color": "color", "fill": "color",
+               "size": "size", "shape": "shape", "linetype": "linetype"}
+
+
+class guides:
+    """Hide a legend: ``guides(colour="none")``, ``guides(size="none")``.
+
+    ``fill`` and ``colour`` share one legend in plot3, so either hides it.
+    ``"legend"`` and ``"colourbar"`` keep the default legend.
+    """
+
+    def __init__(self, **kwargs):
+        self.hidden: dict[str, bool] = {}
+        for key, value in kwargs.items():
+            name = _GUIDE_KEYS.get(key)
+            if name is None:
+                raise ValueError(
+                    f"guides() takes colour, fill, size, shape, or linetype, not {key!r}"
+                )
+            if value is False or value is None or value == "none":
+                self.hidden[name] = True
+            elif value in {"legend", "colourbar", "colorbar", True}:
+                self.hidden[name] = False
+            else:
+                raise ValueError(f'guides({key}=) is "none", "legend", or "colourbar"')
 
 
 class scale_colour_continuous:
@@ -1779,6 +1861,11 @@ def theme_lidar(base_size=None, base_family=None) -> _Theme:
     coloured by height from green through cyan to violet, and bright class
     colours for ``geom_box3d``."""
     return _theme("lidar", base_size, base_family)
+
+
+def theme_void(base_size=None, base_family=None) -> _Theme:
+    """Only the data: no axes, ticks, grid, or panel box."""
+    return _theme("void", base_size, base_family)
 
 
 class _ThemePatch:
