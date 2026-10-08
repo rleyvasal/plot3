@@ -171,6 +171,107 @@ def dlnorm(x, meanlog=0.0, sdlog=1.0):
         return np.where(x > 0.0, body, 0.0)
 
 
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued fraction for the incomplete beta (modified Lentz)."""
+    tiny = 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 400):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) > tiny else tiny
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) > tiny else tiny
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < 1e-15:
+            break
+    return h
+
+
+def _betainc1(x: float, a: float, b: float) -> float:
+    """Regularized incomplete beta I_x(a, b)."""
+    if not (a > 0 and b > 0) or math.isnan(x):
+        return math.nan
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    log_front = (
+        math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+        + a * math.log(x) + b * math.log1p(-x)
+    )
+    front = math.exp(log_front)
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1.0 - x) / b
+
+
+pbeta = _elementwise(_betainc1)
+
+
+def _pt1(t: float, df: float) -> float:
+    if math.isnan(t) or not df > 0:
+        return math.nan
+    if math.isinf(t):
+        return 1.0 if t > 0 else 0.0
+    tail = 0.5 * _betainc1(df / (df + t * t), df / 2.0, 0.5)
+    return 1.0 - tail if t > 0 else tail
+
+
+pt = _elementwise(_pt1)
+
+
+def _qt1(p: float, df: float) -> float:
+    if math.isnan(p) or not df > 0 or not 0.0 <= p <= 1.0:
+        return math.nan
+    if p == 0.0:
+        return -math.inf
+    if p == 1.0:
+        return math.inf
+    if p == 0.5:
+        return 0.0
+    # Bracket, then bisect: robust for any df, and fast enough for a stat.
+    lo, hi = -1.0, 1.0
+    while _pt1(lo, df) > p:
+        lo *= 2.0
+    while _pt1(hi, df) < p:
+        hi *= 2.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if _pt1(mid, df) < p:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo <= 1e-13 * max(1.0, abs(mid)):
+            break
+    return 0.5 * (lo + hi)
+
+
+qt = _elementwise(_qt1)
+
+
+def pexp(q, rate=1.0):
+    q, rate = _f(q), _f(rate)
+    with np.errstate(all="ignore"):
+        return np.where(q > 0.0, -np.expm1(-rate * q), 0.0)
+
+
+def punif(q, min=0.0, max=1.0):  # noqa: A002 - R's argument names
+    q, lo, hi = _f(q), _f(min), _f(max)
+    with np.errstate(all="ignore"):
+        return np.clip((q - lo) / (hi - lo), 0.0, 1.0)
+
+
 FUNCTIONS: dict[str, Callable[..., Any]] = {
     "gamma": gamma,
     "lgamma": lgamma,
@@ -187,6 +288,11 @@ FUNCTIONS: dict[str, Callable[..., Any]] = {
     "dexp": dexp,
     "dunif": dunif,
     "dlnorm": dlnorm,
+    "pbeta": pbeta,
+    "pt": pt,
+    "qt": qt,
+    "pexp": pexp,
+    "punif": punif,
 }
 
 # Densities integrate to 1, so a shaded area under one is a probability.

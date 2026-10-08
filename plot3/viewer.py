@@ -1412,7 +1412,23 @@ if (!S.is3d) {
     equalZoom = base.Nx > 0 ? (cam.right - cam.left) / base.Nx : 1;
   }
 
+  // Paint layers in the order they were added, like ggplot2. three.js draws
+  // opaque objects before transparent ones, which would put an error bar
+  // (opaque line) underneath the translucent bar it belongs on.
+  let paintOrder = 0;
+  const addToScene = scene.add.bind(scene);
+  scene.add = (...objs) => {
+    for (const o of objs) {
+      o.traverse(c => {
+        c.renderOrder = paintOrder;
+        const mats = c.material ? (Array.isArray(c.material) ? c.material : [c.material]) : [];
+        for (const m of mats) m.transparent = true;
+      });
+    }
+    return addToScene(...objs);
+  };
   for (const L of S.layers) {
+    paintOrder += 1;
     const n = L.n;
     const cols = layerColors(L, hex2rgb(T.cat[0]));
     const isCat = L.color && L.color.kind === 'cat';
@@ -1660,6 +1676,7 @@ if (!S.is3d) {
       }
     }
   }
+  scene.add = addToScene;
 
   function drawAxes() {
     const x0 = dataLo('x') + cam.left  * spanOf('x');

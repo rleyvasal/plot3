@@ -292,6 +292,11 @@ def _histogram_breaks(
     return _edges_from_binwidth(lo, hi, w, boundary)
 
 
+_STAT2D_KINDS = frozenset(
+    {"jitter", "errorbar", "linerange", "pointrange", "ribbon", "smooth", "summary"}
+)
+
+
 def expand_stat_geom(
     geom: _Geom,
     base_mapping: aes,
@@ -328,6 +333,22 @@ def expand_stat_geom(
         return layers[0] if len(layers) == 1 else layers
     mapping = dict(base_mapping)
     mapping.update(geom.mapping)
+    if geom.kind in _STAT2D_KINDS or geom.kind in {"col", "bar"}:
+        from plot3 import stat2d
+
+        if geom.kind in {"col", "bar"}:
+            if stat2d.wants_positioned_bars(geom, mapping, data):
+                return stat2d.positioned_bars(geom, mapping, data)
+        elif geom.kind == "jitter":
+            return stat2d.jitter(geom, mapping, data)
+        elif geom.kind in {"errorbar", "linerange", "pointrange"}:
+            return stat2d.ranges(geom, mapping, data)
+        elif geom.kind == "ribbon":
+            return stat2d.ribbon(geom, mapping, data)
+        elif geom.kind == "smooth":
+            return stat2d.smooth(geom, mapping, data)
+        elif geom.kind == "summary":
+            return stat2d.summary(geom, mapping, data)
     if geom.kind == "bar":
         if "x" not in mapping:
             raise ValueError("geom_bar() requires aes(x=)")
@@ -716,6 +737,14 @@ def _axis_label(g, base_map: dict, resolved, axis: str, is3d: bool) -> str:
     mapped = base_map.get(axis)
     if mapped:
         return mapped
+    # A layer's own aes(y="v") names the axis before a computed layer's
+    # suggestion (a ribbon's ymin, a smoother's y).
+    for geom, mapping in resolved:
+        if getattr(geom, "_replace_mapping", False):
+            continue
+        own = (getattr(geom, "mapping", None) or {}).get(axis)
+        if own and own == mapping.get(axis):
+            return str(own)
     for geom, _mapping in resolved:
         labels = getattr(geom, "_axis_labels", None)
         if labels and labels.get(axis):
@@ -1277,6 +1306,28 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             return "log10"
         return None
 
+    def _absorb_level_positions(v: np.ndarray, levels: list[str]) -> np.ndarray:
+        if _axis_trans("x") == "log10":
+            raise ValueError("scale_x_log10() cannot be used with categorical x")
+        sc = scales.get("x")
+        if sc is None or (sc.kind == "num" and not math.isfinite(sc.lo)):
+            sc = scales["x"] = Scale("cat")
+        elif sc.kind != "cat":
+            raise ValueError(
+                "aes x: layers disagree on scale type (cat vs num)"
+            )
+        merged = list(dict.fromkeys(sc.cats + [str(level) for level in levels]))
+        sc.cats = merged
+        where = {str(level): merged.index(str(level)) for level in levels}
+        flat = np.asarray(v, dtype=np.float64)
+        base = np.rint(flat)
+        out = np.full(flat.shape, np.nan)
+        for i, (p, k) in enumerate(zip(flat, base)):
+            if not math.isfinite(p) or not 0 <= int(k) < len(levels):
+                continue
+            out[i] = where[str(levels[int(k)])] + (p - k)
+        return out
+
     def _absorb_position(axis: str, kind: str, v: np.ndarray, cats: list[str]):
         nonlocal dropped_log
         trans = _axis_trans(axis)
@@ -1597,6 +1648,13 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         vals = {}
         for a in axes:
             kind, v, cats = col_values(sub[m[a]])
+            levels = getattr(geom, "_violin_levels", None) if a == "x" else None
+            if levels is not None and kind == "num":
+                # Numeric positions on a categorical axis (violins, dodged
+                # bars, error bars). Join the shared category list by name, so
+                # bars and the error bars on them agree whatever their order.
+                vals[a] = _absorb_level_positions(v, list(levels))
+                continue
             vals[a] = _absorb_position(a, kind, v, cats)
         # Histogram: domain is full bin edges, not just bin centres.
         x_domain = getattr(geom, "_x_domain", None)
@@ -1614,15 +1672,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         ) and "y" in scales and scales["y"].kind == "num":
             if getattr(scales["y"], "trans", None) != "log10":
                 scales["y"].widen(np.asarray([0.0], dtype=np.float64))
-        # Violin: numeric x positions with categorical tick labels.
-        if getattr(geom, "_violin_levels", None) is not None:
-            if _axis_trans("x") == "log10":
-                raise ValueError(
-                    "scale_x_log10() cannot be used with categorical x"
-                )
-            levels = list(geom._violin_levels)
-            scales["x"] = Scale("cat")
-            scales["x"].cats = levels
+        # Violin, dodged bars, error bars: numeric x positions on a
+        # categorical axis were joined to the category list above.
         if "color" in m:
             kind, cv, ccats = col_values(sub[m["color"]])
             if kind == "cat" or (kind == "num" and ccats):

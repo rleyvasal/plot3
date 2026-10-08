@@ -2040,8 +2040,27 @@ def _ticks(scale: dict) -> list:
         return ticks
     ladder = scale.get("ladder")
     if ladder and ladder[0]:
-        return ladder[0]
+        return _date_ticks(scale, ladder)
     return []
+
+
+def _date_ticks(scale: dict, ladder: list) -> list:
+    """Pick a date ladder level the way the viewer does, sized for print.
+
+    Levels run coarse to fine. Take the first that shows 3 to 8 ticks;
+    otherwise thin the closest level so labels do not overlap.
+    """
+    lo = float(scale.get("lo", -math.inf))
+    hi = float(scale.get("hi", math.inf))
+    levels = [[t for t in level if lo <= float(t[0]) <= hi] for level in ladder]
+    for visible in levels:
+        if 3 <= len(visible) <= 8:
+            return visible
+    visible = levels[0] if len(levels[0]) >= 3 else levels[-1]
+    if len(visible) <= 8:
+        return visible
+    step = -(-len(visible) // 7)
+    return visible[::step]
 
 
 def _unit(scale: dict, value) -> float:

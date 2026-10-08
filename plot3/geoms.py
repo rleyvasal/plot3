@@ -43,7 +43,8 @@ def _as_column_name(value):
 
 
 class aes(dict):
-    """Aesthetic mapping: aes(x=, y=, z=, colour=/color=, fill=, size=, group=).
+    """Aesthetic mapping: aes(x=, y=, z=, colour=/color=, fill=, size=, group=,
+    ymin=, ymax=).
 
     ``fill`` is accepted as an alias of ``colour`` when colour is omitted
     (useful for surfaces).
@@ -51,6 +52,8 @@ class aes(dict):
     ``size`` maps a numeric column onto point area (radius follows the square
     root), so a bubble chart reads population as area. A constant
     ``geom_point(size=)`` is still one size for the whole layer.
+
+    ``ymin`` and ``ymax`` are the ends of an error bar or ribbon.
 
     ``group`` is the identity of an object. Lines use it to split series.
     ``transition_time`` uses it to match the same object across frames
@@ -79,6 +82,8 @@ class aes(dict):
         fill=None,
         size=None,
         group=None,
+        ymin=None,
+        ymax=None,
     ):
         super().__init__()
         colour_value = (
@@ -91,7 +96,9 @@ class aes(dict):
         for k, v in (("x", x), ("y", y), ("z", z),
                      ("color", colour_value),
                      ("size", size),
-                     ("group", group)):
+                     ("group", group),
+                     ("ymin", ymin),
+                     ("ymax", ymax)):
             if v is not None:
                 self[k] = _as_column_name(v)
 
@@ -666,13 +673,18 @@ class geom_col(_Geom):
     width:
         Bar width as a fraction of the x resolution (ggplot2 default
         ``0.9``). Data width is ``resolution(x) * width``. Override freely.
+    position:
+        With ``aes(colour=)`` groups: ``"stack"`` (default), ``"dodge"``
+        (side by side), ``"fill"`` (stacked to proportions), or
+        ``"identity"`` (overlapping). ``position_dodge(width=)`` also works.
     """
 
     kind = "col"
 
-    def __init__(self, mapping=None, *, width=0.9, **kw):
+    def __init__(self, mapping=None, *, width=0.9, position="stack", **kw):
         super().__init__(mapping, **kw)
         self.width = float(width)
+        self.position = position
         self.data_override = None  # optional layer-local frame (stats)
 
 
@@ -688,13 +700,159 @@ class geom_bar(_Geom):
     width:
         Bar width as a fraction of category spacing (ggplot2 default
         ``0.9``). Use ``1.0`` for flush bars, smaller for more gap.
+    position:
+        With ``aes(colour=)`` groups the counts split by group:
+        ``"stack"`` (default), ``"dodge"``, ``"fill"``, or ``"identity"``.
     """
 
     kind = "bar"
 
-    def __init__(self, mapping=None, *, width=0.9, **kw):
+    def __init__(self, mapping=None, *, width=0.9, position="stack", **kw):
         super().__init__(mapping, **kw)
         self.width = float(width)
+        self.position = position
+
+
+class position_dodge:
+    """Side by side within each x. ``width`` is the slot, as a fraction of x spacing."""
+
+    kind = "dodge"
+
+    def __init__(self, width=None):
+        self.width = None if width is None else float(width)
+
+
+class position_stack:
+    """Stacked, first group on top (ggplot2 order)."""
+
+    kind = "stack"
+    width = None
+
+
+class position_fill:
+    """Stacked and scaled so each x sums to 1."""
+
+    kind = "fill"
+    width = None
+
+
+class geom_jitter(_Geom):
+    """Points nudged at random so overplotted values separate (ggplot2 ``geom_jitter``).
+
+    ``width`` and ``height`` default to 40% of the spacing between x and y
+    values, as in ggplot2. Pass ``height=0`` to keep y exact. ``seed`` makes
+    the jitter repeatable, so a saved figure does not change between runs.
+    """
+
+    kind = "jitter"
+
+    def __init__(self, mapping=None, *, width=None, height=None, seed=0, size=None, **kw):
+        super().__init__(mapping, **kw)
+        self.width = width
+        self.height = height
+        self.seed = seed
+        self.size = size
+
+
+class geom_errorbar(_Geom):
+    """Vertical error bars from ``ymin`` to ``ymax`` with caps.
+
+    Requires ``aes(x=, ymin=, ymax=)``. ``width`` is the cap width as a
+    fraction of x spacing. ``position="dodge"`` lines up with dodged bars.
+    """
+
+    kind = "errorbar"
+
+    def __init__(self, mapping=None, *, width=0.5, linewidth=1.0, position="identity", **kw):
+        super().__init__(mapping, **kw)
+        self.width = float(width)
+        self.linewidth = float(linewidth)
+        self.position = position
+
+
+class geom_linerange(_Geom):
+    """A vertical line from ``ymin`` to ``ymax``. Requires ``aes(x=, ymin=, ymax=)``."""
+
+    kind = "linerange"
+
+    def __init__(self, mapping=None, *, linewidth=1.0, position="identity", **kw):
+        super().__init__(mapping, **kw)
+        self.linewidth = float(linewidth)
+        self.position = position
+
+
+class geom_pointrange(_Geom):
+    """A point at ``y`` on a line from ``ymin`` to ``ymax``.
+
+    Requires ``aes(x=, y=, ymin=, ymax=)``.
+    """
+
+    kind = "pointrange"
+
+    def __init__(self, mapping=None, *, size=None, linewidth=1.0, position="identity", **kw):
+        super().__init__(mapping, **kw)
+        self.size = size
+        self.linewidth = float(linewidth)
+        self.position = position
+
+
+class geom_ribbon(_Geom):
+    """A band between ``ymin`` and ``ymax`` along x (confidence bands, ranges).
+
+    Requires ``aes(x=, ymin=, ymax=)``; ``aes(colour=)`` draws one band per group.
+    """
+
+    kind = "ribbon"
+
+
+class geom_smooth(_Geom):
+    """A fitted trend with its confidence band (ggplot2 ``geom_smooth``).
+
+    ``method="loess"`` (default, local quadratic with ``span``) or ``"lm"``
+    (a straight line). ``se=True`` shades the ``level`` confidence band,
+    using Student's t like R. ``aes(colour=)`` fits each group.
+    """
+
+    kind = "smooth"
+
+    def __init__(
+        self, mapping=None, *, method="loess", se=True, level=0.95,
+        span=0.75, n=80, linewidth=2.0, **kw,
+    ):
+        super().__init__(mapping, **kw)
+        self.method = method
+        self.se = bool(se)
+        self.level = float(level)
+        self.span = float(span)
+        self.n = int(n)
+        self.linewidth = float(linewidth)
+
+
+class stat_summary(_Geom):
+    """Summarise ``y`` at each x, then draw it (ggplot2 ``stat_summary``).
+
+    ``fun_data`` is ``"mean_se"`` (default), ``"mean_cl_normal"`` (t
+    interval), ``"mean_sdl"`` (mean ± 2 SD), ``"median_hilow"`` (median and
+    the middle 95%), or a function returning ``(y, ymin, ymax)``.
+    ``fun_args`` passes options, e.g. ``{"mult": 1}``. ``geom`` is
+    ``"pointrange"`` (default), ``"errorbar"``, ``"linerange"``, ``"col"``,
+    or ``"point"``.
+    """
+
+    kind = "summary"
+
+    def __init__(
+        self, mapping=None, *, fun_data="mean_se", fun_args=None, geom="pointrange",
+        width=None, linewidth=1.0, size=None, position=None, **kw,
+    ):
+        super().__init__(mapping, **kw)
+        self.fun_data = fun_data
+        self.fun_args = dict(fun_args or {})
+        self.geom = geom
+        self.width = (0.9 if geom in {"col", "bar"} else 0.5) if width is None else float(width)
+        self.linewidth = float(linewidth)
+        self.size = size
+        self.position = position
 
 
 class geom_histogram(_Geom):
