@@ -880,6 +880,7 @@ def segment(geom: _Geom, mapping: dict, data: Any) -> _Geom:
     out = _layer("line", frame_out, out_map, geom, _groups=starts,
                  linewidth=float(getattr(geom, "linewidth", 1.0) or 1.0), _ink_default=not colour)
     out.linetype = getattr(geom, "linetype", None)
+    out.arrow = getattr(geom, "arrow", None)
     _title(out, "x", mapping["x"])
     _title(out, "y", mapping["y"])
     return out

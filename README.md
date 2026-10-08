@@ -119,7 +119,7 @@ ggplot(trial, aes(x="dose", y="response")) + geom_point() + geom_smooth()       
 | Summaries | `stat_summary(fun_data="mean_se" / "mean_cl_normal" / "mean_sdl" / "median_hilow")` |
 | Heatmaps | `geom_tile(aes(x=, y=, fill=))` (or `geom_raster`), with `geom_text(aes(label=))` |
 | Stacked areas | `geom_area(aes(fill=))`, `position="fill"` for shares |
-| Steps, segments, rectangles | `geom_step()`, `geom_segment(aes(xend=, yend=))`, `geom_rect(aes(xmin=, xmax=, ymin=, ymax=))` |
+| Steps, segments, rectangles | `geom_step()`, `geom_segment(aes(xend=, yend=), arrow=arrow())`, `geom_rect(aes(xmin=, xmax=, ymin=, ymax=))` |
 | Horizontal layout | `+ coord_flip()` (bars, boxplots, densities, error bars) |
 | Several datasets | `geom_rect(aes(...), data=periods)`: any layer can bring its own data |
 
@@ -136,7 +136,7 @@ containing missing values (geom_point)*.
  + geom_abline(slope=0.6, intercept=2)
  + annotate("rect", xmin=2, xmax=8, ymin=0, ymax=12)
  + annotate("label", x=9, y=1, label="safe range")
- + annotate("segment", x=1, y=10, xend=3, yend=8))
+ + annotate("segment", x=1, y=10, xend=3, yend=8, arrow=arrow()))
 
 means = trial.groupby("arm", as_index=False).response.mean()
 (ggplot(means, aes(x="arm", y="response", label="response"))
@@ -247,7 +247,7 @@ and `2x` means `2*x`.
 ggplot() + geom_function("y = 2x + 2")
 ggplot() + geom_function("y = a x^2 + b x + c", a=2, b=-3, c=1)    # coefficients at the end
 ggplot() + geom_function("x^2 + y^2 = 1")                          # implicit: a round circle
-ggplot() + geom_function("z = sin(x) cos(y)", xlim=(-3, 3), ylim=(-3, 3))   # 3D surface
+ggplot() + geom_function("z = sin(x) cos(y)", xlim=(-3, 3), ylim=(-3, 3))   # 3D surface, coloured by height
 ggplot() + geom_function(r"y = \frac{\sin x}{x}")                  # LaTeX input
 ggplot() + geom_function("r = 1 + cos(theta)") + coord_polar()
 ggplot() + geom_function("y > x^2")                                # shaded region

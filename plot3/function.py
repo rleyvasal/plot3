@@ -664,13 +664,23 @@ def _expand_surface(
             "z": zz.ravel(),
         }
     )
-    vertices, indices, nx, ny = regular_grid_mesh(frame, "x", "y", "z")
+    # No colour of your own: colour by height, so the shape reads in print.
+    by_height = geom.const_color is None
+    if by_height:
+        frame["height"] = frame["z"]
+    vertices, indices, nx, ny = regular_grid_mesh(
+        frame, "x", "y", "z", ccol="height" if by_height else None
+    )
+    colour_col = "colour" if by_height and "colour" in vertices.columns else None
     out = _Geom(
-        aes(x="x", y="y", z="z"),
+        aes(x="x", y="y", z="z", colour=colour_col),
         color=geom.const_color,
         alpha=geom.alpha if geom.alpha is not None else 0.95,
     )
     out.kind = "surface"
+    if colour_col:
+        out._default_ramp = "viridis"
+        out._colour_title = axes.z or "z"
     out.data_override = vertices
     out.const_color = geom.const_color
     out.alpha = geom.alpha if geom.alpha is not None else 0.95

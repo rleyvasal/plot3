@@ -1283,6 +1283,42 @@ def _label_text(value) -> str:
     return str(value)
 
 
+def _arrow_specs(geom, vals, order, spec_l, cat_colours, theme) -> list[dict]:
+    """Arrowheads at the ends of each line group, in scale units.
+
+    The renderers draw them in screen space, so a head keeps its shape
+    whatever the axes' aspect ratio.
+    """
+    style = geom.arrow.spec()
+    xs = np.asarray(vals["x"], dtype=np.float64)[order]
+    ys = np.asarray(vals["y"], dtype=np.float64)[order]
+    codes = None
+    if vals.get("color") and vals["color"][0] == "cat" and cat_colours:
+        codes = np.asarray(vals["color"][1], dtype=np.float64)[order]
+    base = spec_l.get("constColor") or theme["cat"][0]
+    out = []
+    for start, count in spec_l.get("groups") or []:
+        start, count = int(start), int(count)
+        if count < 2:
+            continue
+        colour = base
+        if codes is not None and math.isfinite(codes[start]):
+            colour = cat_colours[int(codes[start]) % len(cat_colours)]
+        ends = []
+        if style["ends"] in {"last", "both"}:
+            ends.append((start + count - 2, start + count - 1))
+        if style["ends"] in {"first", "both"}:
+            ends.append((start + 1, start))
+        for a, b in ends:
+            if all(math.isfinite(v) for v in (xs[a], ys[a], xs[b], ys[b])):
+                out.append({
+                    "x0": float(xs[a]), "y0": float(ys[a]), "x1": float(xs[b]), "y1": float(ys[b]),
+                    "color": colour, "width": float(spec_l.get("linewidth") or 1.0),
+                    **{k: style[k] for k in ("angle", "length", "type")},
+                })
+    return out
+
+
 def _layer_name(geom) -> str:
     """The geom as the user wrote it, for messages: geom_point, geom_line."""
     name = type(geom).__name__
@@ -2232,6 +2268,9 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if color_scale is not None and color_scale[0] == "num":
         allv = np.concatenate(num_color_vals) if num_color_vals else np.array([0.0, 1.0])
         cs = g.cscale or scale_colour_continuous()
+        if g.cscale is None and any(getattr(geom, "_default_ramp", None) for geom, _m in resolved):
+            # A formula surface coloured by height spans its whole range.
+            cs = scale_colour_continuous(limits="full")
         user_scale = getattr(g, "colour_scale", None)
         if user_scale is not None and user_scale.kind == "discrete":
             raise ValueError(
@@ -2314,6 +2353,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
 
     payloads: list[tuple[str, str]] = []
     layer_specs = []
+    arrows: list[dict] = []
     # One palette for the colour/fill groups: a scale_*_manual / brewer /
     # viridis_d scale, else the theme's colours extended past eight groups.
     cat_colours: list[str] = []
@@ -2558,6 +2598,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 spec_l["alpha"] = 0.4 if geom.kind == "area" else 0.45
             if geom.kind == "line":
                 _encode_dashes(spec_l, geom, vals, order, getattr(g, "linetype_scale", None))
+                if getattr(geom, "arrow", None) is not None:
+                    arrows.extend(_arrow_specs(geom, vals, order, spec_l, cat_colours, theme))
             if geom.kind == "area":
                 scy = scales["y"]
                 baseline = getattr(geom, "_baseline", None)
@@ -2767,7 +2809,11 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             else:
                 legend = [{"label": c, "color": cat_colours[i]} for i, c in enumerate(cats)]
         else:
-            pal = (g.cscale.palette if g.cscale else "blue")
+            default_ramp = next(
+                (getattr(geom, "_default_ramp") for geom, _m in resolved if getattr(geom, "_default_ramp", None)),
+                "blue",
+            )
+            pal = (g.cscale.palette if g.cscale else default_ramp)
             ramp = _CONT_PALETTES.get(pal, theme["seq"])
             user_scale = getattr(g, "colour_scale", None)
             if user_scale is not None and user_scale.kind == "continuous":
@@ -2904,7 +2950,12 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                         g.labs.get(
                             "color",
                             getattr(getattr(g, "colour_scale", None), "name", None)
-                            or base_map.get("color") or base_map.get("fill", ""),
+                            or base_map.get("color") or base_map.get("fill")
+                            or next(
+                                (getattr(geom, "_colour_title") for geom, _m in resolved
+                                 if getattr(geom, "_colour_title", None)),
+                                "",
+                            ),
                         ),
                     ),
                     legend_title,
@@ -2921,6 +2972,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         "facetChild": bool(getattr(g, "_facet_child", False)) or None,
         "labsMath": labs_math or None,
         "refs": _ref_specs(ref_layers, scales, theme) or None,
+        "arrows": arrows or None,
         "shapeLegend": shape_legend,
         "linetypeLegend": linetype_legend,
         "math": bool(

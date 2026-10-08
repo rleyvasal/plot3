@@ -1131,6 +1131,7 @@ def _draw_2d(
             labs["y"], tick_size, ink2, "middle", "middle", -90, 400,
         ))
     _draw_refs(spec, commands, window, px)
+    _draw_arrows(spec, commands, px)
     placed: list[tuple[float, float, float, float]] = []
     text_boxes: list[tuple[float, float, float, float]] = []
     for ann in spec.get("ann") or []:
@@ -1352,7 +1353,7 @@ def _draw_3d(
     # Same camera as the viewer. A uniform scale about the projected
     # centre fills the panel and leaves a centred mark where it was.
     layout = _axis_layout(fonts[0])
-    inner = _inset_box(box, layout["pad"])
+    inner = _inset_box(box, layout["pad"], top=8.0)
     project, centre = _fit_projector(_projector(ext, box), ext, inner)
     axis_color = theme.get("axis") or "#2e3a5c"
     ink = theme.get("ink") or "#ffffff"
@@ -1425,7 +1426,12 @@ def _draw_3d(
     # Far triangles first, then the cube, then lines and points.
     triangles.sort(key=lambda item: -item[0])
     for _depth, poly, color, alpha in triangles:
-        commands.append(("polygon", poly, color, None, 0, alpha))
+        # Neighbouring triangles leave antialiased hairlines between them;
+        # a stroke in the fill colour closes them on an opaque surface.
+        if alpha >= 0.9:
+            commands.append(("polygon", poly, color, color, 0.6, alpha))
+        else:
+            commands.append(("polygon", poly, color, None, 0, alpha))
     if str(theme.get("frame") or "box") != "none":
         for a, b in edges:
             pa, pb = corners[a], corners[b]
@@ -1860,7 +1866,9 @@ def _legend_metrics(
         elif row[0] in {"swatch", "bubble", "cont"}:
             text_w = max(text_w, _text_width(row[1], tick) + 18)
         elif row[0] == "ramp":
-            text_w = max(text_w, 110)
+            # A vertical colour bar (ggplot2's colourbar): bar, gap, labels.
+            labels = [_short_number(v) for v in _ramp_ticks(row[2], row[3])]
+            text_w = max(text_w, 10 + 6 + max(_text_width(t, max(9, tick - 1)) for t in labels))
     box_w = text_w + 16
     if max_w is not None:
         box_w = min(box_w, max_w)
@@ -1868,7 +1876,7 @@ def _legend_metrics(
     kept = []
     for row in rows:
         if row[0] == "ramp":
-            step = 28
+            step = _RAMP_HEIGHT + 6
         elif row[0] == "bubble":
             step = max(row_h, 8 + int(round(row[2] * 16)))
         else:
@@ -2016,15 +2024,20 @@ def _paint_legend(commands, origin, metrics, theme, fonts) -> None:
             commands.append(("text", lx + 22, cursor, row[1], tick, ink2, "start", "top", 0, 400))
             cursor += row_h
         elif row[0] == "ramp":
-            # The bar fits the box: a narrow legend must not cut off its end label.
-            bar = max(40.0, min(110.0, float(metrics["w"]) - 16.0))
-            _draw_ramp(commands, lx + 8, cursor + 2, bar, 8, row[1])
-            # Three significant figures, as the viewer shows them.
-            lo = _short_number(row[2])
-            hi = _short_number(row[3])
-            commands.append(("text", lx + 8, cursor + 12, lo, max(9, tick - 1), ink2, "start", "top", 0, 400))
-            commands.append(("text", lx + 8 + bar, cursor + 12, hi, max(9, tick - 1), ink2, "end", "top", 0, 400))
-            cursor += 28
+            # Vertical colour bar: high at the top, as ggplot2 draws it, with
+            # a few labelled values beside it (three significant figures).
+            top, height = cursor + 2, float(_RAMP_HEIGHT)
+            _draw_ramp_vertical(commands, lx + 8, top, 10, height, row[1])
+            lo, hi = float(row[2]), float(row[3])
+            for value in _ramp_ticks(lo, hi):
+                frac = 0.0 if hi == lo else (value - lo) / (hi - lo)
+                ty = top + height * (1.0 - frac)
+                commands.append(("line", lx + 18, ty, lx + 21, ty, ink2, 1, 1.0))
+                commands.append((
+                    "text", lx + 24, ty, _short_number(value), max(9, tick - 1), ink2,
+                    "start", "middle", 0, 400,
+                ))
+            cursor += _RAMP_HEIGHT + 6
         else:
             diameter = max(4.0, row[2] * 16.0)
             commands.append((
@@ -2043,6 +2056,28 @@ def _paint_legend(commands, origin, metrics, theme, fonts) -> None:
         cy = cursor + row * row_h
         _legend_key(commands, cx, cy + 2, cell)
         commands.append(("text", cx + 14, cy, cell[1], tick, ink2, "start", "top", 0, 400))
+
+
+_RAMP_HEIGHT = 84
+
+
+def _ramp_ticks(lo, hi) -> list[float]:
+    """The ends and a nice value or two between them."""
+    lo, hi = float(lo), float(hi)
+    if not (math.isfinite(lo) and math.isfinite(hi)) or hi <= lo:
+        return [lo]
+    from plot3.scales import nice_ticks
+
+    inner = [t for t in nice_ticks(lo, hi, 4) if lo + 0.12 * (hi - lo) < t < hi - 0.12 * (hi - lo)]
+    return [lo] + inner[:3] + [hi]
+
+
+def _draw_ramp_vertical(commands, x, y, w, h, ramp) -> None:
+    stops = ramp or ["#000000", "#ffffff"]
+    steps = max(2, int(h))
+    for i in range(steps):
+        color = _hex(_ramp_at([_rgb(stop) for stop in stops], 1.0 - i / (steps - 1)))
+        commands.append(("rect", x, y + i * h / steps, w, h / steps + 0.5, color, None, 0, 1.0))
 
 
 def _draw_ramp(commands, x, y, w, h, ramp) -> None:
@@ -2072,10 +2107,13 @@ def _axis_layout(size: float) -> dict:
     return {"line": line, "tick_gap": tick_gap, "title_gap": title_gap, "pad": pad}
 
 
-def _inset_box(box, pad: float):
+def _inset_box(box, pad: float, top: float | None = None):
+    """Room for axis labels. The camera never puts labels along the top of
+    the cube, so that side keeps only a small margin and the cube grows."""
     x, y, w, h = box
     pad = min(max(0.0, float(pad)), w * 0.28, h * 0.28)
-    return (x + pad, y + pad, max(4.0, w - 2.0 * pad), max(4.0, h - 2.0 * pad))
+    top = pad if top is None else min(max(0.0, float(top)), pad)
+    return (x + pad, y + top, max(4.0, w - 2.0 * pad), max(4.0, h - pad - top))
 
 
 def _fit_scale(corners, centre, inner) -> float:
@@ -2213,6 +2251,18 @@ def _outside_anchor(nx: float, ny: float) -> tuple[str, str]:
     return "middle", ("top" if ny > 0.0 else "alphabetic")
 
 
+def _label_box(x: float, y: float, text: str, size: float, anchor: str, baseline: str):
+    width = float(_text_width(text, size)) + 2.0
+    height = 1.2 * float(size)
+    left = x - width if anchor == "end" else x - width / 2.0 if anchor == "middle" else x
+    top = y if baseline == "top" else y - height if baseline == "alphabetic" else y - height / 2.0
+    return (left, top, width, height)
+
+
+def _boxes_overlap(a, b) -> bool:
+    return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
+
+
 def _clamp_point(px: float, py: float, bounds) -> tuple[float, float]:
     x, y, w, h = bounds
     return (
@@ -2232,6 +2282,7 @@ def _draw_3d_axes(spec, ext, project, centre, commands, theme, fonts, labs, boun
     scales = spec.get("scales") or {}
     tick_gap = layout["tick_gap"]
     title_gap = layout["title_gap"]
+    placed: list[tuple[float, float, float, float]] = []  # label boxes, all axes
     for axis in ("x", "y", "z"):
         pair = _visible_axis_edge(axis, hull, corners, centre)
         p0 = corners[pair[0]]
@@ -2257,6 +2308,12 @@ def _draw_3d_axes(spec, ext, project, centre, commands, theme, fonts, labs, boun
                 muted, 1, 1.0,
             ))
             tx, ty = _clamp_point(hit[0] + nx * tick_gap, hit[1] + ny * tick_gap, bounds)
+            label_box = _label_box(tx, ty, str(lab), fonts[0], anchor, baseline)
+            # Where two axis edges meet ("3" ending x, "-3" starting y), the
+            # second label would sit on the first: leave it out.
+            if any(_boxes_overlap(label_box, other) for other in placed):
+                continue
+            placed.append(label_box)
             commands.append((
                 "text", tx, ty, str(lab), fonts[0], muted,
                 anchor, baseline, 0, 400,
@@ -2461,6 +2518,42 @@ def _dash_path(points, pattern, width):
                 index += 1
                 left = steps[index % len(steps)]
     return out
+
+
+def _arrow_head(tip, back, angle: float, length: float):
+    """The two barb ends of an arrowhead at ``tip``, pointing away from ``back``."""
+    dx, dy = tip[0] - back[0], tip[1] - back[1]
+    norm = math.hypot(dx, dy)
+    if norm < 1e-9:
+        return None
+    ux, uy = dx / norm, dy / norm
+    a = math.radians(angle)
+    barbs = []
+    for sign in (1.0, -1.0):
+        cos_a, sin_a = math.cos(a), sign * math.sin(a)
+        rx = ux * cos_a - uy * sin_a
+        ry = ux * sin_a + uy * cos_a
+        barbs.append((tip[0] - rx * length, tip[1] - ry * length))
+    return barbs
+
+
+def _draw_arrows(spec, commands, px) -> None:
+    """arrow() heads, drawn in screen space at the ends of their lines."""
+    scales = spec.get("scales") or {}
+    sx, sy = scales.get("x") or {}, scales.get("y") or {}
+    for item in spec.get("arrows") or []:
+        tip = px(_unit(sx, item["x1"]), _unit(sy, item["y1"]))
+        back = px(_unit(sx, item["x0"]), _unit(sy, item["y0"]))
+        barbs = _arrow_head(tip, back, float(item.get("angle", 30.0)), float(item.get("length", 24.0)))
+        if barbs is None:
+            continue
+        color = _hex(item.get("color") or "#000000")
+        width = float(item.get("width") or 1.0)
+        if item.get("type") == "closed":
+            commands.append(("polygon", [barbs[0], tip, barbs[1]], color, color, width, 1.0))
+        else:
+            for barb in barbs:
+                commands.append(("line", tip[0], tip[1], barb[0], barb[1], color, width, 1.0))
 
 
 def _draw_refs(spec, commands, window, px) -> None:

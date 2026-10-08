@@ -337,12 +337,34 @@ class geom_isosurface(_Geom):
         self.wireframe = bool(wireframe)
 
 
+class arrow:
+    """An arrowhead for geom_segment, geom_path, geom_line, annotate("segment").
+
+    ``angle`` in degrees, ``length`` in inches (ggplot2's 0.25), ``ends`` is
+    "last", "first", or "both", and ``type`` is "open" or "closed" (filled).
+    """
+
+    def __init__(self, angle=30.0, length=0.25, ends="last", type="open"):  # noqa: A002
+        if ends not in {"last", "first", "both"}:
+            raise ValueError('arrow(ends=) is "last", "first", or "both"')
+        if type not in {"open", "closed"}:
+            raise ValueError('arrow(type=) is "open" or "closed"')
+        self.angle = float(angle)
+        self.length = float(length)
+        self.ends = ends
+        self.type = type
+
+    def spec(self) -> dict:
+        return {"angle": self.angle, "length": self.length * 96.0, "ends": self.ends, "type": self.type}
+
+
 class geom_path(_Geom):
     kind = "line"
     sort_x = False  # ggplot2 geom_path: connect in data order
 
-    def __init__(self, mapping=None, *, linewidth=None, width=None, linetype=None, **kw):
+    def __init__(self, mapping=None, *, linewidth=None, width=None, linetype=None, arrow=None, **kw):
         super().__init__(mapping, **kw)
+        self.arrow = arrow
         self.linewidth = linewidth if linewidth is not None else (width or 2.0)
         dash_pattern(linetype)
         self.linetype = linetype
@@ -1139,8 +1161,9 @@ class geom_segment(_Geom):
 
     kind = "segment"
 
-    def __init__(self, mapping=None, *, linewidth=1.0, linetype=None, **kw):
+    def __init__(self, mapping=None, *, linewidth=1.0, linetype=None, arrow=None, **kw):
         super().__init__(mapping, **kw)
+        self.arrow = arrow
         self.linewidth = float(linewidth)
         dash_pattern(linetype)
         self.linetype = linetype

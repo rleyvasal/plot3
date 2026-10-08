@@ -4,6 +4,25 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Added
+
+- `arrow(angle, length, ends, type)` for `geom_segment`, `geom_path`,
+  `geom_line`, and `annotate("segment")`, in the viewer and saved files.
+
+### Changed
+
+- 3D surfaces from `geom_function` are coloured by height (viridis) with a
+  colour bar, unless you set a colour.
+- Saved files draw continuous colour bars vertically, with tick labels, as in
+  ggplot2.
+
+### Fixed
+
+- Saved 3D figures: tick labels no longer collide at the cube's corners, the
+  cube uses the space above it, and surfaces show no seams between triangles.
+
 ## 0.3.0 — 2026-10-07
 
 A grammar of graphics complete enough for most journal figures, plus

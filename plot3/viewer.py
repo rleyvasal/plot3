@@ -1858,6 +1858,23 @@ if (!S.is3d) {
       }
       s += '</g>';
     }
+    // arrow() heads, in screen space so they keep their shape when zooming.
+    for (const r of (S.arrows || [])) {
+      const tx = px(r.x1), ty = py(r.y1), bx = px(r.x0), by = py(r.y0);
+      const d = Math.hypot(tx - bx, ty - by);
+      if (!(d > 1e-6)) continue;
+      const ux = (tx - bx) / d, uy = (ty - by) / d, L = (r.length || 24);
+      const pts = [1, -1].map(sg => {
+        const a = (r.angle || 30) * Math.PI / 180, c = Math.cos(a), sn = sg * Math.sin(a);
+        return [tx - (ux * c - uy * sn) * L, ty - (ux * sn + uy * c) * L];
+      });
+      const w = r.width || 1;
+      if (r.type === 'closed') {
+        s += `<polygon points="${pts[0].join(',')} ${tx},${ty} ${pts[1].join(',')}" fill="${r.color}" stroke="${r.color}" stroke-width="${w}"/>`;
+      } else {
+        for (const p of pts) s += `<line x1="${tx}" y1="${ty}" x2="${p[0]}" y2="${p[1]}" stroke="${r.color}" stroke-width="${w}" stroke-linecap="round"/>`;
+      }
+    }
     if (!S.facetChild) {
       // A facet panel leaves the shared axis titles to the figure around it.
       s += `<text x="${M.l+W/2}" y="${M.t+H+M.b-10}" fill="${T.ink2}" text-anchor="middle">${plot3Esc(withFrame(S.labs.x))}</text>`;

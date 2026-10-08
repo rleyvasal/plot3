@@ -702,7 +702,8 @@ def _cube_hull(svg: str) -> list[tuple[float, float]]:
 
 
 def test_3d_box_fills_the_panel_and_labels_sit_outside(tmp_path):
-    fig = ggplot() + geom_function("z = sin(x) cos(y)", n=8) + theme_bw()
+    # One colour, so no colour bar takes width from the cube.
+    fig = ggplot() + geom_function("z = sin(x) cos(y)", n=8, colour="steelblue") + theme_bw()
     path = tmp_path / "surface.svg"
     ggsave(path, fig, width=400, height=400)
     svg = path.read_text(encoding="utf-8")
@@ -728,8 +729,9 @@ def test_3d_export_draws_tick_numbers(tmp_path):
     path = tmp_path / "surface.svg"
     ggsave(path, fig, width=480, height=360)
     svg = path.read_text(encoding="utf-8")
-    # x and y share the outer ticks; z is the short edge.
-    assert svg.count(">-10</text>") >= 2
+    # x and y both carry tick numbers; where their edges meet, the label that
+    # would sit on the other one is left out instead of drawn on top of it.
+    assert ">-10</text>" in svg and ">10</text>" in svg
     assert ">-0.5</text>" in svg
     assert ">0.5</text>" in svg
     assert ">x</text>" in svg
@@ -805,3 +807,29 @@ def test_real_font_metrics_are_used_for_svg_layout():
     # Helvetica is about half as wide as the 5x7 bitmap font.
     assert real < 0.6 * bitmap
     assert 120 <= real <= 145
+
+
+def test_formula_surface_is_coloured_by_height_with_a_colour_bar(tmp_path):
+    from plot3.build import build_spec
+
+    fig = ggplot() + geom_function("t = sin(x) cos(y)", n=8)
+    spec, _ = build_spec(fig)
+    assert spec["color"]["kind"] == "num"
+    assert spec["color"]["ramp"][0] == "#440154"  # viridis
+    assert spec["labs"]["color"] == "t"
+    path = tmp_path / "height.svg"
+    ggsave(str(path), fig, width=480, height=360)
+    svg = path.read_text(encoding="utf-8")
+    assert ">t</text>" in svg  # colour bar title
+    # A colour you choose turns the height colouring off.
+    plain, _ = build_spec(ggplot() + geom_function("z = x y", colour="grey40"))
+    assert plain["color"]["kind"] == "none"
+
+
+def test_3d_surface_triangles_are_stroked_to_close_seams(tmp_path):
+    fig = ggplot() + geom_function("z = x y", n=4, colour="#336699")
+    path = tmp_path / "seams.svg"
+    ggsave(str(path), fig, width=300, height=300)
+    svg = path.read_text(encoding="utf-8")
+    polygons = re.findall(r"<polygon[^>]*>", svg)
+    assert polygons and all('stroke="' in poly for poly in polygons)
