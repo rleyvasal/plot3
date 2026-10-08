@@ -44,6 +44,7 @@ _BT_SENTINELS = frozenset({BT_NAME, TIDY3_BT_NAME})
 _SELECTOR_FUNCS = frozenset(
     {
         "aes",
+        "vars",
         "facet_wrap",
         "facet_grid",
         "transition_time",

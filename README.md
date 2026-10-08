@@ -128,7 +128,7 @@ ggplot(trial, aes(x="dose", y="response")) + geom_point() + geom_smooth()       
 | Labels beside points | `geom_text(position=position_nudge(y=0.3))`, or `nudge_y=` |
 | Shapes and maps | `geom_polygon(aes(group="id", fill="region"))`, concave shapes included |
 | Frequency lines | `geom_freqpoly(aes(colour="arm"), binwidth=0.5)` |
-| Big scatters, 2D distributions | `geom_hex()`, `geom_bin_2d()`, `geom_density_2d()`, `geom_density_2d_filled()`, `stat_ellipse()` (95% by group) |
+| Big scatters, 2D distributions | `geom_hex()`, `geom_bin_2d()`, `geom_count()`, `geom_density_2d()`, `geom_density_2d_filled()`, `stat_ellipse()` (95% by group) |
 | Contours of a grid | `geom_contour(aes(x=, y=, z=))` |
 
 `aes()` reads expressions over your columns, as ggplot2 does:
@@ -189,7 +189,7 @@ and `aes(colour=)` for points and lines.
 |---|---|
 | Position | `scale_x_continuous(name, limits, breaks, labels, trans="log10"/"reverse")`, `scale_x_discrete(limits, labels)`, `scale_x_date(date_breaks, date_labels)`, `scale_x_log10`, `scale_x_reverse`, `xlim`, `ylim`, `lims` (and the `y` versions) |
 | Label formats | `"percent"`, `"comma"`, `"dollar"`, `"scientific"`, `"{:.1f} kg"`, a list, or a function |
-| Discrete colour / fill | `scale_colour_manual`, `scale_colour_brewer(palette="Set2")`, `scale_colour_viridis_d`, `scale_colour_grey`, `scale_colour_okabe_ito` (colour-blind safe), `scale_colour_identity` (the column holds colours) |
+| Discrete colour / fill | `scale_colour_hue` (ggplot2's default colours), `scale_colour_manual`, `scale_colour_brewer(palette="Set2")`, `scale_colour_viridis_d`, `scale_colour_grey`, `scale_colour_okabe_ito` (colour-blind safe), `scale_colour_identity` (the column holds colours) |
 | Continuous colour / fill | `scale_colour_gradient(low, high)`, `scale_colour_gradient2(low, mid, high, midpoint)`, `scale_colour_gradientn(colours, values)`, `scale_colour_distiller(palette="RdBu")`, `scale_colour_viridis_c`, `scale_colour_continuous(trans="log10")` |
 | Size / alpha | `scale_size(range=(4, 23))` (by area across the data's range, as ggplot2), `scale_size_area(max_size=)` (area from zero), `scale_alpha(range=(0.1, 1))` for `aes(alpha=)` |
 | Shape / linetype | `scale_shape_manual`, `scale_linetype_manual` |
@@ -234,7 +234,10 @@ cannot draw warns.
 
 `ggtitle("Response", subtitle=)`, `xlab()`, and `ylab()` are shortcuts for
 `labs()`. `guides(colour="none")` hides one legend (also `fill`, `size`,
-`shape`, `linetype`) and keeps the others.
+`shape`, `linetype`) and keeps the others;
+`guides(colour=guide_legend(title="Arm", reverse=True))` retitles or
+reorders it. The `stat_*` spellings (`stat_smooth`, `stat_bin`,
+`stat_count`, `stat_density`, `stat_function(fun=, args=)`) work too.
 
 Zoom without dropping data with `coord_cartesian`: a smoother or boxplot is
 still computed from every row, while `xlim()` and `scale_x_continuous(limits=)`
@@ -251,6 +254,7 @@ remove the rows outside first.
 ```python
 ggplot(trial, aes(x="dose", y="response")) + geom_point() + facet_wrap("arm")
 ggplot(trial, aes(x="dose", y="response")) + geom_point() + facet_wrap("arm", labeller="label_both")
+ggplot(trial, aes(x="dose", y="response")) + geom_point() + facet_wrap(vars("arm"))
 (ggplot(trial, aes(x="dose", y="response", colour="arm"))
  + geom_point() + facet_grid("sex ~ arm"))                # rows ~ columns
 
@@ -406,10 +410,10 @@ tree) is shortened to twice its width so it does not become a thin column;
 | Points and lines | `geom_point`, `geom_jitter`, `geom_line`, `geom_path`, `geom_step`, `geom_segment`, `geom_text`, `geom_label` |
 | Bars and areas | `geom_col`, `geom_bar`, `geom_histogram`, `geom_freqpoly`, `geom_area`, `geom_ribbon`, `geom_rect`, `geom_tile`/`geom_raster`, `geom_polygon` |
 | Distributions | `geom_boxplot`, `geom_violin`, `geom_density`, `geom_qq`, `geom_qq_line`, `stat_ecdf`, `stat_summary` |
-| 2D distributions | `geom_bin_2d`, `geom_hex`, `geom_density_2d` / `stat_density_2d`, `geom_density_2d_filled`, `geom_contour`, `stat_ellipse` |
+| 2D distributions | `geom_bin_2d`, `geom_hex`, `geom_count`, `geom_density_2d` / `stat_density_2d`, `geom_density_2d_filled`, `geom_contour`, `stat_ellipse` |
 | Uncertainty and fits | `geom_errorbar`, `geom_errorbarh`, `geom_crossbar`, `geom_pointrange`, `geom_linerange`, `geom_smooth(method="loess"/"lm")` |
 | Reference | `geom_hline`, `geom_vline`, `geom_abline`, `geom_rug`, `annotate("text"/"label"/"rect"/"segment"/"point")` |
-| Positions | `position="stack"/"dodge"/"fill"/"identity"/"jitter"`, `position_dodge(width)`, `position_stack()`, `position_fill()`, `position_jitter()`, `position_jitterdodge()`, `position_nudge()` |
+| Positions | `position="stack"/"dodge"/"fill"/"identity"/"jitter"`, `position_dodge(width)`, `position_dodge2(padding)`, `position_stack()`, `position_fill()`, `position_jitter()`, `position_jitterdodge()`, `position_nudge()` |
 | Functions | `geom_function`, `geom_vector_field`, `area`, `tangent`, `derivative` |
 | Scales | see [Scales](#scales) |
 | Coordinates | `coord_cartesian`, `coord_flip`, `coord_equal` / `coord_fixed`, `coord_polar`, `coord_3d` |

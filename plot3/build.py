@@ -534,7 +534,7 @@ _STAT2D_KINDS = frozenset(
     {"jitter", "errorbar", "linerange", "pointrange", "ribbon", "smooth", "summary",
      "tile", "area_stat", "step", "segment", "rect", "qq", "qq_line", "ecdf",
      "crossbar", "errorbarh", "polygon", "bin_2d", "hex", "density_2d",
-     "density_2d_filled", "contour", "ellipse"}
+     "density_2d_filled", "contour", "ellipse", "count"}
 )
 
 
@@ -579,6 +579,13 @@ def expand_stat_geom(
         from plot3.stats3d import box3d_layers
 
         return box3d_layers(geom, mapping, data)
+    if geom.kind == "blank":
+        # geom_blank: an invisible point layer, so its data train the scales.
+        out = copy.copy(geom)
+        out.kind = "point"
+        out._blank = True
+        out.position = "identity"
+        return out
     if geom.kind == "point" and getattr(geom, "position", None) not in (None, "identity"):
         # position_jitter(), position_jitterdodge(), position_nudge().
         if "z" in mapping:
@@ -611,7 +618,7 @@ def expand_stat_geom(
                 "polygon": stat2d.polygon, "bin_2d": stat2d.bin_2d,
                 "hex": stat2d.hex_bins, "density_2d": stat2d.density_2d,
                 "density_2d_filled": stat2d.density_2d, "contour": stat2d.contour,
-                "ellipse": stat2d.ellipse,
+                "ellipse": stat2d.ellipse, "count": stat2d.count_points,
             }[geom.kind]
             return handler(geom, mapping, data)
     if geom.kind == "bar":
@@ -766,7 +773,9 @@ def expand_stat_geom(
                         frame[xcol] = [dodged(a, b) for a, b in zip(frame[xcol], frame[colour_col])]
                         for row in outlier_rows:
                             row[xcol] = dodged(row[xcol], row[colour_col])
-                        box_width = box_width / len(c_levels) * 0.9
+                        # position_dodge2's padding: a gap between boxes.
+                        padding = float(getattr(getattr(geom, "position", None), "padding", 0.1))
+                        box_width = box_width / len(c_levels) * (1.0 - padding)
                         dodge_levels = list(x_axis.levels)
         if frame.empty:
             frame = pd.DataFrame(
@@ -1177,14 +1186,17 @@ def _last_finite(mat: np.ndarray) -> np.ndarray:
     return out
 
 
-def _size_breaks(vmax: float) -> list[float]:
-    """Two to four round legend sizes up to ``vmax``, as ggplot2's breaks."""
+def _size_breaks(vmax: float, integer: bool = False) -> list[float]:
+    """Two to four round legend sizes up to ``vmax``, as ggplot2's breaks;
+    whole numbers only when the data are counts."""
     if not math.isfinite(vmax) or vmax <= 0:
         return []
     exp = math.floor(math.log10(vmax)) - 1
     for shift in range(4):
         for mult in (1.0, 2.0, 2.5, 5.0):
             step = mult * 10.0 ** (exp + shift)
+            if integer and abs(step - round(step)) > 1e-9:
+                continue
             count = int(math.floor(vmax / step + 1e-9))
             if 2 <= count <= 4:
                 return [float(f"{step * k:.12g}") for k in range(1, count + 1)]
@@ -1526,6 +1538,28 @@ def _apply_guides(spec: dict, hidden: dict) -> None:
         spec["shapeLegend"] = None
     if hidden.get("linetype"):
         spec["linetypeLegend"] = None
+
+
+def _apply_guide_options(spec: dict, options: dict) -> None:
+    """guide_legend(title=, reverse=) and guide_colourbar(title=)."""
+    for name, opts in options.items():
+        title, reverse = opts.get("title"), opts.get("reverse")
+        if name == "color":
+            if title is not None:
+                key = "colorBar" if (spec.get("labs") or {}).get("colorBar") is not None else "color"
+                spec["labs"][key] = str(title)
+            if reverse and spec.get("legend"):
+                spec["legend"] = list(reversed(spec["legend"]))
+            continue
+        legend = spec.get({"size": "sizeLegend", "shape": "shapeLegend",
+                           "linetype": "linetypeLegend"}[name])
+        if not legend:
+            continue
+        if title is not None:
+            legend["label"] = str(title)
+        rows = "breaks" if name == "size" else "entries"
+        if reverse and legend.get(rows):
+            legend[rows] = list(reversed(legend[rows]))
 
 
 def _hex_or_none(colour):
@@ -2868,6 +2902,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             ),
         }
 
+        if getattr(geom, "_blank", False):
+            spec_l["blank"] = True  # geom_blank: on the scales, not drawn
         if getattr(geom, "_polygon", False):
             # Any simple shape, concave too: renderers fill it whole rather
             # than as a violin's strip.
@@ -3275,9 +3311,10 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             elif user_scale is not None:
                 legend = user_scale.legend_entries(list(cats), cat_colours)
                 for entry in legend:
-                    entry.pop("_level", None)
+                    # The category a row stands for, whatever the row order.
+                    entry["ci"] = list(cats).index(entry.pop("_level"))
             else:
-                legend = [{"label": c, "color": cat_colours[i]} for i, c in enumerate(cats)]
+                legend = [{"label": c, "color": cat_colours[i], "ci": i} for i, c in enumerate(cats)]
         else:
             default_ramp = next(
                 (getattr(geom, "_default_ramp") for geom, _m in resolved if getattr(geom, "_default_ramp", None)),
@@ -3410,7 +3447,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             lo_s, hi_s = size_scale.limits or (float(ok_s.min()), size_max)
             values = [v for v in nice_ticks(lo_s, hi_s, 4) if lo_s <= v <= hi_s] or [lo_s, hi_s]
         else:
-            values = _size_breaks(size_max)
+            whole = bool(np.all(np.mod(ok_s, 1.0) == 0))
+            values = _size_breaks(size_max, integer=whole) or ([1.0] if whole else [])
         if size_scale is not None and size_scale.name:
             size_label = size_scale.name
         for value in values:
@@ -3510,6 +3548,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         spec["labs"]["colorBar"] = spec["labs"].get("color") or ""
         spec["labs"]["color"] = entries_title
     _apply_guides(spec, getattr(g, "guides", None) or {})
+    _apply_guide_options(spec, getattr(g, "guide_options", None) or {})
     return spec, payloads
 
 

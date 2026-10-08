@@ -403,7 +403,7 @@ if (S.legend) {
   showLegendBox();
   legEl.innerHTML = (S.labs.color ? '<b style="color:'+T.ink+'">' +
       richLabel('color', S.labs.color) + '</b>' : '') +
-    S.legend.map((e, i) => '<div class="lg-e" data-ci="' + i +
+    S.legend.map((e, i) => '<div class="lg-e" data-ci="' + (e.ci != null ? e.ci : i) +
       '">' + keyHTML(e, e.color) +
       legendLabel(e) + '</div>').join('') + barHTML() + szHTML;
   legEl.addEventListener('click', ev => {
@@ -1551,6 +1551,7 @@ if (!S.is3d) {
     return addToScene(...objs);
   };
   for (const L of S.layers) {
+    if (L.blank) continue;  // geom_blank: on the scales only
     paintOrder += 1;
     const n = L.n;
     const cols = layerColors(L, hex2rgb(T.cat[0]));
@@ -1602,8 +1603,11 @@ if (!S.is3d) {
           }
           const g = new THREE.BufferGeometry();
           g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+          // Round dots, as saved files draw them (the circle fills 7/8 of
+          // the sprite, so the sprite is a little larger than the size).
           const pt = new THREE.Points(g, new THREE.PointsMaterial({
-            color: S.color.palette[ci], size: L.size, sizeAttenuation: false,
+            color: S.color.palette[ci], size: L.size / 0.875, sizeAttenuation: false,
+            map: shapeTexture('circle'), alphaTest: 0.3,
             transparent: true, opacity: L.alpha }));
           scene.add(pt);
           regCat(ci, pt);
@@ -1617,7 +1621,8 @@ if (!S.is3d) {
         g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
         g.setAttribute('color', new THREE.BufferAttribute(cols, 3));
         scene.add(new THREE.Points(g, new THREE.PointsMaterial({
-          size: L.size, sizeAttenuation: false, vertexColors: true,
+          size: L.size / 0.875, sizeAttenuation: false, vertexColors: true,
+          map: shapeTexture('circle'), alphaTest: 0.3,
           transparent: true, opacity: L.alpha })));
       }
     } else if (L.kind === 'col') {
@@ -2326,6 +2331,10 @@ if (!S.is3d) {
     const a = opts.opacity != null ? opts.opacity : 1;
     return new THREE.PointsMaterial({
       ...opts,
+      // Round points, as saved files draw them, not WebGL's squares.
+      size: opts.size / 0.875,
+      map: shapeTexture('circle'),
+      alphaTest: 0.3,
       sizeAttenuation: sizeAtten,
       transparent: a < 0.999,
       depthWrite: a >= 0.999,
@@ -2333,6 +2342,7 @@ if (!S.is3d) {
   }
 
   for (const L of S.layers) {
+    if (L.blank) continue;  // geom_blank: on the scales only
     const n = L.n;
     const cols = layerColors(L, hex2rgb(T.cat[0]));
     const isCat = L.color && L.color.kind === 'cat';
@@ -2578,7 +2588,7 @@ if (!S.is3d) {
   tip3.style.color = T.ink;
   const pickLayers = S.layers
     .map((L, li) => ({ L, li }))
-    .filter(({ L }) => L.n > 0 && L.x && L.y && L.z &&
+    .filter(({ L }) => L.n > 0 && !L.blank && L.x && L.y && L.z &&
       (L.kind === 'point' || L.kind === 'surface' || L.tip));
   let hover3Tick = 0;
   function hover3d(e) {

@@ -210,6 +210,8 @@ def positioned_bars(geom: _Geom, mapping: dict, data: Any) -> _Geom:
         width = full if dodge_width is None else axis.step() * dodge_width
         offsets = _dodge_offsets(n_groups, width)
         slot = full / max(n_groups, 1)
+        # position_dodge2(padding=): a gap between neighbouring bars.
+        slot *= 1.0 - float(getattr(getattr(geom, "position", None), "padding", 0.0) or 0.0)
         centres = xs + offsets[groups]
         lefts = centres - slot / 2.0
         rights = centres + slot / 2.0
@@ -1513,6 +1515,26 @@ def ellipse(geom: _Geom, mapping: dict, data: Any):
         out_map["colour"] = colour
     out = _layer("line", out_frame, out_map, geom, _groups=starts,
                  linewidth=float(getattr(geom, "linewidth", 1.0) or 1.0), _ink_default=not colour)
+    _title(out, "x", xcol)
+    _title(out, "y", ycol)
+    return out
+
+
+def count_points(geom: _Geom, mapping: dict, data: Any) -> _Geom:
+    """geom_count: one point per distinct (x, y), sized by how many rows
+    share it (ggplot2's stat_sum, ``n``)."""
+    xcol, ycol = mapping.get("x"), mapping.get("y")
+    if not xcol or not ycol:
+        raise ValueError("geom_count() requires aes(x=, y=)")
+    colour = mapping.get("color")
+    colour = colour if colour and colour not in {xcol, ycol} and has_column(data, colour) else None
+    keys = [xcol, ycol] + ([colour] if colour else [])
+    frame = _frame(data, keys)
+    counted = frame.groupby(keys, sort=False, observed=True).size().reset_index(name="n")
+    out_map = {"x": xcol, "y": ycol, "size": "n", **_colour_mapping(colour)}
+    out = _layer("point", counted, out_map, geom)
+    out.size = None
+    out.shape = getattr(geom, "shape", None)
     _title(out, "x", xcol)
     _title(out, "y", ycol)
     return out

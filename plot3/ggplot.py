@@ -327,6 +327,7 @@ class ggplot:
             g.expand = merged
         elif isinstance(other, guides):
             g.guides = {**(getattr(g, "guides", None) or {}), **other.hidden}
+            g.guide_options = {**(getattr(g, "guide_options", None) or {}), **other.options}
         elif isinstance(other, _Theme):
             g.theme_name = other.name
             g.theme_explicit = True

@@ -1235,7 +1235,7 @@ def _draw_layer_2d(layer, spec, blobs, gz, px, commands) -> None:
     if kind in {"surface", "isosurface"}:
         raise ValueError(f"ggsave() cannot draw a {kind!r} layer on a 2D figure")
     n = int(layer.get("n") or 0)
-    if n <= 0:
+    if n <= 0 or layer.get("blank"):
         return
     colors = _layer_colors(layer, spec, blobs, gz, n)
     alpha = float(layer.get("alpha") if layer.get("alpha") is not None else 1.0)
@@ -1448,7 +1448,7 @@ def _draw_3d(
         if kind in {"col", "box", "area", "poly"}:
             raise ValueError(f"ggsave() cannot draw a {kind!r} layer on a 3D figure")
         n = int(layer.get("n") or 0)
-        if n <= 0:
+        if n <= 0 or layer.get("blank"):
             continue
         colors = _layer_colors(layer, spec, blobs, gz, n)
         alpha = float(layer.get("alpha") if layer.get("alpha") is not None else 1.0)

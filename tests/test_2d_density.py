@@ -111,3 +111,20 @@ def test_saved_hexagons(tmp_path):
     path = tmp_path / "hex.svg"
     ggsave(str(path), ggplot(_cloud(), aes("x", "y")) + geom_hex(bins=10), width=400, height=300)
     assert path.read_text(encoding="utf-8").count("<polygon") > 20
+
+
+def test_geom_count_sizes_points_by_rows_sharing_them():
+    from plot3 import geom_count
+
+    d = pd.DataFrame({"cty": [18, 18, 18, 21, 21, 15], "hwy": [29, 29, 26, 29, 29, 22]})
+    spec, _ = build_spec(ggplot(d, aes("cty", "hwy")) + geom_count())
+    assert spec["layers"][0]["n"] == 4  # (18,29) x2, (18,26), (21,29) x2, (15,22)
+    legend = spec["sizeLegend"]
+    assert legend["label"] == "n" and [b["label"] for b in legend["breaks"]] == ["1", "2"]
+
+
+def test_size_legend_breaks_are_whole_for_counts():
+    from plot3.build import _size_breaks
+
+    assert _size_breaks(7, integer=True) == [2.0, 4.0, 6.0]
+    assert _size_breaks(18.85) == [5.0, 10.0, 15.0]

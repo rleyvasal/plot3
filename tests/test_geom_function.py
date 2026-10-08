@@ -194,13 +194,14 @@ def test_show_builds_once_and_hints_once(monkeypatch, tmp_path):
     fig.show(browser=False, path=tmp_path / "a.html")
     assert calls["n"] == 1
     assert shown[0].startswith('<div class="plot3-fig"><iframe')
-    assert sum("blank" in item for item in shown) == 1
+    hint = "If the panel above is blank"
+    assert sum(hint in item for item in shown) == 1
 
     shown.clear()
     fig.show(browser=False, path=tmp_path / "b.html")
     assert calls["n"] == 2
     assert len(shown) == 1
-    assert "blank" not in shown[0]
+    assert hint not in shown[0]
 
     gg._BLANK_HINT_SHOWN = False
     monkeypatch.setenv("PLOT3_DISPLAY", "iframe")
@@ -209,7 +210,7 @@ def test_show_builds_once_and_hints_once(monkeypatch, tmp_path):
     assert calls["n"] == 3
     assert len(shown) == 1
     assert shown[0].startswith('<div class="plot3-fig"><iframe')
-    assert "blank" not in shown[0]
+    assert hint not in shown[0]
     gg._BLANK_HINT_SHOWN = False
 
 

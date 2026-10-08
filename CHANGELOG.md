@@ -14,9 +14,21 @@ with fewer changes and saves the way ggplot2 draws it.
 - 2D distributions: `geom_bin_2d`, `geom_hex`, `geom_density_2d`
   (`stat_density_2d`), `geom_density_2d_filled`, `geom_contour` for gridded
   `z`, and `stat_ellipse(type="t" / "norm" / "euclid", level=)`.
+- `geom_count`: one point per distinct (x, y), sized by how many rows share
+  it, with a size legend titled `n`.
+- ggplot2 spellings: `stat_smooth`, `stat_bin`, `stat_count`, `stat_density`,
+  and `stat_function(fun=dnorm, args={"mean": 2})`.
+- `geom_blank()`: its data reach the scales, nothing is drawn.
+- `guides(colour=guide_legend(title=, reverse=))`, `guide_colourbar(title=)`,
+  and `guide_none()`.
+- `vars()` for facets: `facet_wrap(vars(cyl))`,
+  `facet_grid(rows=vars(drv), cols=vars(cyl))`. Python's own `vars(obj)`
+  and `vars()` still work after `from plot3 import *`.
+- `position_dodge2(padding=)`: gaps between dodged bars; boxplots use it.
+- `scale_colour_hue()`: ggplot2's default colours (#F8766D, #00BA38,
+  #619CFF for three groups).
 - `plot_layout(height=)`; multi-panel figures in the viewer are as tall as
   their rows of plots (400 px per row, 480 px at least) instead of 560 px.
-
 - `arrow(angle, length, ends, type)` for `geom_segment`, `geom_path`,
   `geom_line`, and `annotate("segment")`, in the viewer and saved files.
 - 3D figures draw their three far walls with grid lines, as matplotlib and
@@ -96,6 +108,12 @@ with fewer changes and saves the way ggplot2 draws it.
 
 ### Fixed
 
+- Plain points in the viewer were drawn as squares (WebGL's default); they
+  are round, as in saved files, in 2D and 3D.
+- Size legends for whole-number data (counts) showed 0.5 and 1.5; their
+  breaks are whole numbers now.
+- In the viewer, clicking a legend row hid the wrong group when the legend
+  was reordered (`scale_colour_manual(breaks=)`, a reversed guide).
 - Saved 3D figures: tick labels no longer collide at the cube's corners, the
   cube uses the space above it, and surfaces show no seams between triangles.
 - 3D tick labels on a short or foreshortened edge are thinned to every

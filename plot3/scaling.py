@@ -458,6 +458,51 @@ def scale_colour_identity(*, name=None, na_value="#7f7f7f"):
     return ColourScale("discrete", name=name, identity=True, na_value=na_value)
 
 
+def hcl_hex(h: float, c: float, l: float) -> str:
+    """R's hcl(): polar CIE-LUV (D65) to sRGB, out-of-gamut values clipped."""
+    import math
+
+    xn, yn, zn = 95.047, 100.0, 108.883
+    un = 4 * xn / (xn + 15 * yn + 3 * zn)
+    vn = 9 * yn / (xn + 15 * yn + 3 * zn)
+    if l <= 0:
+        return "#000000"
+    u = c * math.cos(math.radians(h))
+    v = c * math.sin(math.radians(h))
+    y = yn * (((l + 16) / 116) ** 3 if l > 8 else l / (24389 / 27))
+    up, vp = u / (13 * l) + un, v / (13 * l) + vn
+    x = 9.0 * y * up / (4 * vp)
+    z = -x / 3 - 5 * y + 3 * y / vp
+    x, y, z = x / 100, y / 100, z / 100
+    lin = (3.240479 * x - 1.537150 * y - 0.498535 * z,
+           -0.969256 * x + 1.875992 * y + 0.041556 * z,
+           0.055648 * x - 0.204043 * y + 1.057311 * z)
+
+    def gamma(ch):
+        ch = min(max(ch, 0.0), 1.0)
+        return 12.92 * ch if ch <= 0.0031308 else 1.055 * ch ** (1 / 2.4) - 0.055
+
+    return "#" + "".join(f"{int(round(gamma(ch) * 255)):02x}" for ch in lin)
+
+
+def scale_colour_hue(*, h=(15, 375), c=100, l=65, h_start=0, direction=1,
+                     breaks=None, labels=None, name=None):
+    """ggplot2's default discrete colours: evenly spaced hues at one
+    chroma and lightness (#F8766D, #00BA38, #619CFF for three groups)."""
+    lo, hi = float(h[0]), float(h[1])
+
+    def fn(n):
+        top = hi - 360.0 / n if (hi - lo) % 360 < 1 else hi
+        hues = [lo + (top - lo) * i / max(n - 1, 1) for i in range(n)] if n > 1 else [lo]
+        hues = [(value + h_start) % 360 for value in hues]
+        out = [hcl_hex(value, c, l) for value in hues]
+        return out[::-1] if direction == -1 else out
+
+    return _discrete(name, palette_fn=fn, breaks=breaks, labels=labels)
+
+
+scale_fill_hue = scale_colour_hue
+scale_color_hue = scale_colour_hue
 scale_fill_gradientn = scale_colour_gradientn
 scale_color_gradientn = scale_colour_gradientn
 scale_fill_distiller = scale_colour_distiller
@@ -588,4 +633,5 @@ __all__ = [
     "scale_colour_distiller", "scale_fill_distiller", "scale_color_distiller",
     "scale_colour_identity", "scale_fill_identity", "scale_color_identity",
     "scale_size", "scale_size_area", "scale_alpha", "scale_alpha_continuous",
+    "scale_colour_hue", "scale_fill_hue", "scale_color_hue",
 ]

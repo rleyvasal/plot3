@@ -881,6 +881,20 @@ class position_dodge:
         self.width = None if width is None else float(width)
 
 
+class position_dodge2:
+    """Side by side with a gap between neighbours (``padding``, a share of
+    each one's width), as ggplot2 dodges boxplots and bars."""
+
+    kind = "dodge"
+
+    def __init__(self, width=None, padding=0.1, preserve="total"):
+        self.width = None if width is None else float(width)
+        if not 0.0 <= float(padding) < 1.0:
+            raise ValueError("position_dodge2(padding=) is from 0 to less than 1")
+        self.padding = float(padding)
+        self.preserve = preserve
+
+
 class position_jitter:
     """Random offsets so overplotted points separate: ``geom_point(position=
     position_jitter(width=0.2, height=0))``. ``None`` is 40% of the spacing
@@ -990,6 +1004,25 @@ class geom_polygon(_Geom):
     def __init__(self, mapping=None, *, linewidth=0.5, **kw):
         super().__init__(mapping, **kw)
         self.linewidth = float(linewidth)
+
+
+class geom_blank(_Geom):
+    """Draws nothing, but its data reach the scales: ``geom_blank(aes(y=0))``
+    or a layer of limits from other data, as in ggplot2."""
+
+    kind = "blank"
+
+
+class geom_count(_Geom):
+    """One point per distinct (x, y), its area by how many rows share it:
+    overplotting made visible (ggplot2's geom_count). The size legend is
+    titled ``n``."""
+
+    kind = "count"
+
+    def __init__(self, mapping=None, *, shape=None, **kw):
+        super().__init__(mapping, **kw)
+        self.shape = None if shape is None else shape_name(shape)
 
 
 class geom_bin_2d(_Geom):
@@ -1653,12 +1686,15 @@ class geom_boxplot(_Geom):
         coef=1.5,
         outliers=True,
         outlier_shape=_UNSET,
+        position="dodge2",
         **kw,
     ):
         super().__init__(mapping, **kw)
         self.width = float(width)
         self.outlier_size = float(outlier_size)
         self.coef = float(coef)
+        # Boxes grouped within an x sit side by side (ggplot2's dodge2).
+        self.position = position
         self.outliers = bool(outliers) and outlier_shape is not None
 
 
@@ -1737,6 +1773,11 @@ class facet_wrap:
         scales: str = "fixed",
         labeller=None,
     ):
+        if isinstance(facets, (list, tuple)):
+            # facet_wrap(vars(cyl)): one column, as plot3 wraps by one.
+            if len(facets) != 1:
+                raise ValueError("facet_wrap() wraps by one column: facet_wrap(vars(cyl))")
+            facets = facets[0]
         if not isinstance(facets, str) or not facets.strip():
             raise TypeError("facet_wrap() facets must be a column name string")
         name = facets.strip()
@@ -1775,6 +1816,18 @@ class facet_grid:
 
     def __init__(self, facets: str | None = None, *, rows=None, cols=None, scales: str = "fixed",
                  labeller=None):
+        if isinstance(facets, (list, tuple)):
+            # facet_grid(vars(drv)) puts vars() in rows, as ggplot2 does.
+            rows, facets = (facets if rows is None else rows), None
+
+        def one(value, side):
+            if isinstance(value, (list, tuple)):
+                if len(value) != 1:
+                    raise ValueError(f"facet_grid({side}=vars(...)) takes one column")
+                return value[0]
+            return value
+
+        rows, cols = one(rows, "rows"), one(cols, "cols")
         if facets is not None:
             if not isinstance(facets, str) or "~" not in facets:
                 raise ValueError('facet_grid() takes "rows ~ cols", or rows= and cols=')
@@ -1791,6 +1844,31 @@ class facet_grid:
         self.cols = cols
         self.scales = scales
         self.labeller = _check_labeller(labeller)
+
+
+class _Vars(list):
+    """Facet columns from vars()."""
+
+
+def vars(*names):
+    """Facet columns, as ggplot2 writes them: ``facet_wrap(vars(cyl))``,
+    ``facet_grid(rows=vars(drv), cols=vars(cyl))``.
+
+    ``from plot3 import *`` brings this ``vars`` in place of Python's, so
+    Python's uses still work: ``vars(obj)`` returns its attributes and
+    ``vars()`` the caller's local names.
+    """
+    import builtins
+    import sys
+
+    if not names:
+        return sys._getframe(1).f_locals
+    if (
+        len(names) == 1 and not isinstance(names[0], str)
+        and _as_column_name(names[0]) is names[0] and hasattr(names[0], "__dict__")
+    ):
+        return builtins.vars(names[0])
+    return _Vars(_as_column_name(n) for n in names)
 
 
 def label_value(variable, value) -> str:
@@ -1894,27 +1972,56 @@ _GUIDE_KEYS = {"colour": "color", "color": "color", "fill": "color",
                "size": "size", "shape": "shape", "linetype": "linetype"}
 
 
-class guides:
-    """Hide a legend: ``guides(colour="none")``, ``guides(size="none")``.
+class guide_legend:
+    """A legend of keys, with your ``title`` and order (``reverse=True``)."""
 
-    ``fill`` and ``colour`` share one legend in plot3, so either hides it.
+    def __init__(self, title=None, reverse=False):
+        self.title = title
+        self.reverse = bool(reverse)
+
+
+class guide_colourbar(guide_legend):
+    """A colour bar, with your ``title``."""
+
+
+guide_colorbar = guide_colourbar
+
+
+class guide_none:
+    """No legend for this aesthetic."""
+
+
+class guides:
+    """Hide or adjust a legend: ``guides(colour="none")``,
+    ``guides(colour=guide_legend(title="Arm", reverse=True))``.
+
+    ``fill`` and ``colour`` share one legend in plot3, so either names it.
     ``"legend"`` and ``"colourbar"`` keep the default legend.
     """
 
     def __init__(self, **kwargs):
         self.hidden: dict[str, bool] = {}
+        self.options: dict[str, dict] = {}
         for key, value in kwargs.items():
             name = _GUIDE_KEYS.get(key)
             if name is None:
                 raise ValueError(
                     f"guides() takes colour, fill, size, shape, or linetype, not {key!r}"
                 )
-            if value is False or value is None or value == "none":
+            if value is False or value is None or isinstance(value, guide_none) or (
+                isinstance(value, str) and value == "none"
+            ):
                 self.hidden[name] = True
+            elif isinstance(value, guide_legend):
+                self.hidden[name] = False
+                self.options[name] = {"title": value.title, "reverse": value.reverse}
             elif value in {"legend", "colourbar", "colorbar", True}:
                 self.hidden[name] = False
             else:
-                raise ValueError(f'guides({key}=) is "none", "legend", or "colourbar"')
+                raise ValueError(
+                    f'guides({key}=) is "none", "legend", "colourbar", guide_legend(), '
+                    "or guide_colourbar()"
+                )
 
 
 class scale_colour_continuous:
@@ -2424,3 +2531,28 @@ def _check_legend_position(value):
         "legend_position must be 'right', 'bottom', 'none', or a pair (x, y)"
     )
 
+
+# ggplot2's stat_* spellings of the same layers.
+stat_smooth = geom_smooth
+stat_bin = geom_histogram
+stat_count = geom_bar
+stat_density = geom_density
+
+
+def stat_function(mapping=None, *, fun=None, args=None, **kwargs):
+    """ggplot2's ``stat_function(fun=dnorm, args={"mean": 2})``: a curve of
+    ``fun(x, **args)``. ``fun`` may also be a formula string."""
+    if fun is None:
+        raise ValueError('stat_function() needs fun=, for example fun=dnorm or fun="sin(x)"')
+    if args and callable(fun):
+        bound = dict(args)
+        name = getattr(fun, "__name__", "f")
+
+        def curve(x, _f=fun, _a=bound):
+            return _f(x, **_a)
+
+        curve.__name__ = name
+        return geom_function(curve, mapping, **kwargs)
+    if args:
+        return geom_function(fun, mapping, **dict(args), **kwargs)
+    return geom_function(fun, mapping, **kwargs)
