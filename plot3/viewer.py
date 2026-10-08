@@ -50,7 +50,7 @@ body{display:flex;flex-direction:column}
   margin-right:6px;vertical-align:-1px}
 #legend .lg-e{cursor:pointer;user-select:none}
 #legend .sz{display:flex;align-items:center;gap:8px;line-height:1.2;margin:3px 0}
-#legend .sz-block{margin-top:6px}
+#legend .sz-block{clear:both;padding-top:6px}
 #legend .bub{display:inline-block;border-radius:50%;box-sizing:border-box;flex:none;
   border:1px solid rgba(0,0,0,.35)}
 #player{display:none;flex:none;align-items:center;flex-wrap:wrap;gap:8px;padding:4px 10px 8px;max-width:100%;box-sizing:border-box}
@@ -572,7 +572,11 @@ tip.style.border = '1px solid ' + T.axis;
 tip.style.color = T.ink;
 
 // preserveDrawingBuffer keeps the frame readable for the Save menu.
+// The spec's colours are exact sRGB values. Without this, three.js reads
+// vertex colours as linear and brightens them on output (a washed viridis).
+THREE.ColorManagement.enabled = false;
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setClearColor(0x000000, 0);
 host.appendChild(renderer.domElement);
@@ -2211,13 +2215,18 @@ if (!S.is3d) {
   // proportional cube: preserve data aspect, or equal axes
   const spans = axesList.map(a => spanOf(a));
   const maxSpan = Math.max(...spans, 1e-12);
-  const ext = (coord.aspect === 'equal')
+  // aspect "auto" sends its box sides (a tall cloud is shortened).
+  const ext = (coord.ext && coord.ext.length === 3)
+    ? coord.ext.map(Number)
+    : (coord.aspect === 'equal')
     ? axesList.map(() => 1)
     : axesList.map((a, i) => spans[i] / maxSpan);
   const sizeAtten = coord.sizeMode !== 'screen';
   // Soft lighting for surface meshes (added once).
-  scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-  const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
+  // Physical light units divide by pi; colours are exact sRGB, so a face
+  // toward the light shows its own colour and a face away about 80% of it.
+  scene.add(new THREE.AmbientLight(0xffffff, 0.8 * Math.PI));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.3 * Math.PI);
   dirLight.position.set(1.2, 0.8, 1.5);
   scene.add(dirLight);
 
@@ -2316,14 +2325,63 @@ if (!S.is3d) {
     }
   }
 
-  // axes box + static ticks (Python-computed) + labels as sprites
+  // Axes box as matplotlib and plotly draw it: the three far walls with
+  // grid lines, refreshed as the camera orbits. The edges at the near
+  // corner are hidden so they never cross the data.
   const boxMat = new THREE.LineBasicMaterial({ color: T.axis });
-  const bg = new THREE.BufferGeometry().setFromPoints([
-    [0,0,0],[1,0,0],[1,0,0],[1,1,0],[1,1,0],[0,1,0],[0,1,0],[0,0,0],
-    [0,0,1],[1,0,1],[1,0,1],[1,1,1],[1,1,1],[0,1,1],[0,1,1],[0,0,1],
-    [0,0,0],[0,0,1],[1,0,0],[1,0,1],[1,1,0],[1,1,1],[0,1,0],[0,1,1],
-  ].map(p => new THREE.Vector3(p[0]*ext[0], p[1]*ext[1], p[2]*ext[2])));
-  scene.add(new THREE.LineSegments(bg, boxMat));
+  const gridMat = new THREE.LineBasicMaterial({ color: T.grid });
+  const cornerAt = (i) => new THREE.Vector3(
+    (i & 1) * ext[0], ((i >> 1) & 1) * ext[1], ((i >> 2) & 1) * ext[2]);
+  const boxEdges = [[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],
+                    [0,4],[1,5],[2,6],[3,7]].map(([a, b]) => {
+    const o = new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints([cornerAt(a), cornerAt(b)]), boxMat);
+    scene.add(o);
+    return { a, b, axis: Math.round(Math.log2(a ^ b)), o };
+  });
+  function axisTicks(ax) {
+    const sc = S.scales[ax];
+    return sc.kind === 'cat'
+      ? sc.cats.map((c, i) => [i, c])
+      : (sc.ticks || (sc.ladder ? sc.ladder[0] : []));
+  }
+  const showGrid = !(S.themeOpts && S.themeOpts.panelGrid === false) &&
+    String(T.grid).toLowerCase() !== String(T.surface).toLowerCase();
+  const walls = [0, 1, 2].map(wall => [0, 1].map(side => {
+    const pts = [];
+    if (showGrid) {
+      for (let k = 0; k < 3; k++) {
+        if (k === wall) continue;
+        const other = 3 - wall - k;
+        for (const [t] of axisTicks(axesList[k])) {
+          const u = (t - dataLo(axesList[k])) / spanOf(axesList[k]);
+          if (!(u > 0.001 && u < 0.999)) continue;
+          const a = [0, 0, 0];
+          a[wall] = side * ext[wall];
+          a[k] = u * ext[k];
+          const b = a.slice();
+          b[other] = ext[other];
+          pts.push(new THREE.Vector3(a[0], a[1], a[2]), new THREE.Vector3(b[0], b[1], b[2]));
+        }
+      }
+    }
+    const o = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), gridMat);
+    scene.add(o);
+    return o;
+  }));
+  function updateBox() {
+    // A wall is a far wall when the camera is on the box side of its plane.
+    const back = [0, 1, 2].map(k => cam.position.getComponent(k) > ext[k] / 2 ? 0 : 1);
+    walls.forEach((pair, k) => pair.forEach((o, side) => { o.visible = side === back[k]; }));
+    for (const e of boxEdges) {
+      let far = false;
+      for (let k = 0; k < 3; k++) {
+        if (k !== e.axis && ((e.a >> k) & 1) === back[k]) far = true;
+      }
+      e.o.visible = far;
+    }
+  }
+  const tickSprites = [[], [], []];
 
   function sprite(text, small) {
     const c = document.createElement('canvas');
@@ -2338,7 +2396,7 @@ if (!S.is3d) {
     ctx2.textBaseline = 'middle';
     ctx2.fillText(text, 4, c.height / 2);
     const tex = new THREE.CanvasTexture(c);
-    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.colorSpace = THREE.NoColorSpace;
     const sp = new THREE.Sprite(new THREE.SpriteMaterial({
       map: tex, depthTest: false, transparent: true }));
     const k = small ? 0.0016 : 0.0019;
@@ -2362,6 +2420,7 @@ if (!S.is3d) {
       const sp = sprite(String(lab), true);
       sp.position.set(p[0], p[1], p[2]);
       scene.add(sp);
+      tickSprites[ai].push({ sp, t: +t });
     }
     const lp = [[0.5*ext[0], -2.6*off*ext[1], 0],
                 [-2.6*off*ext[0], 0.5*ext[1], 0],
@@ -2393,7 +2452,7 @@ if (!S.is3d) {
   const rad = Math.max(
     Math.sqrt(ext[0]*ext[0] + ext[1]*ext[1] + ext[2]*ext[2]) / 2, 1e-3);
   // pcviz: position at ~1.4R from centre on a diagonal; far = 20R
-  const dist = rad * 1.55 / Math.tan((cam.fov * Math.PI / 180) / 2);
+  const dist = rad * 1.25 / Math.tan((cam.fov * Math.PI / 180) / 2);
   const dir = new THREE.Vector3(0.55, -0.85, 0.5).normalize();
   cam.position.copy(ctr.clone().add(dir.multiplyScalar(dist)));
   cam.near = Math.max(rad / 200, 1e-4);
@@ -2559,18 +2618,67 @@ if (!S.is3d) {
     cam.updateProjectionMatrix();
     for (const lm of lineMats) lm.resolution.set(w, h);
   }
+  // Tick labels on a foreshortened edge crowd together: keep every k-th,
+  // the smallest k whose labels do not touch, on round values when the
+  // ticks allow, and drop any that land on another axis's labels.
+  const tickTmp = new THREE.Vector3();
+  function tickRect(sp, w, h) {
+    tickTmp.copy(sp.position).project(cam);
+    const sx = (tickTmp.x * 0.5 + 0.5) * w, sy = (-tickTmp.y * 0.5 + 0.5) * h;
+    tickTmp.copy(sp.position).applyMatrix4(cam.matrixWorldInverse);
+    const depth = Math.max(-tickTmp.z, 1e-6);
+    const perUnit = h / (2 * Math.tan(cam.fov * Math.PI / 360) * depth);
+    const pw = sp.scale.x * perUnit * 0.8, ph = sp.scale.y * perUnit * 0.75;
+    return [sx - pw / 2, sy - ph / 2, pw, ph];
+  }
+  const touches = (a, b, air) => a[0] - air < b[0] + b[2] && b[0] - air < a[0] + a[2] &&
+    a[1] - air < b[1] + b[3] && b[1] - air < a[1] + a[3];
+  function declutterTicks() {
+    const w = Math.max(figEl.clientWidth, 1), h = Math.max(figEl.clientHeight, 1);
+    const placed = [];
+    for (const marks of tickSprites) {
+      if (!marks.length) continue;
+      const rects = marks.map(m => tickRect(m.sp, w, h));
+      const air = Math.max(3, 0.5 * (rects[0] ? rects[0][3] : 0));
+      let keep = null;
+      for (let k = 1; k <= marks.length && !keep; k++) {
+        const offsets = [];
+        const step = marks.length > 1 ? Math.abs(marks[1].t - marks[0].t) * k : 0;
+        for (let o = 0; o < k; o++) {
+          const r = step > 0 ? Math.abs(marks[o].t / step - Math.round(marks[o].t / step)) : 1;
+          if (r < 1e-6) offsets.unshift(o); else offsets.push(o);
+        }
+        for (const o of offsets) {
+          let ok = true;
+          for (let i = o; i + k < marks.length; i += k) {
+            if (touches(rects[i], rects[i + k], air)) { ok = false; break; }
+          }
+          if (ok) { keep = [o, k]; break; }
+        }
+      }
+      if (!keep) keep = [0, marks.length];
+      marks.forEach((m, i) => {
+        let on = i >= keep[0] && (i - keep[0]) % keep[1] === 0;
+        if (on && placed.some(r => touches(rects[i], r, 0))) on = false;
+        if (on) placed.push(rects[i]);
+        m.sp.visible = on;
+      });
+    }
+  }
+  function frame3d() {
+    controls.update();
+    updateBox();
+    declutterTicks();
+    renderer.render(scene, cam);
+  }
   installPlayer(() => {});
   new ResizeObserver(layout).observe(figEl);
   layout();
   (function loop() {
-    controls.update();
-    renderer.render(scene, cam);
+    frame3d();
     requestAnimationFrame(loop);
   })();
-  renderNow = () => {
-    controls.update();
-    renderer.render(scene, cam);
-  };
+  renderNow = frame3d;
 }
 
 // Save menu. PNG is the picture on screen. SVG keeps the axis overlay as

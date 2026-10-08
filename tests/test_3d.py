@@ -130,23 +130,20 @@ def test_3d_html_builds():
     assert len(html) > 500
 
 
-def test_point3d_default_size_is_fine_and_density_aware():
-    """Defaults track pcviz-relative scale (small unit-cube size), denser → smaller."""
+def test_point3d_default_size_is_visible_and_density_aware():
+    """A few hundred points are ~5 px marks; a million are a fine grain."""
     from plot3.build import _default_3d_point_size
 
     sparse = _default_3d_point_size(200)
     mid = _default_3d_point_size(5_000)
     dense = _default_3d_point_size(80_000)
-    assert 0.00035 <= dense < mid < sparse <= 0.0035
-    # Old hard default 0.01 was ~10× too large for unit-cube lidar.
-    assert sparse < 0.01
+    assert 0.008 <= dense < mid < sparse <= 0.035
+    assert _default_3d_point_size(5_000_000) == 0.008
 
     df = _cloud(2_000)
     fig = ggplot(df, aes(x="x", y="y", z="z")) + geom_point3d()
     spec, _ = build_spec(fig)
-    assert abs(spec["layers"][0]["size"] - mid) < 1e-9 or (
-        0.00035 <= spec["layers"][0]["size"] <= 0.0035
-    )
+    assert spec["layers"][0]["size"] == _default_3d_point_size(2_000)
     assert spec["layers"][0]["alpha"] == 1.0
 
     # Explicit size still wins

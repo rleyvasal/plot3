@@ -182,8 +182,9 @@ class coord_3d:
     Parameters
     ----------
     aspect:
-        ``"data"`` preserves relative axis spans (default). ``"equal"`` forces
-        a unit cube (equal scale on x/y/z).
+        ``"auto"`` (default) keeps relative axis spans, except that a tall z
+        is shortened to twice the wider horizontal side. ``"data"`` keeps
+        true proportions always (lidar). ``"equal"`` forces a unit cube.
     size_mode:
         ``"scene"`` — point size attenuates with distance (lidar).
         ``"screen"`` — constant pixel size.
@@ -195,12 +196,12 @@ class coord_3d:
     def __init__(
         self,
         *,
-        aspect: str = "data",
+        aspect: str = "auto",
         size_mode: str = "scene",
         max_points: int | None = None,
     ):
-        if aspect not in {"data", "equal"}:
-            raise ValueError("aspect must be 'data' or 'equal'")
+        if aspect not in {"auto", "data", "equal"}:
+            raise ValueError("aspect must be 'auto', 'data', or 'equal'")
         if size_mode not in {"scene", "screen"}:
             raise ValueError("size_mode must be 'scene' or 'screen'")
         if max_points is not None and int(max_points) < 1:

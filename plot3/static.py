@@ -1348,17 +1348,21 @@ def _draw_3d(
         scale = scales.get(axis) or {}
         spans.append((float(scale.get("hi", 1.0)) - float(scale.get("lo", 0.0))) or 1.0)
     max_span = max(spans + [1e-12])
-    aspect = (spec.get("coord") or {}).get("aspect") or "data"
+    coord = spec.get("coord") or {}
+    aspect = coord.get("aspect") or "data"
     ext = [1.0, 1.0, 1.0] if aspect == "equal" else [s / max_span for s in spans]
+    if coord.get("ext") and len(coord["ext"]) == 3:
+        ext = [float(v) for v in coord["ext"]]
     # Same camera as the viewer. A uniform scale about the projected
     # centre fills the panel and leaves a centred mark where it was.
     layout = _axis_layout(fonts[0])
     inner = _inset_box(box, layout["pad"], top=8.0)
     project, centre = _fit_projector(_projector(ext, box), ext, inner)
-    axis_color = theme.get("axis") or "#2e3a5c"
     ink = theme.get("ink") or "#ffffff"
     gz = bool(spec.get("gz"))
     min_dim = min(box[2], box[3])
+
+    _draw_back_panes(spec, ext, project, commands, theme)
 
     triangles = []
     lines = []
@@ -1385,7 +1389,7 @@ def _draw_3d(
                 layer, blobs, gz, world, colors, alpha, theme, project, triangles, lines,
             )
         elif kind == "point":
-            radii = _point_radii(layer, blobs, gz, n, scene=True, min_dim=min_dim)
+            radii = _point_radii(layer, blobs, gz, n, scene=True, min_dim=min_dim * 0.6)
             mode = (spec.get("coord") or {}).get("sizeMode") or "scene"
             if mode == "screen":
                 radii = np.maximum(
@@ -1413,17 +1417,7 @@ def _draw_3d(
                 if len(projected) >= 2:
                     lines.append((projected, _hex(colors[start]), width, alpha))
 
-    corners = []
-    for iz in (0.0, ext[2]):
-        for iy in (0.0, ext[1]):
-            for ix in (0.0, ext[0]):
-                corners.append(project(np.array([ix, iy, iz], dtype=np.float64)))
-    edges = (
-        (0, 1), (1, 3), (3, 2), (2, 0),
-        (4, 5), (5, 7), (7, 6), (6, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7),
-    )
-    # Far triangles first, then the cube, then lines and points.
+    # Far triangles first, then lines and points.
     triangles.sort(key=lambda item: -item[0])
     for _depth, poly, color, alpha in triangles:
         # Neighbouring triangles leave antialiased hairlines between them;
@@ -1432,12 +1426,6 @@ def _draw_3d(
             commands.append(("polygon", poly, color, color, 0.6, alpha))
         else:
             commands.append(("polygon", poly, color, None, 0, alpha))
-    if str(theme.get("frame") or "box") != "none":
-        for a, b in edges:
-            pa, pb = corners[a], corners[b]
-            if pa is None or pb is None:
-                continue
-            commands.append(("line", pa[0], pa[1], pb[0], pb[1], axis_color, 1, 1.0))
     for projected, color, width, alpha in lines:
         commands.append(("polyline", projected, color, width, alpha))
     points.sort(key=lambda item: -item[0])
@@ -1452,6 +1440,75 @@ def _draw_3d(
             "text", x + 12, y + 6, labs["title"], fonts[1], ink,
             "start", "top", 0, 600,
         ))
+
+
+_CUBE_EDGES = (
+    (0, 1), (1, 3), (3, 2), (2, 0),
+    (4, 5), (5, 7), (7, 6), (6, 4),
+    (0, 4), (1, 5), (2, 6), (3, 7),
+)
+
+
+def _back_sides(corners) -> tuple[int, int, int] | None:
+    """For x, y, z: which side (0 = min, 1 = max) faces away from the eye."""
+    if any(c is None for c in corners):
+        return None
+    sides = []
+    for bit in range(3):
+        near = [c[2] for i, c in enumerate(corners) if not (i >> bit) & 1]
+        far = [c[2] for i, c in enumerate(corners) if (i >> bit) & 1]
+        sides.append(0 if sum(near) > sum(far) else 1)
+    return tuple(sides)
+
+
+def _draw_back_panes(spec, ext, project, commands, theme) -> None:
+    """The three far walls with grid lines, as matplotlib and plotly draw a
+    3D box. The three edges at the near corner are left out, so they never
+    cross the data."""
+    corners = _cube_corners(project, ext)
+    back = _back_sides(corners)
+    if back is None:
+        return
+    surface = theme.get("surface") or "#0b1020"
+    grid = theme.get("grid") or "#1c2742"
+    axis_color = theme.get("axis") or "#2e3a5c"
+    scales = spec.get("scales") or {}
+    opts = spec.get("themeOpts") or {}
+    if opts.get("panelGrid", True) and _rgb(grid) != _rgb(surface):
+        for wall in range(3):
+            fixed = float(back[wall]) * ext[wall]
+            for axis in range(3):
+                if axis == wall:
+                    continue
+                other = 3 - wall - axis
+                scale = scales.get("xyz"[axis]) or {}
+                for value, _lab in _ticks(scale):
+                    try:
+                        u = _unit(scale, value)
+                    except (TypeError, ValueError):
+                        continue
+                    if not 0.001 < u < 0.999:
+                        continue
+                    a = np.zeros(3)
+                    a[wall] = fixed
+                    a[axis] = u * ext[axis]
+                    b = a.copy()
+                    b[other] = ext[other]
+                    pa, pb = project(a), project(b)
+                    if pa is None or pb is None:
+                        continue
+                    commands.append(("line", pa[0], pa[1], pb[0], pb[1], grid, 1, 1.0))
+    if str(theme.get("frame") or "box") == "none":
+        return
+    for a, b in _CUBE_EDGES:
+        bit = (a ^ b).bit_length() - 1
+        on_back = any(
+            ((a >> wall) & 1) == back[wall] for wall in range(3) if wall != bit
+        )
+        if not on_back:
+            continue
+        pa, pb = corners[a], corners[b]
+        commands.append(("line", pa[0], pa[1], pb[0], pb[1], axis_color, 1, 1.0))
 
 
 def _append_surface(layer, blobs, gz, world, colors, alpha, theme, project, triangles, lines) -> None:
@@ -1867,7 +1924,7 @@ def _legend_metrics(
             text_w = max(text_w, _text_width(row[1], tick) + 18)
         elif row[0] == "ramp":
             # A vertical colour bar (ggplot2's colourbar): bar, gap, labels.
-            labels = [_short_number(v) for v in _ramp_ticks(row[2], row[3])]
+            labels = [_ramp_label(v) for v in _ramp_ticks(row[2], row[3])]
             text_w = max(text_w, 10 + 6 + max(_text_width(t, max(9, tick - 1)) for t in labels))
     box_w = text_w + 16
     if max_w is not None:
@@ -1944,6 +2001,16 @@ def _short_number(value) -> str:
     except (TypeError, ValueError):
         return str(value)
     return f"{number:.3g}".replace("-", "−")
+
+
+def _ramp_label(value) -> str:
+    """A colour-bar value written like the axis numbers."""
+    from plot3.scales import fmt_num
+
+    number = float(value)
+    if number != 0 and (abs(number) >= 1e4 or abs(number) < 1e-3):
+        return f"{number:.3g}"
+    return fmt_num(float(f"{number:.4g}"))
 
 
 def _legend_key(commands, x, y, row) -> None:
@@ -2032,9 +2099,11 @@ def _paint_legend(commands, origin, metrics, theme, fonts) -> None:
             for value in _ramp_ticks(lo, hi):
                 frac = 0.0 if hi == lo else (value - lo) / (hi - lo)
                 ty = top + height * (1.0 - frac)
-                commands.append(("line", lx + 18, ty, lx + 21, ty, ink2, 1, 1.0))
+                # ggplot2's colour bar: short white ticks inside the bar.
+                commands.append(("line", lx + 8, ty, lx + 10.5, ty, "#ffffff", 1, 0.9))
+                commands.append(("line", lx + 15.5, ty, lx + 18, ty, "#ffffff", 1, 0.9))
                 commands.append((
-                    "text", lx + 24, ty, _short_number(value), max(9, tick - 1), ink2,
+                    "text", lx + 22, ty, _ramp_label(value), max(9, tick - 1), ink2,
                     "start", "middle", 0, 400,
                 ))
             cursor += _RAMP_HEIGHT + 6
@@ -2062,14 +2131,20 @@ _RAMP_HEIGHT = 84
 
 
 def _ramp_ticks(lo, hi) -> list[float]:
-    """The ends and a nice value or two between them."""
+    """Nice values inside the bar, as ggplot2 labels it; the ends when
+    fewer than two nice values fit."""
     lo, hi = float(lo), float(hi)
     if not (math.isfinite(lo) and math.isfinite(hi)) or hi <= lo:
         return [lo]
     from plot3.scales import nice_ticks
 
-    inner = [t for t in nice_ticks(lo, hi, 4) if lo + 0.12 * (hi - lo) < t < hi - 0.12 * (hi - lo)]
-    return [lo] + inner[:3] + [hi]
+    eps = 1e-9 * (hi - lo)
+    inner = [float(t) for t in nice_ticks(lo, hi, 5) if lo - eps <= t <= hi + eps]
+    if len(inner) > 5:
+        inner = inner[::2]
+    if len(inner) >= 2:
+        return inner
+    return [lo] + inner + [hi]
 
 
 def _draw_ramp_vertical(commands, x, y, w, h, ramp) -> None:
@@ -2271,6 +2346,29 @@ def _clamp_point(px: float, py: float, bounds) -> tuple[float, float]:
     )
 
 
+def _thin_marks(marks, air: float) -> list:
+    """Every k-th tick, the smallest k whose labels do not touch, keeping
+    round values (0, 5, 10 rather than 1, 4, 7) when the ticks allow."""
+    if len(marks) < 3:
+        return marks
+
+    def roomy(box):
+        return (box[0] - air, box[1] - air, box[2] + 2 * air, box[3] + 2 * air)
+
+    for k in range(1, len(marks)):
+        offsets = list(range(k))
+        try:
+            step = abs(float(marks[1][0]) - float(marks[0][0])) * k
+            offsets.sort(key=lambda o: 0 if abs(math.remainder(float(marks[o][0]), step)) < 1e-9 * max(step, 1e-300) else 1)
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+        for offset in offsets:
+            kept = marks[offset::k]
+            if all(not _boxes_overlap(roomy(a[5]), b[5]) for a, b in zip(kept, kept[1:])):
+                return kept
+    return marks[:1]
+
+
 def _draw_3d_axes(spec, ext, project, centre, commands, theme, fonts, labs, bounds, layout) -> None:
     """Tick numbers and axis names just outside the three visible edges."""
     if centre is None:
@@ -2292,6 +2390,7 @@ def _draw_3d_axes(spec, ext, project, centre, commands, theme, fonts, labs, boun
         nx, ny = _outward_normal(p0, p1, centre)
         anchor, baseline = _outside_anchor(nx, ny)
         scale = scales.get(axis) or {}
+        marks = []
         for value, lab in _ticks(scale):
             try:
                 u = _unit(scale, value)
@@ -2302,20 +2401,22 @@ def _draw_3d_axes(spec, ext, project, centre, commands, theme, fonts, labs, boun
             hit = project(_corner_xyz(pair[0], ext) * (1.0 - u) + _corner_xyz(pair[1], ext) * u)
             if hit is None:
                 continue
-            reach = max(3.0, tick_gap - 2.0)
+            tx, ty = _clamp_point(hit[0] + nx * tick_gap, hit[1] + ny * tick_gap, bounds)
+            box = _label_box(tx, ty, str(lab), fonts[0], anchor, baseline)
+            marks.append((value, str(lab), hit, tx, ty, box))
+        reach = max(3.0, tick_gap - 2.0)
+        for value, lab, hit, tx, ty, label_box in _thin_marks(marks, 0.25 * float(fonts[0])):
             commands.append((
                 "line", hit[0], hit[1], hit[0] + nx * reach, hit[1] + ny * reach,
                 muted, 1, 1.0,
             ))
-            tx, ty = _clamp_point(hit[0] + nx * tick_gap, hit[1] + ny * tick_gap, bounds)
-            label_box = _label_box(tx, ty, str(lab), fonts[0], anchor, baseline)
             # Where two axis edges meet ("3" ending x, "-3" starting y), the
             # second label would sit on the first: leave it out.
             if any(_boxes_overlap(label_box, other) for other in placed):
                 continue
             placed.append(label_box)
             commands.append((
-                "text", tx, ty, str(lab), fonts[0], muted,
+                "text", tx, ty, lab, fonts[0], muted,
                 anchor, baseline, 0, 400,
             ))
         text = labs.get(axis) or ""

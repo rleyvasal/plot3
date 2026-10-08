@@ -290,9 +290,13 @@ scrubbing, speed, and video recording.
 
 ## 3D and point clouds
 
-Map `z` on every layer for an orbit view.
+Map `z` on every layer for an orbit view. A point cloud with no colour of
+its own is coloured by height (viridis), as lidar viewers draw it; map
+`colour=` or set `colour="steelblue"` to change that.
 
 ```python notest
+ggplot(lidar, aes(x="x", y="y", z="z")) + geom_point3d()      # coloured by height
+
 (ggplot(cloud, aes(x="x", y="y", z="z", colour="intensity"))
  + geom_point3d(size=0.008)
  + coord_3d(aspect="data", max_points=300_000)
@@ -304,6 +308,11 @@ read_bin("scan.pcd.bin")          # nuScenes-style point clouds; remote=True und
 ```
 
 NumPy arrays use column positions: `ggplot(pts, aes(x=0, y=1, z=2, colour=3))`.
+
+The box keeps the data's proportions, except that a tall cloud (a helix, a
+tree) is shortened to twice its width so it does not become a thin column;
+`coord_3d(aspect="data")` keeps true proportions always, and
+`aspect="equal"` draws a cube.
 
 ## Notebooks, SolveIt, and CRAFT
 

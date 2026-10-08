@@ -278,7 +278,10 @@ def test_facets_tile_panels(tmp_path):
 
 def test_3d_center_point_projects_near_the_middle(tmp_path):
     df = pd.DataFrame({"x": [0.0], "y": [0.0], "z": [0.0]})
-    fig = ggplot(df, aes(x="x", y="y", z="z")) + geom_point(size=0.08) + coord_3d() + theme_dark()
+    fig = (
+        ggplot(df, aes(x="x", y="y", z="z")) + geom_point(size=0.08, colour="#3987e5")
+        + coord_3d() + theme_dark()
+    )
     path = tmp_path / "cloud.png"
     ggsave(path, fig, width=400, height=400)
     rgb = _read_png(path)

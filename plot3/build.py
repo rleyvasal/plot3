@@ -880,12 +880,11 @@ _3D_POINT_KINDS = frozenset({"point", "line", "surface", "isosurface"})
 
 
 def _default_3d_point_size(n: int, *, size_mode: str = "scene") -> float:
-    """pcviz-like fine points on the unit-cube scene.
+    """Point size in unit-cube scene units, smaller as the cloud gets denser.
 
-    pcviz uses ~0.06 m marks on clouds whose radius is tens of meters
-    (size/radius ≈ 0.001). plot3 places points in a unit cube whose
-    bounding-sphere radius is O(1), so the matching world size is ~0.001,
-    scaled gently with density.
+    The default camera shows the cube about 150 px across per scene unit
+    on a 600 px viewer, so 0.035 is a 5 px mark for a few hundred points
+    and 0.008 a fine 1.2 px grain for a million.
     """
     n = max(1, int(n))
     if size_mode == "screen":
@@ -896,9 +895,8 @@ def _default_3d_point_size(n: int, *, size_mode: str = "scene") -> float:
             return 1.5
         return 1.25
     # scene mode: world units after [0,1]×aspect encoding
-    base = 0.0010
-    s = base * (2_000.0 / n) ** (1.0 / 3.0)
-    return float(round(min(0.0035, max(0.00035, s)), 5))
+    s = 0.03 * (1_000.0 / n) ** 0.25
+    return float(round(min(0.035, max(0.008, s)), 5))
 
 
 def _axis_label(g, base_map: dict, resolved, axis: str, is3d: bool) -> str:
@@ -931,7 +929,32 @@ def _axis_label(g, base_map: dict, resolved, axis: str, is3d: bool) -> str:
     return axis
 
 
-def _coord_spec(coord, is3d: bool, resolved) -> dict | None:
+# A tall cloud (a helix, a tree) drawn to scale is a thin column in a wide
+# figure. Without coord_3d(aspect="data"), z is at most this many times the
+# wider horizontal side.
+_TALL_Z = 2.0
+
+
+def _auto_extent(scales) -> list[float] | None:
+    """Box sides for aspect="auto", or None when true proportions fit."""
+    spans = []
+    for axis in ("x", "y", "z"):
+        sc = scales.get(axis)
+        lo, hi = getattr(sc, "lo", 0.0), getattr(sc, "hi", 1.0)
+        try:
+            span = abs(float(hi) - float(lo))
+        except (TypeError, ValueError):
+            span = 1.0
+        spans.append(span if math.isfinite(span) and span > 0 else 1.0)
+    across = max(spans[0], spans[1])
+    if spans[2] <= _TALL_Z * across:
+        return None
+    sides = [spans[0], spans[1], _TALL_Z * across]
+    top = max(sides)
+    return [s / top for s in sides]
+
+
+def _coord_spec(coord, is3d: bool, resolved, scales=None) -> dict | None:
     """Coordinate spec for the viewer.
 
     3D keeps ``coord_3d``. A formula surface with no coord uses equal aspect
@@ -951,11 +974,20 @@ def _coord_spec(coord, is3d: bool, resolved) -> dict | None:
                 "+ coord_polar()"
             )
         if coord is not None:
-            return coord.to_spec()
+            spec = coord.to_spec()
+            if spec["aspect"] == "auto":
+                ext = _auto_extent(scales or {})
+                spec["aspect"] = "data" if ext is None else "auto"
+                if ext is not None:
+                    spec["ext"] = ext
+            return spec
         # A formula's axes are different quantities (t vs x); true proportions
         # can squash the surface to a sliver. Data stays proportional (lidar).
         if any(getattr(geom, "_function_surface", False) for geom, _ in resolved):
             return {"aspect": "equal", "sizeMode": "scene", "maxPoints": None}
+        ext = _auto_extent(scales or {})
+        if ext is not None:
+            return {"aspect": "auto", "ext": ext, "sizeMode": "scene", "maxPoints": None}
         return {"aspect": "data", "sizeMode": "scene", "maxPoints": None}
     if isinstance(coord, coord_3d):
         raise ValueError(
@@ -997,32 +1029,18 @@ def _last_finite(mat: np.ndarray) -> np.ndarray:
     return out
 
 
-def _nice_at_most(x: float) -> float:
-    if not math.isfinite(x) or x <= 0:
-        return 0.0
-    mag = 10 ** math.floor(math.log10(x))
-    for mult in (5, 2, 1):
-        val = mult * mag
-        if val <= x * 1.0000001:
-            return float(val)
-    return float(mag)
-
-
 def _size_breaks(vmax: float) -> list[float]:
-    """A few legend sizes up to ``vmax``, on a 1-2-5 ladder."""
+    """Two to four round legend sizes up to ``vmax``, as ggplot2's breaks."""
     if not math.isfinite(vmax) or vmax <= 0:
         return []
-    breaks: list[float] = []
-    for frac in (0.15, 0.4, 0.7, 1.0):
-        nice = _nice_at_most(vmax * frac)
-        if nice <= 0:
-            continue
-        if breaks and abs(nice - breaks[-1]) <= abs(breaks[-1]) * 1e-9:
-            continue
-        breaks.append(nice)
-    if not breaks or breaks[-1] < vmax * 0.9:
-        breaks.append(float(vmax))
-    return breaks[-4:]
+    exp = math.floor(math.log10(vmax)) - 1
+    for shift in range(4):
+        for mult in (1.0, 2.0, 2.5, 5.0):
+            step = mult * 10.0 ** (exp + shift)
+            count = int(math.floor(vmax / step + 1e-9))
+            if 2 <= count <= 4:
+                return [float(f"{step * k:.12g}") for k in range(1, count + 1)]
+    return [float(vmax)]
 
 
 def _area_fraction(values: np.ndarray, vmax: float) -> np.ndarray:
@@ -1651,6 +1669,18 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         )
     if is3d and getattr(g, "facet", None) is not None:
         raise ValueError("facet_wrap() is not supported with 3D figures yet")
+    # A point cloud with no colour of its own is coloured by height, as
+    # lidar viewers draw it: aes(colour=) or colour="steelblue" turns it off.
+    height_title = None
+    if is3d and not any("color" in m for _g, m in resolved):
+        for geom, m in resolved:
+            if (
+                geom.kind == "point"
+                and getattr(geom, "const_color", None) is None
+                and not getattr(geom, "_replace_mapping", False)
+            ):
+                m["color"] = m["z"]
+                height_title = str(m["z"])
 
     if transition is not None:
         tname = (
@@ -2811,7 +2841,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         else:
             default_ramp = next(
                 (getattr(geom, "_default_ramp") for geom, _m in resolved if getattr(geom, "_default_ramp", None)),
-                "blue",
+                # 3D clouds: viridis keeps its low end visible on any page.
+                "viridis" if is3d else "blue",
             )
             pal = (g.cscale.palette if g.cscale else default_ramp)
             ramp = _CONT_PALETTES.get(pal, theme["seq"])
@@ -2846,7 +2877,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     )
 
     base_map = dict(g.mapping)
-    coord_spec = _coord_spec(coord, is3d, resolved)
+    coord_spec = _coord_spec(coord, is3d, resolved, scales)
     labs_math: dict[str, list] = {}
 
     def _take(key: str, text) -> str:
@@ -2951,6 +2982,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                             "color",
                             getattr(getattr(g, "colour_scale", None), "name", None)
                             or base_map.get("color") or base_map.get("fill")
+                            or height_title
                             or next(
                                 (getattr(geom, "_colour_title") for geom, _m in resolved
                                  if getattr(geom, "_colour_title", None)),
