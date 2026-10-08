@@ -133,3 +133,21 @@ def test_render_without_source_data(cars):
     fig.backend = None
     html = render_payload(payload, log=False)
     assert len(html) > 500
+
+
+def test_text_from_the_data_cannot_break_out_of_the_page():
+    """A title or category with </script> or a tag stays text: the figure's
+    JSON is escaped for <script>, and the viewer escapes tick labels."""
+    import pandas as pd
+
+    from plot3 import aes, geom_col, ggplot, labs
+    from plot3.viewer import _DOC_TEMPLATE
+
+    d = pd.DataFrame({"g": ["<img src=x onerror=alert(1)>", "a & b"], "n": [1.0, 2.0]})
+    doc = (ggplot(d, aes("g", "n")) + geom_col()
+           + labs(title="__PAYLOADS__ </script><script>alert(1)</script>")).html()
+    assert "<img src=x" not in doc
+    assert "</script><script>alert(1)" not in doc
+    assert "\\u003c/script\\u003e" in doc
+    assert "__PAYLOADS__" in doc  # the title's text, not swapped for the data blocks
+    assert "${lab}</text>" not in _DOC_TEMPLATE  # tick labels go through plot3Esc

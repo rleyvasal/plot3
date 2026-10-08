@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "rleyvasal" }]
+authors = [{ name = "Rigoberto Leyva Salmeron" }]
 keywords = ["ggplot", "ggplot2", "grammar of graphics", "visualization", "plotting", "three.js", "dataframe"]
 classifiers = [
   "Development Status :: 4 - Beta",

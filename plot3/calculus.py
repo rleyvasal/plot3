@@ -287,10 +287,8 @@ def _expand_inequality(geom, formula: Formula, domains) -> list:
 def _curve_inequality(geom, formula: Formula, domains) -> list:
     dependent = formula.dependent or "y"
     if dependent == "y":
-        sample_axis = "x"
         (lo, hi), _source = _domain_for(geom, "x", domains)
     else:
-        sample_axis = "y"
         (lo, hi), _source = _domain_for(geom, "y", domains)
     count = _sample_count(geom, grid=False)
     samples = _linspace(lo, hi, count)

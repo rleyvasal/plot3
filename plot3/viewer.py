@@ -1901,16 +1901,16 @@ if (!S.is3d) {
       if (!xText) continue;
       if (X_ANGLE > 0) {
         const ty = M.t + H + 8;
-        s += `<text x="${X}" y="${ty}" fill="${T.muted}" text-anchor="end" dominant-baseline="middle" transform="rotate(${-X_ANGLE} ${X} ${ty})">${lab}</text>`;
+        s += `<text x="${X}" y="${ty}" fill="${T.muted}" text-anchor="end" dominant-baseline="middle" transform="rotate(${-X_ANGLE} ${X} ${ty})">${plot3Esc(lab)}</text>`;
       } else {
-        s += `<text x="${X}" y="${M.t+H+14}" fill="${T.muted}" text-anchor="middle">${lab}</text>`;
+        s += `<text x="${X}" y="${M.t+H+14}" fill="${T.muted}" text-anchor="middle">${plot3Esc(lab)}</text>`;
       }
     }
     for (const [t, lab] of yt) {
       const Y = py(t);
       if (Y < M.t - 1 || Y > M.t + H + 1) continue;
       if (showGrid) grid += `<line x1="${M.l}" y1="${Y}" x2="${M.l+W}" y2="${Y}" stroke="${T.grid}"/>`;
-      if (yText) s += `<text x="${M.l-7}" y="${Y+4}" fill="${T.muted}" text-anchor="end">${lab}</text>`;
+      if (yText) s += `<text x="${M.l-7}" y="${Y+4}" fill="${T.muted}" text-anchor="end">${plot3Esc(lab)}</text>`;
     }
     if (!VOID2) s += `<rect x="${M.l}" y="${M.t}" width="${W}" height="${H}" fill="none" stroke="${T.axis}"/>`;
     // geom_rug: a short tick at the panel edge for every value.
@@ -2146,7 +2146,7 @@ if (!S.is3d) {
   function colorHead(L, i) {
     if (L.color && L.color.kind === 'cat') {
       const codes = L._ci || L.color.data;
-      return '<b>' + S.color.cats[codes[i] % S.color.cats.length] + '</b><br>';
+      return '<b>' + plot3Esc(S.color.cats[codes[i] % S.color.cats.length]) + '</b><br>';
     }
     if (L.color && L.color.kind === 'num') {
       const t = L._cnorm ? L._cnorm[i] : (L.color.data[i] / 65535);
@@ -2638,7 +2638,7 @@ if (!S.is3d) {
     if (L.ids && L.ids[i]) head += '<b>' + plot3Esc(L.ids[i]) + '</b><br>';
     const codes = L._ci || (L.color && L.color.kind === 'cat' ? L.color.data : null);
     if (codes && S.color.cats)
-      head += '<b>' + S.color.cats[codes[i] % S.color.cats.length] + '</b><br>';
+      head += '<b>' + plot3Esc(S.color.cats[codes[i] % S.color.cats.length]) + '</b><br>';
     else if (L.color && L.color.kind === 'num') {
       const t = L._cnorm ? L._cnorm[i] : (L.color.data[i] / 65535);
       head += '<b>' + fmt(cval(t)) + '</b><br>';

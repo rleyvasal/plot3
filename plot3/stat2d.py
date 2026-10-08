@@ -1509,7 +1509,6 @@ def ellipse(geom: _Geom, mapping: dict, data: Any):
         raise ValueError("stat_ellipse() needs at least 3 points per group")
     out_frame = pd.DataFrame(rows, columns=["x", "y"])
     out_map = {"x": "x", "y": "y"}
-    tag = colour or group
     if colour:
         out_frame[colour] = tags
         out_map["colour"] = colour

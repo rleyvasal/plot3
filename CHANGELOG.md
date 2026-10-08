@@ -108,6 +108,11 @@ with fewer changes and saves the way ggplot2 draws it.
 
 ### Fixed
 
+- Security: text from the data or labels could end the viewer page's
+  script (`</script>` in a title or category) and run as HTML, and
+  category names were inserted into the viewer's axes and tooltips as
+  markup. All of it is now escaped, so a plot3 HTML file made from
+  untrusted data shows that text instead of running it.
 - Plain points in the viewer were drawn as squares (WebGL's default); they
   are round, as in saved files, in 2D and 3D.
 - Size legends for whole-number data (counts) showed 0.5 and 1.5; their

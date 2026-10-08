@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from plot3.table import ColumnNotFound, detect_backend, get_columns, has_column
+from plot3.table import ColumnNotFound, detect_backend, has_column
 
 
 def _factor(values):

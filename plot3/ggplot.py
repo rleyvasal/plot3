@@ -457,7 +457,7 @@ class ggplot:
         """
         self._maybe_hide_from_ai()
         try:
-            from plot3.remote import MIME_PLOT3, is_remote_kernel
+            from plot3.remote import is_remote_kernel
 
             if is_remote_kernel():
                 from IPython.display import publish_display_data

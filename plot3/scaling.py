@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import colorsys
 import math
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
@@ -460,7 +460,6 @@ def scale_colour_identity(*, name=None, na_value="#7f7f7f"):
 
 def hcl_hex(h: float, c: float, l: float) -> str:
     """R's hcl(): polar CIE-LUV (D65) to sRGB, out-of-gamut values clipped."""
-    import math
 
     xn, yn, zn = 95.047, 100.0, 108.883
     un = 4 * xn / (xn + 15 * yn + 3 * zn)

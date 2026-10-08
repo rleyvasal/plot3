@@ -26,6 +26,7 @@ grid of independent figure payloads (each panel is a normal figure payload).
 from __future__ import annotations
 
 import json
+import re
 import os
 from pathlib import Path
 from typing import Any
@@ -122,6 +123,16 @@ def build_payload(g) -> dict[str, Any]:
     return payload_from_spec(spec, payloads)
 
 
+def script_json(value) -> str:
+    """JSON safe inside an HTML ``<script>``: ``</script>`` or ``<!--`` in a
+    title or a category cannot end the script, so data never becomes markup."""
+    text = json.dumps(value, separators=(",", ":"))
+    return (
+        text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    )
+
+
 def render_payload(
     payload: dict[str, Any],
     *,
@@ -143,12 +154,14 @@ def render_payload(
         f'<script type="text/plain" id="{pid}">{b64}</script>'
         for pid, b64 in blobs.items()
     )
-    doc = (
-        DOC_TEMPLATE
-        .replace("__SPEC__", json.dumps(spec, separators=(",", ":")))
-        .replace("__PAYLOADS__", blocks)
-        .replace("__KATEX__", _KATEX_BOOT if spec.get("math") else "")
-    )
+    parts = {
+        "SPEC": script_json(spec),
+        "PAYLOADS": blocks,
+        "KATEX": _KATEX_BOOT if spec.get("math") else "",
+    }
+    # One pass: text from the figure (a title that says "__KATEX__") is
+    # never searched again for placeholders.
+    doc = re.sub(r"__(SPEC|PAYLOADS|KATEX)__", lambda m: parts[m.group(1)], DOC_TEMPLATE)
     if log:
         kb = len(doc) // 1024
         # Sizes are opt-in (PLOT3_VERBOSE=1), so a notebook cell is just

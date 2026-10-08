@@ -105,7 +105,7 @@ def test_reference_lines_widen_the_scale_and_carry_dashes():
     assert spec["scales"]["y"]["hi"] == 20.0
     kinds = [(r["kind"], r.get("value"), r["dash"]) for r in spec["refs"]]
     assert kinds[:3] == [("hline", 0.0, [4.0, 4.0]), ("hline", 20.0, [4.0, 4.0]), ("vline", 2.0, None)]
-    assert spec["refs"][2]["color"] == "red"
+    assert spec["refs"][2]["color"] == "#ff0000"
     assert spec["refs"][3]["slope"] == 2.0
 
 

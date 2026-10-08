@@ -10,3 +10,8 @@ build/
 tests/local/output/
 examples/output/
 .plot3_preview/
+
+# Figures rendered while working, not part of the project
+/*.png
+/*.svg
+/*.pdf

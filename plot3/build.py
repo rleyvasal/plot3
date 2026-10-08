@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 
 import numpy as np
@@ -221,7 +220,6 @@ def _freqpoly(geom, mapping: dict, data):
     colour = mapping.get("color")
     colour = colour if colour and colour != xcol and has_column(data, colour) else None
     frame = materialize_columns(data, [xcol] + ([colour] if colour else []))
-    pieces = []
     if colour:
         kind, _codes, _cats = col_values(frame[colour])
         levels = ordered_levels(frame[colour].tolist()) if kind == "cat" else [None]
@@ -503,7 +501,7 @@ def _ref_specs(ref_layers, scales, theme) -> list[dict]:
     out = []
     for ref in ref_layers:
         style = {
-            "color": ref.const_color or theme["ink"],
+            "color": _hex_or_none(ref.const_color) or theme["ink"],
             "width": float(getattr(ref, "linewidth", 1.0) or 1.0),
             "alpha": 1.0 if ref.alpha is None else float(ref.alpha),
             "dash": list(dash_pattern(getattr(ref, "linetype", None)) or []) or None,
@@ -2217,7 +2215,6 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         )
         if not log_on or "frames" in vals:
             return
-        n = len(vals["x"])
         ok = np.isfinite(np.asarray(vals["x"], dtype=np.float64))
         if "y" in vals:
             ok = ok & np.isfinite(np.asarray(vals["y"], dtype=np.float64))
@@ -3592,7 +3589,6 @@ def _level_text(level) -> str:
 
 
 def _subset(data, column, level):
-    from plot3.table import filter_equal
 
     if column is None:
         return data
