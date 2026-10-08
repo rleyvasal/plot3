@@ -166,6 +166,8 @@ class ggplot:
         self.layers: list[_Geom] = []
         self.labs: dict = {}
         self.theme_name = "dark"
+        # False until a theme is added: saved files then use theme_bw.
+        self.theme_explicit = False
         # Font for ggsave. None keeps the size ladder and Helvetica/Arial.
         self.theme_family: str | None = None
         self.theme_base_size: float | None = None
@@ -308,6 +310,7 @@ class ggplot:
             g.labs.update(other)
         elif isinstance(other, _Theme):
             g.theme_name = other.name
+            g.theme_explicit = True
             g.theme_family = other.base_family
             g.theme_base_size = other.base_size
         elif isinstance(other, _ThemePatch):

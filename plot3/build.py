@@ -21,7 +21,7 @@ from plot3.geoms import (
     geom_col,
     scale_colour_continuous,
 )
-from plot3.scales import Scale, col_values, fmt_num, resolution
+from plot3.scales import ordered_levels, Scale, col_values, fmt_num, resolution
 
 from plot3.stats3d import isosurface_levels, regular_grid_mesh
 from plot3.table import (
@@ -120,9 +120,47 @@ def _as_discrete_x(table, xcol: str):
     from plot3.table import as_pandas
 
     out = as_pandas(table).copy()
-    out[xcol] = out[xcol].map(lambda v: "NA" if pd.isna(v) else str(v))
-    levels = list(dict.fromkeys(out[xcol].tolist()))
+    raw = out[xcol]
+    if isinstance(raw.dtype, pd.CategoricalDtype):
+        present = set(raw.dropna().tolist())
+        ordered = [c for c in raw.cat.categories if c in present]
+        ordered += [None] if raw.isna().any() else []
+    else:
+        ordered = ordered_levels(raw.tolist())
+    levels = ["NA" if v is None else str(v) for v in ordered]
+    out[xcol] = raw.map(lambda v: "NA" if pd.isna(v) else str(v))
     out[xcol] = pd.Categorical(out[xcol], categories=levels, ordered=True)
+    return out
+
+
+def _grouped_histogram(geom, data, xcol, group_col, edges, centers, closed):
+    """One histogram per group on shared bins, stacked like ggplot2.
+
+    Returns None for a continuous colour, which is not a grouping.
+    """
+    from plot3 import stat2d
+
+    frame = materialize_columns(data, [xcol, group_col])
+    kind, _codes, _cats = col_values(frame[group_col])
+    if kind != "cat":
+        return None
+    rows = []
+    for level in ordered_levels(frame[group_col].tolist()):
+        values = frame.loc[frame[group_col] == level, xcol].to_numpy(np.float64)
+        values = values[np.isfinite(values)]
+        if closed == "left":
+            counts = _hist_counts_left_closed(values, edges)
+        else:
+            counts, _ = np.histogram(values, bins=edges)
+        for center, count in zip(centers, counts):
+            rows.append({"__x": float(center), "__y": float(count), group_col: level})
+    table = pd.DataFrame(rows)
+    proxy = _Geom(color=geom.const_color, alpha=geom.alpha)
+    proxy.kind = "col"
+    proxy.width = 1.0  # bars touch, as in a histogram
+    proxy.position = getattr(geom, "position", "stack")
+    out = stat2d.positioned_bars(proxy, {"x": "__x", "y": "__y", "color": group_col}, table)
+    out._axis_labels = {"x": xcol, "y": "count"}
     return out
 
 
@@ -483,6 +521,7 @@ def expand_stat_geom(
         out.data_override = counts
         out.const_color = geom.const_color
         out.alpha = geom.alpha
+        out._axis_labels = {"y": "count"}
         return out
     if geom.kind == "histogram":
         if "x" not in mapping:
@@ -524,6 +563,13 @@ def expand_stat_geom(
                 float(np.median(np.diff(edges))) if len(edges) > 1 else 1.0
             )
             edge_lo, edge_hi = float(edges[0]), float(edges[-1])
+            group_col = mapping.get("color")
+            if group_col and group_col != xcol and has_column(data, group_col):
+                grouped = _grouped_histogram(
+                    geom, data, xcol, group_col, edges, centers, closed
+                )
+                if grouped is not None:
+                    return grouped
             frame = pd.DataFrame(
                 {"x": centers, "y": counts.astype(np.float64)}
             )
@@ -540,6 +586,7 @@ def expand_stat_geom(
         out.const_color = geom.const_color
         out.alpha = geom.alpha
         out._bar_width_data = abs_width  # absolute data units (= binwidth)
+        out._axis_labels = {"x": xcol, "y": "count"}
         # Expand continuous domain to full bin edges (not just centres).
         out._x_domain = (edge_lo, edge_hi)
         return out
@@ -656,6 +703,7 @@ def expand_stat_geom(
         out.const_color = geom.const_color
         out.alpha = geom.alpha if geom.alpha is not None else (0.35 if fill else 0.95)
         out._baseline_zero = True
+        out._axis_labels = {"x": xcol, "y": "density"}
         return out
     if geom.kind == "violin":
         if "x" not in mapping or "y" not in mapping:
@@ -857,7 +905,7 @@ def _axis_label(g, base_map: dict, resolved, axis: str, is3d: bool) -> str:
     # A layer's own aes(y="v") names the axis before a computed layer's
     # suggestion (a ribbon's ymin, a smoother's y).
     for geom, mapping in resolved:
-        if getattr(geom, "_replace_mapping", False):
+        if getattr(geom, "_replace_mapping", False) or getattr(geom, "_axis_labels", None):
             continue
         own = (getattr(geom, "mapping", None) or {}).get(axis)
         if own and own == mapping.get(axis):
@@ -1171,6 +1219,12 @@ def _forced_levels(g, ccats) -> list:
     if not forced:
         return list(ccats)
     return list(dict.fromkeys([str(level) for level in forced] + list(ccats)))
+
+
+def _layer_name(geom) -> str:
+    """The geom as the user wrote it, for messages: geom_point, geom_line."""
+    name = type(geom).__name__
+    return name if name.startswith(("geom_", "stat_")) else f"geom_{geom.kind}"
 
 
 def _theme_opts(g) -> dict | None:
@@ -1545,6 +1599,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     color_scale = None  # ("num", lo, hi) | ("cat", cats)
     num_color_vals: list[np.ndarray] = []
     dropped_log = 0
+    missing_notes: list[str] = []
     size_label = str(g.labs.get("size") or "")
     transition_meta: dict | None = None
     if transition is not None and getattr(transition, "ranges", None):
@@ -1831,6 +1886,15 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         if transition is not None and getattr(transition, "column", None):
             cols.append(transition.column)
         sub = materialize_columns(frame, list(dict.fromkeys(cols)))
+        if getattr(geom, "data_override", None) is None and frame is not None:
+            # ggplot2 says when rows are dropped; plot3 used to do it silently.
+            removed = n_rows(frame) - len(sub)
+            if removed > 0:
+                word = "row" if removed == 1 else "rows"
+                missing_notes.append(
+                    f"Removed {removed} {word} containing missing values "
+                    f"({_layer_name(geom)})"
+                )
 
         if (
             transition is not None
@@ -2608,7 +2672,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         for entry in legend:
             entry.pop("formula", None)
             entry.pop("_geom", None)
-    notes: list[str] = []
+    notes: list[str] = list(dict.fromkeys(missing_notes))
     for geom, _mapped in resolved:
         for note in getattr(geom, "_notes", None) or ():
             text = str(note)
@@ -2733,6 +2797,18 @@ def _subset(data, column, level):
     return filter_equal(data, column, None if _level_text(level) == "NA" else level)
 
 
+def _facet_levels(data, column) -> list:
+    """Panel order: a categorical column's own order, else ggplot2's sort."""
+    from plot3.table import detect_backend
+
+    levels = unique_levels(data, column)
+
+    keep = False
+    if detect_backend(data) == "pandas":
+        keep = isinstance(data[column].dtype, pd.CategoricalDtype)
+    return ordered_levels(levels, keep_order=keep)
+
+
 def _facet_colour_levels(g: ggplot) -> list[str] | None:
     """Categorical colour/fill levels of the whole dataset, in scale order."""
     candidates = [g.mapping.get("color"), g.mapping.get("fill")]
@@ -2797,7 +2873,7 @@ def facet_cells(g: ggplot) -> dict:
         column = facet.variable
         if not has_column(g.data, column):
             raise KeyError(f"facet column not in DataFrame: {column!r}")
-        levels = unique_levels(g.data, column)
+        levels = _facet_levels(g.data, column)
         if not levels:
             raise ValueError("facet_wrap() found no panel levels")
         ncol, nrow = _panel_grid(len(levels), facet.ncol, facet.nrow)
@@ -2816,8 +2892,8 @@ def facet_cells(g: ggplot) -> dict:
     for column in (facet.rows, facet.cols):
         if column is not None and not has_column(g.data, column):
             raise KeyError(f"facet column not in DataFrame: {column!r}")
-    row_levels = unique_levels(g.data, facet.rows) if facet.rows else [None]
-    col_levels = unique_levels(g.data, facet.cols) if facet.cols else [None]
+    row_levels = _facet_levels(g.data, facet.rows) if facet.rows else [None]
+    col_levels = _facet_levels(g.data, facet.cols) if facet.cols else [None]
     nrow, ncol = len(row_levels), len(col_levels)
     for r, row_level in enumerate(row_levels):
         rows_data = _subset(g.data, facet.rows, row_level)

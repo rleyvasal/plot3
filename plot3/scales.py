@@ -250,8 +250,45 @@ class Scale:
         return d
 
 
+def _is_na(value) -> bool:
+    try:
+        return value is None or bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def ordered_levels(values, *, keep_order: bool = False) -> list:
+    """Distinct values in ggplot2's level order, missing values last.
+
+    ``keep_order`` (a categorical column) keeps the given order. Otherwise
+    booleans run False, True; numbers sort numerically (4, 6, 8, 10, not
+    "10" before "4"); anything else sorts as text.
+    """
+    values = list(values)
+    present = [v for v in values if not _is_na(v)]
+    missing = len(present) != len(values)
+    distinct = list(dict.fromkeys(present))
+    if not keep_order:
+        if all(isinstance(v, (bool, np.bool_)) for v in distinct):
+            distinct.sort(key=bool)
+        elif all(
+            isinstance(v, (int, float, np.integer, np.floating))
+            and not isinstance(v, (bool, np.bool_))
+            for v in distinct
+        ):
+            distinct.sort(key=float)
+        else:
+            distinct.sort(key=str)
+    return distinct + ([None] if missing else [])
+
+
 def col_values(s: pd.Series) -> tuple[str, np.ndarray, list[str]]:
     """Series -> (scale kind, float64 positions, categories)."""
+    if pd.api.types.is_bool_dtype(s):
+        # True/False are two groups (ggplot2), not a 0-1 colour gradient.
+        cats = [str(v) for v in ordered_levels(s.dropna().unique().tolist())]
+        idx = {c: i for i, c in enumerate(cats)}
+        return "cat", s.map(lambda v: idx.get(str(v), np.nan)).to_numpy(np.float64), cats
     if pd.api.types.is_datetime64_any_dtype(s):
         if getattr(s.dtype, "tz", None) is not None:
             s = s.dt.tz_convert("UTC").dt.tz_localize(None)

@@ -52,10 +52,10 @@ def test_facet_grid_formula_and_keywords():
 def test_facet_grid_cells_strips_and_empty_combinations(tips):
     layout = facet_cells(ggplot(tips, aes(x="bill", y="tip")) + geom_point() + facet_grid("sex ~ day"))
     assert (layout["nrow"], layout["ncol"]) == (2, 3)
-    assert layout["col_strips"] == ["Thu", "Fri", "Sat"]
+    assert layout["col_strips"] == ["Fri", "Sat", "Thu"]  # ggplot2 order
     assert layout["row_strips"] == ["F", "M"]
     empty = [(c["row"], c["col"]) for c in layout["cells"] if c["fig"] is None]
-    assert empty == [(1, 2)]
+    assert empty == [(1, 1)]  # Sat x M
 
 
 def test_facet_panels_share_colour_levels(tips):

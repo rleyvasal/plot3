@@ -203,6 +203,7 @@ def save_static(
     suffix = path.suffix.lower()
     if suffix not in {".png", ".svg", ".pdf"}:
         raise ValueError("save_static() writes .png, .svg, or .pdf")
+    fig = _print_theme(fig)
     size = _figure_size(fig, width, height, units, dpi)
     layout_w, layout_h = size["layout"]
     base_pt = _resolve_base_pt(fig, fontsize)
@@ -218,6 +219,9 @@ def save_static(
         )
     finally:
         _REAL_FONT.reset(token)
+    # Browsers fall back per character; Cairo (PNG, PDF) needs one font
+    # that has the glyphs, chosen from what this machine has installed.
+    browser_wide = f"{family_name}, {_WIDE_FALLBACKS}"
     svg = _svg_text(
         commands,
         layout_w,
@@ -225,6 +229,7 @@ def save_static(
         svg_width=size["svg_width"],
         svg_height=size["svg_height"],
         family=family_name,
+        wide=browser_wide if suffix == ".svg" else (_wide_font() or browser_wide),
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     fallback = False
@@ -238,14 +243,43 @@ def save_static(
         data = _stamp_pdf(data, __version__)
     path.write_bytes(data)
     print(f"plot3: saved {path} ({len(data) // 1024} KB)")
-    for note in dict.fromkeys(dropped):
-        print(f"plot3: {note} (not drawn; notes=True adds it to the file)")
+    shown = list(dict.fromkeys(dropped))
+    for note in shown:
+        print(f"plot3: {note}")
+    if shown:
+        print("plot3: notes are not drawn in the file; ggsave(..., notes=True) adds them")
     if fallback:
         print(
             "plot3: PNG used the built-in font. "
             "pip install 'plot3[export]' for Helvetica."
         )
     return str(path)
+
+
+def _print_theme(fig):
+    """Saved files default to theme_bw (white page, grey grid); the
+    interactive viewer keeps its own default. A theme you add always wins."""
+    import copy
+
+    from plot3.compose import Composition
+
+    def lighten(plot):
+        if getattr(plot, "theme_explicit", True) or getattr(plot, "_payload", None) is not None:
+            return plot
+        out = copy.copy(plot)
+        out.theme_name = "bw"
+        return out
+
+    if isinstance(fig, Composition):
+        def walk(node):
+            if isinstance(node, Composition):
+                clone = copy.copy(node)
+                clone.items = [walk(item) for item in node.items]
+                return clone
+            return lighten(node)
+
+        return walk(fig)
+    return lighten(fig)
 
 
 def _figure_size(fig, width, height, units, dpi) -> dict:
@@ -733,6 +767,8 @@ def _draw_spec(spec, blobs, x, y, w, h, commands, *, border: bool, base_pt: floa
     labs = _labs(spec)
     is3d = bool(spec.get("is3d"))
     fonts = _font_sizes(w, base_pt)
+    if not is3d:
+        spec = _fit_x_labels(spec, w, fonts[0])
     # Tag, title, subtitle above the panel and the caption below it take
     # their own rows; the panel layout then sees a smaller cell, no title.
     head, foot = _draw_header_footer(spec, labs, fonts, theme, x, y, w, h, commands)
@@ -788,6 +824,33 @@ def _labs(spec) -> dict:
         # The facet layout draws one x and one y title for the whole figure.
         out["x"] = out["y"] = ""
     return out
+
+
+def _fit_x_labels(spec, width: float, tick: float):
+    """Turn or thin x labels that would overlap (30 categories at 3.5 in).
+
+    Tries flat, then 45 degrees, then 90; if even upright labels collide,
+    keeps every k-th. An explicit theme(axis_text_x_angle=) is left alone.
+    """
+    opts = dict(spec.get("themeOpts") or {})
+    if "xAngle" in opts:
+        return spec
+    labels = [str(lab) for _v, lab in _ticks((spec.get("scales") or {}).get("x") or {})]
+    if len(labels) < 2:
+        return spec
+    slot = 0.72 * float(width) / len(labels)  # panel is roughly 3/4 of the cell
+    longest = max(_text_width(lab, tick) for lab in labels)
+    line = 1.25 * tick
+    if longest + 6 <= slot:
+        return spec
+    if line * 1.45 <= slot:
+        opts["xAngle"] = 45.0
+    else:
+        opts["xAngle"] = 90.0
+        is_cat = ((spec.get("scales") or {}).get("x") or {}).get("kind") == "cat"
+        if line > slot and is_cat:
+            opts["xThin"] = int(math.ceil(line / max(slot, 1e-6)))
+    return dict(spec, themeOpts=opts)
 
 
 def _thin_y_ticks(ticks, scale, height: float, tick: float):
@@ -1030,6 +1093,9 @@ def _draw_2d(
         if sx < box[0] - 1 or sx > box[0] + box[2] + 1:
             continue
         angle = float(opts.get("xAngle", 0.0))
+        thin = int(opts.get("xThin", 1) or 1)
+        if thin > 1 and int(round(float(value))) % thin:
+            continue
         if angle > 0:
             # Turned labels end at their tick, as ggplot2's hjust = 1.
             commands.append((
@@ -2710,7 +2776,11 @@ def _svg_text(
     svg_width: str | None = None,
     svg_height: str | None = None,
     family: str | None = None,
+    wide: str | None = None,
 ) -> str:
+    """``wide`` is the font for text with scripts the main family lacks
+    (CJK, ✓, emoji): one name for Cairo, which does not fall back per
+    character, or a fallback list for browsers."""
     shown_w = str(width) if svg_width is None else svg_width
     shown_h = str(height) if svg_height is None else svg_height
     family_name = family or _DEFAULT_FAMILY
@@ -2723,9 +2793,76 @@ def _svg_text(
         f"<metadata>plot3 {escape(__version__)}</metadata>",
     ]
     for cmd in commands:
-        parts.append(_svg_cmd(cmd, family_name))
+        if wide and cmd[0] == "text" and _needs_wide_font(str(cmd[3])):
+            parts.append(_svg_cmd(cmd, wide))
+        else:
+            parts.append(_svg_cmd(cmd, family_name))
     parts.append("</svg>")
     return "".join(parts)
+
+
+_WIDE_FALLBACKS = (
+    "'Arial Unicode MS', 'Hiragino Sans', 'PingFang SC', 'Noto Sans CJK SC', "
+    "'Microsoft YaHei', 'Segoe UI Symbol', 'DejaVu Sans', sans-serif"
+)
+# Scripts and symbols Helvetica / Arial do not have.
+_WIDE_RANGES = (
+    (0x0590, 0x0FFF),   # Hebrew, Arabic, Indic, Thai, Tibetan
+    (0x1100, 0x11FF),   # Hangul Jamo
+    (0x2600, 0x27BF),   # symbols and dingbats (✓, ★)
+    (0x2E80, 0x9FFF),   # CJK, kana
+    (0xAC00, 0xD7AF),   # Hangul
+    (0xF900, 0xFAFF),
+    (0xFF00, 0xFFEF),   # full-width forms
+    (0x1F000, 0x1FAFF),  # emoji
+)
+_WIDE_CANDIDATES = {
+    "darwin": [
+        ("Arial Unicode MS", ["/Library/Fonts/Arial Unicode.ttf",
+                              "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"]),
+        ("Hiragino Sans", ["/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+                           "/System/Library/Fonts/Hiragino Sans GB.ttc"]),
+    ],
+    "win32": [
+        ("Microsoft YaHei", ["C:/Windows/Fonts/msyh.ttc"]),
+        ("Arial Unicode MS", ["C:/Windows/Fonts/ARIALUNI.TTF"]),
+    ],
+}
+_WIDE_FONT: list = []
+
+
+def _needs_wide_font(text: str) -> bool:
+    return any(lo <= ord(ch) <= hi for ch in text for lo, hi in _WIDE_RANGES)
+
+
+def _wide_font() -> str | None:
+    """One installed font with CJK and symbol glyphs, or None."""
+    if _WIDE_FONT:
+        return _WIDE_FONT[0]
+    import os
+    import shutil
+    import subprocess
+    import sys
+
+    found = None
+    for name, paths in _WIDE_CANDIDATES.get(sys.platform, []):
+        if any(os.path.exists(path) for path in paths):
+            found = name
+            break
+    if found is None and shutil.which("fc-list"):
+        try:
+            listing = subprocess.run(
+                ["fc-list", ":", "family"], capture_output=True, text=True, timeout=5,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            listing = ""
+        for name in ("Noto Sans CJK SC", "Noto Sans CJK JP", "Source Han Sans SC",
+                     "WenQuanYi Zen Hei", "Arial Unicode MS", "DejaVu Sans"):
+            if name in listing:
+                found = name
+                break
+    _WIDE_FONT.append(found)
+    return found
 
 
 def _svg_cmd(cmd, family: str = _DEFAULT_FAMILY) -> str:

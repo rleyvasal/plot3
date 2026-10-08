@@ -29,6 +29,7 @@ from plot3 import (
     slider,
     theme,
     theme_bw,
+    theme_dark,
     theme_classic,
     theme_light,
     theme_minimal,
@@ -134,10 +135,14 @@ def test_png_has_size_background_and_marks(tmp_path):
     ggsave(str(path), fig, width=640, height=400)
     rgb = _read_png(path)
     assert rgb.shape == (400, 640, 3)
-    assert tuple(rgb[0, 0]) == (0x0B, 0x10, 0x20)
+    # Saved files default to theme_bw: a white page and its blue.
+    assert tuple(rgb[0, 0]) == (0xFF, 0xFF, 0xFF)
     assert len(np.unique(rgb.reshape(-1, 3), axis=0)) > 4
-    # Default dark categorical blue is on the page.
-    assert np.any(np.all(rgb == (0x39, 0x87, 0xE5), axis=-1))
+    assert np.any(np.all(rgb == (0x2A, 0x78, 0xD6), axis=-1))
+    # A theme you add wins over that default.
+    dark = tmp_path / "dark.png"
+    ggsave(str(dark), fig + theme_dark(), width=640, height=400)
+    assert tuple(_read_png(dark)[0, 0]) == (0x0B, 0x10, 0x20)
 
 
 def test_svg_scatter_has_circles_axes_and_theme(tmp_path):
@@ -273,7 +278,7 @@ def test_facets_tile_panels(tmp_path):
 
 def test_3d_center_point_projects_near_the_middle(tmp_path):
     df = pd.DataFrame({"x": [0.0], "y": [0.0], "z": [0.0]})
-    fig = ggplot(df, aes(x="x", y="y", z="z")) + geom_point(size=0.08) + coord_3d()
+    fig = ggplot(df, aes(x="x", y="y", z="z")) + geom_point(size=0.08) + coord_3d() + theme_dark()
     path = tmp_path / "cloud.png"
     ggsave(path, fig, width=400, height=400)
     rgb = _read_png(path)

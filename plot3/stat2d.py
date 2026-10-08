@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from plot3.geoms import _Geom, aes
-from plot3.scales import col_values, resolution
+from plot3.scales import col_values, ordered_levels, resolution
 from plot3.special import qt
 from plot3.table import has_column, materialize_columns
 
@@ -74,9 +74,9 @@ class _Axis:
 
 def _axis(series: pd.Series, *, discrete: bool = False) -> _Axis:
     if discrete and not isinstance(series.dtype, pd.CategoricalDtype):
-        # Count bars keep first-appearance order, like geom_bar does today.
+        # Counted values are categories, in ggplot2's level order (4, 6, 8).
+        levels = ["NA" if v is None else str(v) for v in ordered_levels(series.tolist())]
         labels = series.map(lambda v: "NA" if pd.isna(v) else str(v))
-        levels = list(dict.fromkeys(labels.tolist()))
         index = {level: i for i, level in enumerate(levels)}
         return _Axis("cat", labels.map(index).to_numpy(np.float64), levels)
     kind, values, cats = col_values(series)
@@ -667,9 +667,10 @@ def summary(geom: _Geom, mapping: dict, data: Any):
     if shape in {"col", "bar"}:
         proxy.kind = "col"
         proxy.width = getattr(geom, "width", 0.9)
-        if colour:
+        if split:
+            # Bars are filled shapes: the fill group colours and dodges them.
             proxy.position = proxy.position or "dodge"
-            return positioned_bars(proxy, {"x": xcol, "y": "__y", "color": colour}, stats)
+            return positioned_bars(proxy, {"x": xcol, "y": "__y", "color": split}, stats)
         # One bar per x: the ordinary column path keeps its hover tooltips.
         out = _Geom(aes(x=xcol, y="__y"), color=geom.const_color, alpha=geom.alpha)
         out.kind = "col"

@@ -53,9 +53,11 @@ def _rects(layer):
 def test_stacked_bar_counts_split_by_group_first_level_on_top(counts):
     layer = expand_stat_geom(geom_bar(), aes(x="day", colour="sex"), counts)
     assert layer.kind == "poly"
-    assert layer._violin_levels == ["Thu", "Fri", "Sat"]
+    # ggplot2 level order: alphabetical, not first appearance.
+    assert layer._violin_levels == ["Fri", "Sat", "Thu"]
+    at = layer._violin_levels.index("Thu")
     rects = _rects(layer)
-    thu = sorted([r for r in rects if abs((r[0] + r[1]) / 2) < 1e-9], key=lambda r: r[2])
+    thu = sorted([r for r in rects if abs((r[0] + r[1]) / 2 - at) < 1e-9], key=lambda r: r[2])
     # Thu: 1 F, 2 M. F is the first level, so it sits on top.
     assert [(r[4], r[2], r[3]) for r in thu] == [("M", 0.0, 2.0), ("F", 2.0, 3.0)]
 
@@ -75,12 +77,13 @@ def test_dodged_bars_sit_side_by_side(counts):
     layer = expand_stat_geom(
         geom_bar(position="dodge"), aes(x="day", colour="sex"), counts
     )
+    at = layer._violin_levels.index("Thu")
     thu = sorted(
-        [r for r in _rects(layer) if r[1] <= 0.5 and r[0] >= -0.5], key=lambda r: r[0]
+        [r for r in _rects(layer) if r[1] <= at + 0.5 and r[0] >= at - 0.5], key=lambda r: r[0]
     )
     assert [r[4] for r in thu] == ["F", "M"]
-    assert thu[0][1] == pytest.approx(0.0)  # F's right edge meets M's left edge
-    assert thu[1][0] == pytest.approx(0.0)
+    assert thu[0][1] == pytest.approx(at)  # F's right edge meets M's left edge
+    assert thu[1][0] == pytest.approx(at)
     assert thu[0][1] - thu[0][0] == pytest.approx(0.45)
 
 

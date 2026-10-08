@@ -707,18 +707,16 @@ def category_labels(data: Any, col: str) -> list[str]:
     if not has_column(data, col):
         raise KeyError(f"column(s) not in DataFrame: {[col]}")
     backend = detect_backend(data)
+    from plot3.scales import ordered_levels
+
     if backend == "pandas":
         s = data[col]
         if isinstance(s.dtype, pd.CategoricalDtype):
             return [str(c) for c in s.cat.categories]
-        return list(dict.fromkeys(s.astype(str).tolist()))
+        return ["None" if v is None else str(v) for v in ordered_levels(s.tolist())]
     if backend == "array":
-        return list(
-            dict.fromkeys(
-                "None" if v is None or (isinstance(v, float) and np.isnan(v)) else str(v)
-                for v in _as_array_table(data).column(col).tolist()
-            )
-        )
+        values = _as_array_table(data).column(col).tolist()
+        return ["None" if v is None else str(v) for v in ordered_levels(values)]
 
     import polars as pl
 
@@ -728,13 +726,7 @@ def category_labels(data: Any, col: str) -> list[str]:
     if dtype == pl.Categorical or dtype == pl.Enum:
         cats = series.cat.get_categories().to_list()
         return [str(c) for c in cats]
-    # appearance order
-    seen: list[str] = []
-    for v in series.to_list():
-        label = "None" if v is None else str(v)
-        if label not in seen:
-            seen.append(label)
-    return seen
+    return ["None" if v is None else str(v) for v in ordered_levels(series.to_list())]
 
 
 def require_columns(data: Any, cols: list[str]) -> None:

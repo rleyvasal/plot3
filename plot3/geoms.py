@@ -1117,9 +1117,12 @@ class geom_histogram(_Geom):
         method: str = "fd",
         boundary: float | None = None,
         closed: str = "right",
+        position="stack",
         **kw,
     ):
         super().__init__(mapping, **kw)
+        # With aes(fill=g): "stack" (default), "dodge", "fill", "identity".
+        self.position = position
         if bins is not None and int(bins) < 1:
             raise ValueError("bins must be positive")
         if binwidth is not None and float(binwidth) <= 0:
