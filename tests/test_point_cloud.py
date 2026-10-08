@@ -58,6 +58,6 @@ def test_saved_cloud_draws_back_wall_grid_and_round_colour_bar_labels(tmp_path):
     assert 'stroke="#ebebeb"' in svg  # back-wall grid in theme_bw's grid colour
     # Nice colour-bar values only, never the raw data ends (-2.997).
     assert ">2</text>" in svg and ">-2</text>" in svg
-    assert "2.99" not in svg
+    assert "2.99</text>" not in svg
     # Nine of the twelve box edges: the near corner's three are left out.
     assert svg.count('stroke="#333333"') == 9

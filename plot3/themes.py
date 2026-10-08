@@ -25,7 +25,14 @@ _MAGMA = ["#000004", "#0b0924", "#20114b", "#3b0f70", "#57157e", "#721f81",
 _TURBO = ["#30123b", "#4143a7", "#4771e9", "#3e9bfe", "#22c5e2", "#1ae4b6",
           "#46f884", "#88ff4e", "#b9f635", "#e1dd37", "#faba39", "#fd8d27",
           "#f05b12", "#d63506", "#af1801", "#7a0403"]
-_CONT_PALETTES = {"viridis": _VIRIDIS, "magma": _MAGMA, "turbo": _TURBO}
+# Driving-scene height colours: bright green ground, cyan objects, violet
+# and pink for the tallest. Every stop stays visible on black.
+_LIDAR = ["#22b14c", "#2fd35a", "#3fe28a", "#3fe6c8", "#41c8f0", "#5aa0ff",
+          "#8a86ff", "#b07cff", "#e07ce8", "#ff7ad9"]
+_CONT_PALETTES = {"viridis": _VIRIDIS, "magma": _MAGMA, "turbo": _TURBO, "lidar": _LIDAR}
+# Class colours that read on black, for boxes around detected objects.
+_CAT_LIDAR = ["#ff8a80", "#ffffff", "#b39ddb", "#80deea", "#ffe57f",
+              "#a5d6a7", "#f48fb1", "#90caf9"]
 
 # frame is how static export draws the panel: "box" (full rectangle),
 # "axes" (left and bottom only), or "none". The viewer ignores it and
@@ -53,6 +60,13 @@ _THEMES = {
         surface="#ffffff", ink="#000000", ink2="#000000", muted="#4d4d4d",
         grid="#ffffff", axis="#000000", cat=_CAT_LIGHT, seq=_SEQ,
         frame="axes",
+    ),
+    # A driving scene: black page, the data alone, height colours that
+    # stay bright on black. void hides the 3D box, grid, and tick labels.
+    "lidar": dict(
+        surface="#000000", ink="#ffffff", ink2="#c3c2b7", muted="#898781",
+        grid="#000000", axis="#000000", cat=_CAT_LIDAR, seq=_LIDAR,
+        frame="none", void=True, ramp3d="lidar",
     ),
     # ggplot2 theme_minimal: white page, light grid, no axis box.
     "minimal": dict(

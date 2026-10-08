@@ -15,6 +15,15 @@ under **Changed**.
   updates them as you orbit.
 - `coord_3d(aspect="auto")`, the new default: a tall cloud is shortened to
   twice its width. `aspect="data"` keeps true proportions.
+- `geom_box3d()`: wireframe boxes from centre, size, and heading (nuScenes /
+  KITTI detections). Each class gets its own colour and legend entry, so a
+  cloud coloured by height and boxes coloured by class share one figure;
+  the legend shows the classes and the height colour bar together.
+- `theme_lidar()`: a driving-scene look, with a black page, no box, grid, or
+  tick labels, a green-cyan-violet height ramp, and class colours that read
+  on black.
+- `coord_3d(elev=, azim=, zoom=)` sets the starting camera, in the viewer
+  and in saved files.
 
 ### Changed
 
@@ -27,6 +36,10 @@ under **Changed**.
 - Default 3D point sizes are visible: about 5 px for a few hundred points,
   down to a fine grain for millions (they were about 1 px at any density).
 - Size legends show round breaks (5, 10, 15) instead of the data maximum.
+- Saved 3D figures use the viewer's perspective camera instead of an
+  orthographic one, so what you save looks like what you orbit. The box is
+  centred by its outline, and gets a top margin when an axis is labelled
+  along its top edge.
 
 ### Fixed
 

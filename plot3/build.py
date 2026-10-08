@@ -487,6 +487,10 @@ def expand_stat_geom(
     # Resolve fill per mapping, so a layer's own colour beats a base fill.
     mapping = _apply_fill(dict(base_mapping), geom.kind)
     mapping.update(_apply_fill(dict(geom.mapping), geom.kind))
+    if geom.kind == "box3d":
+        from plot3.stats3d import box3d_layers
+
+        return box3d_layers(geom, mapping, data)
     if geom.kind in _STAT2D_KINDS or geom.kind in {"col", "bar"}:
         from plot3 import stat2d
 
@@ -883,8 +887,9 @@ def _default_3d_point_size(n: int, *, size_mode: str = "scene") -> float:
     """Point size in unit-cube scene units, smaller as the cloud gets denser.
 
     The default camera shows the cube about 150 px across per scene unit
-    on a 600 px viewer, so 0.035 is a 5 px mark for a few hundred points
-    and 0.008 a fine 1.2 px grain for a million.
+    on a 600 px viewer, so 0.035 is a 5 px mark for a few hundred points,
+    0.008 a fine 1.5 px grain for a 50,000-point lidar sweep, and 0.004 a
+    1 px grain for millions.
     """
     n = max(1, int(n))
     if size_mode == "screen":
@@ -895,8 +900,8 @@ def _default_3d_point_size(n: int, *, size_mode: str = "scene") -> float:
             return 1.5
         return 1.25
     # scene mode: world units after [0,1]×aspect encoding
-    s = 0.03 * (1_000.0 / n) ** 0.25
-    return float(round(min(0.035, max(0.008, s)), 5))
+    s = 0.03 * (1_000.0 / n) ** (1.0 / 3.0)
+    return float(round(min(0.035, max(0.004, s)), 5))
 
 
 def _axis_label(g, base_map: dict, resolved, axis: str, is3d: bool) -> str:
@@ -1615,6 +1620,10 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     expanded = []
     for index, geom in enumerate(layers_in):
         layer_data = getattr(geom, "layer_data", None)
+        if getattr(geom, "kind", None) == "box3d":
+            # Box classes take the figure theme's group colours.
+            geom = copy.copy(geom)
+            geom._palette = list(theme["cat"])
         result = expand_stat_geom(
             geom,
             g.mapping,
@@ -2708,6 +2717,11 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 if coord is not None:
                     mode = getattr(coord, "size_mode", "scene") or "scene"
                 spec_l["size"] = _default_3d_point_size(n, size_mode=mode)
+                zoom = float(getattr(coord, "zoom", 1.0) or 1.0)
+                if mode == "scene" and zoom > 1.0:
+                    # A closer camera magnifies scene-sized points; keep the
+                    # grain the user sees at the default distance.
+                    spec_l["size"] = float(round(spec_l["size"] / zoom, 5))
             else:
                 # pixels
                 spec_l["size"] = 6.0 if n <= 2000 else (4.0 if n <= 20000 else 2.5)
@@ -2841,8 +2855,9 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         else:
             default_ramp = next(
                 (getattr(geom, "_default_ramp") for geom, _m in resolved if getattr(geom, "_default_ramp", None)),
-                # 3D clouds: viridis keeps its low end visible on any page.
-                "viridis" if is3d else "blue",
+                # 3D clouds: viridis keeps its low end visible on any page;
+                # theme_lidar brings its own green-to-violet heights.
+                (theme.get("ramp3d") or "viridis") if is3d else "blue",
             )
             pal = (g.cscale.palette if g.cscale else default_ramp)
             ramp = _CONT_PALETTES.get(pal, theme["seq"])
@@ -3028,6 +3043,15 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         "notes": notes,
         "ann": annotations,
     }
+    # geom_box3d classes beside a cloud coloured by height: the entries
+    # take the class column's name and the colour bar keeps its own.
+    entries_title = next(
+        (geom._entries_title for geom, _m in resolved if getattr(geom, "_entries_title", None)),
+        None,
+    )
+    if entries_title and spec.get("legend") and cspec and cspec.get("kind") == "num":
+        spec["labs"]["colorBar"] = spec["labs"].get("color") or ""
+        spec["labs"]["color"] = entries_title
     return spec, payloads
 
 

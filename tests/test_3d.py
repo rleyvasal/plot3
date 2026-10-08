@@ -137,8 +137,8 @@ def test_point3d_default_size_is_visible_and_density_aware():
     sparse = _default_3d_point_size(200)
     mid = _default_3d_point_size(5_000)
     dense = _default_3d_point_size(80_000)
-    assert 0.008 <= dense < mid < sparse <= 0.035
-    assert _default_3d_point_size(5_000_000) == 0.008
+    assert 0.004 <= dense < mid < sparse <= 0.035
+    assert _default_3d_point_size(5_000_000) == 0.004
 
     df = _cloud(2_000)
     fig = ggplot(df, aes(x="x", y="y", z="z")) + geom_point3d()

@@ -378,13 +378,21 @@ function keyLegendsHTML() {
   return h;
 }
 const szHTML = sizeLegendHTML() + keyLegendsHTML();
+// Class entries and a height colour bar together (geom_box3d on a cloud).
+function barHTML() {
+  if (S.labs.colorBar == null || !S.color || S.color.kind !== 'num') return '';
+  return '<div class="sz-block"><b style="color:' + T.ink + '">' + plot3Esc(S.labs.colorBar) +
+    '</b><div id="ramp" style="background:linear-gradient(90deg,' + S.color.ramp.join(',') +
+    ')"></div><span style="float:left">' + (+S.color.lo.toPrecision(3)) +
+    '</span><span style="float:right">' + (+S.color.hi.toPrecision(3)) + '</span></div>';
+}
 if (S.legend) {
   showLegendBox();
   legEl.innerHTML = (S.labs.color ? '<b style="color:'+T.ink+'">' +
       richLabel('color', S.labs.color) + '</b>' : '') +
     S.legend.map((e, i) => '<div class="lg-e" data-ci="' + i +
       '">' + keyHTML(e, e.color) +
-      legendLabel(e) + '</div>').join('') + szHTML;
+      legendLabel(e) + '</div>').join('') + barHTML() + szHTML;
   legEl.addEventListener('click', ev => {
     const row = ev.target.closest('.lg-e');
     if (!row) return;
@@ -2332,8 +2340,10 @@ if (!S.is3d) {
   const gridMat = new THREE.LineBasicMaterial({ color: T.grid });
   const cornerAt = (i) => new THREE.Vector3(
     (i & 1) * ext[0], ((i >> 1) & 1) * ext[1], ((i >> 2) & 1) * ext[2]);
-  const boxEdges = [[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],
-                    [0,4],[1,5],[2,6],[3,7]].map(([a, b]) => {
+  // theme_lidar (void): the data alone, no box, grid, or labels.
+  const VOID = !!T.void;
+  const boxEdges = (VOID ? [] : [[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],
+                    [0,4],[1,5],[2,6],[3,7]]).map(([a, b]) => {
     const o = new THREE.LineSegments(
       new THREE.BufferGeometry().setFromPoints([cornerAt(a), cornerAt(b)]), boxMat);
     scene.add(o);
@@ -2345,7 +2355,7 @@ if (!S.is3d) {
       ? sc.cats.map((c, i) => [i, c])
       : (sc.ticks || (sc.ladder ? sc.ladder[0] : []));
   }
-  const showGrid = !(S.themeOpts && S.themeOpts.panelGrid === false) &&
+  const showGrid = !VOID && !(S.themeOpts && S.themeOpts.panelGrid === false) &&
     String(T.grid).toLowerCase() !== String(T.surface).toLowerCase();
   const walls = [0, 1, 2].map(wall => [0, 1].map(side => {
     const pts = [];
@@ -2407,7 +2417,7 @@ if (!S.is3d) {
     return (t - dataLo(ax)) / spanOf(ax);
   }
   const off = 0.055;
-  axesList.forEach((ax, ai) => {
+  (VOID ? [] : axesList).forEach((ax, ai) => {
     const sc = S.scales[ax];
     const ticks = sc.kind === 'cat'
       ? sc.cats.map((c, i) => [i, c])
@@ -2452,8 +2462,12 @@ if (!S.is3d) {
   const rad = Math.max(
     Math.sqrt(ext[0]*ext[0] + ext[1]*ext[1] + ext[2]*ext[2]) / 2, 1e-3);
   // pcviz: position at ~1.4R from centre on a diagonal; far = 20R
-  const dist = rad * 1.25 / Math.tan((cam.fov * Math.PI / 180) / 2);
-  const dir = new THREE.Vector3(0.55, -0.85, 0.5).normalize();
+  // coord_3d(elev=, azim=, zoom=) sends the opening direction and zoom.
+  const camSpec = coord.camera || {};
+  const dist = rad * 1.25 / Math.tan((cam.fov * Math.PI / 180) / 2) / (camSpec.zoom > 0 ? camSpec.zoom : 1);
+  const dir = (camSpec.dir && camSpec.dir.length === 3)
+    ? new THREE.Vector3(camSpec.dir[0], camSpec.dir[1], camSpec.dir[2]).normalize()
+    : new THREE.Vector3(0.55, -0.85, 0.5).normalize();
   cam.position.copy(ctr.clone().add(dir.multiplyScalar(dist)));
   cam.near = Math.max(rad / 200, 1e-4);
   cam.far = rad * 40;

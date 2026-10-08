@@ -309,6 +309,23 @@ read_bin("scan.pcd.bin")          # nuScenes-style point clouds; remote=True und
 
 NumPy arrays use column positions: `ggplot(pts, aes(x=0, y=1, z=2, colour=3))`.
 
+A driving scene, as autonomous-driving viewers draw it: points coloured by
+height on black, detection boxes by class, and a chase camera behind the car.
+
+```python notest
+(ggplot(sweep, aes(x="x", y="y", z="z"))
+ + geom_point3d()
+ + geom_box3d(aes(length="l", width="w", height="h", angle="yaw", colour="class"),
+              data=boxes)
+ + coord_3d(azim=180, elev=28, zoom=1.6)
+ + theme_lidar())
+```
+
+`geom_box3d` takes each box's centre (`x`, `y`, `z`), its `length` along
+the heading, `width`, `height`, and the heading `angle` in radians, as
+nuScenes and KITTI store them. `coord_3d(elev=, azim=, zoom=)` sets where
+the camera starts, in degrees as matplotlib's `view_init`.
+
 The box keeps the data's proportions, except that a tall cloud (a helix, a
 tree) is shortened to twice its width so it does not become a thin column;
 `coord_3d(aspect="data")` keeps true proportions always, and

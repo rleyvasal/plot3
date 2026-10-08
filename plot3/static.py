@@ -505,6 +505,9 @@ def _scale_commands(commands, sx: float, sy: float) -> list:
                 "text", x * sx, y * sy, text, float(size) * stroke, fill,
                 anchor, baseline, rotate, weight,
             ))
+        elif op == "clip":
+            _op, x, y, w, h = cmd
+            scaled.append(("clip", x * sx, y * sy, w * sx, h * sy))
         else:
             scaled.append(cmd)
     return scaled
@@ -616,7 +619,7 @@ def _offset_commands(commands, dx: float, dy: float) -> list:
     out = []
     for cmd in commands:
         op = cmd[0]
-        if op in {"rect", "circle", "text"}:
+        if op in {"rect", "circle", "text", "clip"}:
             out.append((op, cmd[1] + dx, cmd[2] + dy, *cmd[3:]))
         elif op == "line":
             out.append((op, cmd[1] + dx, cmd[2] + dy, cmd[3] + dx, cmd[4] + dy, *cmd[5:]))
@@ -1355,14 +1358,27 @@ def _draw_3d(
         ext = [float(v) for v in coord["ext"]]
     # Same camera as the viewer. A uniform scale about the projected
     # centre fills the panel and leaves a centred mark where it was.
+    void = bool(theme.get("void"))
     layout = _axis_layout(fonts[0])
-    inner = _inset_box(box, layout["pad"], top=8.0)
-    project, centre = _fit_projector(_projector(ext, box), ext, inner)
+    # No tick labels to make room for: the box fills the panel.
+    inner = _inset_box(box, 8.0 if void else layout["pad"], top=8.0)
+    camera = coord.get("camera") or {}
+    zoom = float(camera.get("zoom") or 1.0)
+    base = _projector(ext, box, camera.get("dir"), zoom)
+    project, centre = _fit_projector(base, ext, inner, zoom)
+    if not void and centre is not None and _labels_on_top(project, centre, ext, inner):
+        # Perspective can put an axis along the top of the box: give its
+        # labels the same room as the others.
+        inner = _inset_box(box, layout["pad"])
+        project, centre = _fit_projector(base, ext, inner, zoom)
     ink = theme.get("ink") or "#ffffff"
     gz = bool(spec.get("gz"))
     min_dim = min(box[2], box[3])
 
-    _draw_back_panes(spec, ext, project, commands, theme)
+    if not void:
+        _draw_back_panes(spec, ext, project, commands, theme)
+    # A zoomed camera can put marks past the panel: keep them inside it.
+    commands.append(("clip", box[0], box[1], box[2], box[3]))
 
     triangles = []
     lines = []
@@ -1430,11 +1446,14 @@ def _draw_3d(
         commands.append(("polyline", projected, color, width, alpha))
     points.sort(key=lambda item: -item[0])
     for _depth, sx, sy, radius, color, alpha in points:
-        commands.append(("circle", sx, sy, radius, color, None, 0, alpha))
+        if box[0] - radius <= sx <= box[0] + box[2] + radius and box[1] - radius <= sy <= box[1] + box[3] + radius:
+            commands.append(("circle", sx, sy, radius, color, None, 0, alpha))
+    commands.append(("unclip",))
 
-    _draw_3d_axes(
-        spec, ext, project, centre, commands, theme, fonts, labs, (x, y, w, h), layout,
-    )
+    if not void:
+        _draw_3d_axes(
+            spec, ext, project, centre, commands, theme, fonts, labs, (x, y, w, h), layout,
+        )
     if labs.get("title"):
         commands.append((
             "text", x + 12, y + 6, labs["title"], fonts[1], ink,
@@ -1459,6 +1478,21 @@ def _back_sides(corners) -> tuple[int, int, int] | None:
         far = [c[2] for i, c in enumerate(corners) if (i >> bit) & 1]
         sides.append(0 if sum(near) > sum(far) else 1)
     return tuple(sides)
+
+
+def _labels_on_top(project, centre, ext, inner) -> bool:
+    """Whether an axis is labelled along an edge near the top of the panel."""
+    corners = _cube_corners(project, ext)
+    if any(c is None for c in corners):
+        return False
+    hull = _hull_edge_set(corners)
+    top = inner[1] + 0.2 * inner[3]
+    for axis in ("x", "y", "z"):
+        pair = _visible_axis_edge(axis, hull, corners, centre)
+        a, b = corners[pair[0]], corners[pair[1]]
+        if axis != "z" and min(a[1], b[1]) < top and _outward_normal(a, b, centre)[1] < 0:
+            return True
+    return False
 
 
 def _draw_back_panes(spec, ext, project, commands, theme) -> None:
@@ -1909,6 +1943,12 @@ def _legend_metrics(
     ramp = color.get("ramp") or []
     if not entries and color.get("kind") == "num" and ramp:
         rows.append(("ramp", ramp, color.get("lo"), color.get("hi")))
+    bar_title = (spec.get("labs") or {}).get("colorBar")
+    if entries and color.get("kind") == "num" and ramp and bar_title is not None:
+        # Class entries and a colour bar together (boxes on a height cloud).
+        if bar_title:
+            rows.append(("size-title", str(bar_title)))
+        rows.append(("ramp", ramp, color.get("lo"), color.get("hi")))
     rows.extend(_key_rows(spec, ink))
     if size_legend and size_legend.get("breaks"):
         rows.append(("size-title", str(size_legend.get("label") or "size")))
@@ -2191,50 +2231,37 @@ def _inset_box(box, pad: float, top: float | None = None):
     return (x + pad, y + top, max(4.0, w - 2.0 * pad), max(4.0, h - pad - top))
 
 
-def _fit_scale(corners, centre, inner) -> float:
-    cx, cy = centre[0], centre[1]
-    x0, y0, w, h = inner
-    x1, y1 = x0 + w, y0 + h
-    scale = math.inf
-    for hit in corners:
-        if hit is None:
-            continue
-        dx = hit[0] - cx
-        dy = hit[1] - cy
-        if dx > 1e-6:
-            scale = min(scale, (x1 - cx) / dx)
-        elif dx < -1e-6:
-            scale = min(scale, (x0 - cx) / dx)
-        if dy > 1e-6:
-            scale = min(scale, (y1 - cy) / dy)
-        elif dy < -1e-6:
-            scale = min(scale, (y0 - cy) / dy)
-    if not math.isfinite(scale) or scale <= 0:
-        return 1.0
-    return scale
-
-
-def _fit_projector(project, ext, inner):
-    """Scale the projected cube about its centre until it meets `inner`."""
-    centre_hit = project(np.asarray(ext, dtype=np.float64) / 2.0)
-    if centre_hit is None:
-        return project, None
+def _fit_projector(project, ext, inner, zoom: float = 1.0):
+    """Scale and centre the projected cube's outline until it meets `inner`,
+    then scale by ``zoom`` (coord_3d(zoom=2) shows the middle, twice as
+    large). Perspective makes the outline lopsided about the cube's centre,
+    so the outline, not the centre, is what gets centred."""
     corners = [
-        project(np.array([ix, iy, iz], dtype=np.float64))
-        for iz in (0.0, float(ext[2]))
-        for iy in (0.0, float(ext[1]))
-        for ix in (0.0, float(ext[0]))
+        hit for hit in (
+            project(np.array([ix, iy, iz], dtype=np.float64))
+            for iz in (0.0, float(ext[2]))
+            for iy in (0.0, float(ext[1]))
+            for ix in (0.0, float(ext[0]))
+        ) if hit is not None
     ]
-    scale = _fit_scale(corners, centre_hit, inner)
-    cx, cy = centre_hit[0], centre_hit[1]
+    if len(corners) < 2:
+        return project, None
+    xs = [hit[0] for hit in corners]
+    ys = [hit[1] for hit in corners]
+    bx, by = (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+    bw, bh = max(max(xs) - min(xs), 1e-9), max(max(ys) - min(ys), 1e-9)
+    x0, y0, w, h = inner
+    scale = min(w / bw, h / bh) * max(float(zoom), 1e-6)
+    tx, ty = x0 + w / 2.0, y0 + h / 2.0
 
     def fitted(point):
         hit = project(point)
         if hit is None:
             return None
-        return (cx + (hit[0] - cx) * scale, cy + (hit[1] - cy) * scale, hit[2])
+        return (tx + (hit[0] - bx) * scale, ty + (hit[1] - by) * scale, hit[2])
 
-    return fitted, (cx, cy)
+    centre_hit = fitted(np.asarray(ext, dtype=np.float64) / 2.0)
+    return fitted, (None if centre_hit is None else (centre_hit[0], centre_hit[1]))
 
 
 def _cube_corners(project, ext):
@@ -2431,18 +2458,21 @@ def _draw_3d_axes(spec, ext, project, centre, commands, theme, fonts, labs, boun
         ))
 
 
-def _projector(ext, box):
-    """View direction of the 3D viewer, drawn orthographically.
+def _projector(ext, box, direction=None, zoom: float = 1.0):
+    """The 3D viewer's camera: same direction, distance, and perspective.
 
     The eye sits on the same side of the cube as the viewer (fov 60, up
-    = +z). Orthographic scale keeps the projected centre on the centre
-    of ``box``, so fitting the panel does not slide a centred mark.
+    = +z), so near things are larger and parallel edges converge, as on
+    screen. The cube's centre projects to the centre of ``box``, so fitting
+    the panel does not slide a centred mark.
     """
     ctr = np.array([ext[0] / 2, ext[1] / 2, ext[2] / 2], dtype=np.float64)
-    backward = np.array([0.55, -0.85, 0.5], dtype=np.float64)
-    backward /= np.linalg.norm(backward)
+    zoom = max(float(zoom), 1e-6)
+    backward = np.array(direction if direction else [0.55, -0.85, 0.5], dtype=np.float64)
+    backward /= max(float(np.linalg.norm(backward)), 1e-12)
     radius = max(float(np.linalg.norm(ext)) / 2.0, 1e-3)
-    dist = radius * 1.55 / math.tan(math.radians(30.0))
+    # The viewer's camera: fov 60, the same distance, the same zoom.
+    dist = radius * 1.25 / math.tan(math.radians(30.0)) / zoom
     eye = ctr + backward * dist
     up = np.array([0.0, 0.0, 1.0])
     right = np.cross(up, backward)
@@ -2457,7 +2487,8 @@ def _projector(ext, box):
         for iy in (0.0, float(ext[1])):
             for ix in (0.0, float(ext[0])):
                 rel = np.array([ix, iy, iz], dtype=np.float64) - eye
-                samples.append((float(np.dot(rel, right)), float(np.dot(rel, cam_up))))
+                depth = max(-float(np.dot(rel, backward)), 1e-6)
+                samples.append((float(np.dot(rel, right)) / depth, float(np.dot(rel, cam_up)) / depth))
     span = max(
         max(point[0] for point in samples) - min(point[0] for point in samples),
         max(point[1] for point in samples) - min(point[1] for point in samples),
@@ -2474,8 +2505,8 @@ def _projector(ext, box):
         depth = -cam_z
         if depth < 1e-6:
             return None
-        sx = box[0] + box[2] / 2.0 + (cam_x / half) * limit
-        sy = box[1] + box[3] / 2.0 - (cam_y / half) * limit
+        sx = box[0] + box[2] / 2.0 + (cam_x / depth / half) * limit
+        sy = box[1] + box[3] / 2.0 - (cam_y / depth / half) * limit
         return sx, sy, depth
 
     return project
@@ -3060,7 +3091,21 @@ def _svg_text(
         ),
         f"<metadata>plot3 {escape(__version__)}</metadata>",
     ]
+    clips = 0
     for cmd in commands:
+        if cmd[0] == "clip":
+            # Marks drawn until the matching "unclip" stay inside this box.
+            clips += 1
+            _op, x, y, w, h = cmd
+            parts.append(
+                f'<clipPath id="plot3clip{clips}"><rect x="{_num(x)}" y="{_num(y)}" '
+                f'width="{_num(max(w, 0))}" height="{_num(max(h, 0))}"/></clipPath>'
+                f'<g clip-path="url(#plot3clip{clips})">'
+            )
+            continue
+        if cmd[0] == "unclip":
+            parts.append("</g>")
+            continue
         if wide and cmd[0] == "text" and _needs_wide_font(str(cmd[3])):
             parts.append(_svg_cmd(cmd, wide))
         else:
@@ -3228,7 +3273,20 @@ def _num(value) -> str:
 
 def _raster(commands, width: int, height: int) -> np.ndarray:
     image = np.zeros((height, width, 3), dtype=np.uint8)
+    saved: list = []
     for cmd in commands:
+        if cmd[0] == "clip":
+            saved.append((image.copy(), cmd[1:]))
+            continue
+        if cmd[0] == "unclip":
+            if saved:
+                before, (x, y, w, h) = saved.pop()
+                keep = np.ones(image.shape[:2], dtype=bool)
+                x0, y0 = max(0, int(math.floor(x))), max(0, int(math.floor(y)))
+                x1, y1 = min(width, int(math.ceil(x + w))), min(height, int(math.ceil(y + h)))
+                keep[y0:y1, x0:x1] = False
+                image[keep] = before[keep]
+            continue
         _paint(image, cmd)
     return image
 

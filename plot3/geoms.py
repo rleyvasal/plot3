@@ -99,6 +99,10 @@ class aes(dict):
         xend=None,
         yend=None,
         sample=None,
+        width=None,
+        height=None,
+        length=None,
+        angle=None,
     ):
         super().__init__()
         colour_value = color if color is not None else colour
@@ -116,7 +120,11 @@ class aes(dict):
                      ("xmax", xmax),
                      ("xend", xend),
                      ("yend", yend),
-                     ("sample", sample)):
+                     ("sample", sample),
+                     ("width", width),
+                     ("height", height),
+                     ("length", length),
+                     ("angle", angle)):
             if v is not None:
                 self[k] = _as_column_name(v)
 
@@ -176,6 +184,23 @@ class geom_point3d(geom_point):
         super().__init__(mapping, size=size, **kw)
 
 
+class geom_box3d(_Geom):
+    """Wireframe 3D boxes, one per row: detections in a lidar scene.
+
+    ``aes(x=, y=, z=)`` is the box centre, ``length`` its size along its
+    heading, ``width`` across it, ``height`` up z, and ``angle`` the heading
+    (yaw) in radians about z, as nuScenes and KITTI store boxes.
+    ``colour`` names a class column: each class gets its own colour and a
+    legend entry, separate from a point cloud coloured by height.
+    """
+
+    kind = "box3d"
+
+    def __init__(self, mapping=None, *, linewidth=1.5, **kw):
+        super().__init__(mapping, **kw)
+        self.linewidth = float(linewidth)
+
+
 class coord_3d:
     """3D coordinate system options for orbit-view figures.
 
@@ -191,6 +216,13 @@ class coord_3d:
     max_points:
         If set, deterministically stride-subsample rows when building so huge
         clouds stay interactive in HTML.
+    elev, azim:
+        Where the camera starts, in degrees, as matplotlib's ``view_init``:
+        ``elev`` above the x-y plane, ``azim`` around z from the +x axis.
+        The default is about ``elev=26, azim=-57``. ``azim=180, elev=25``
+        looks along +x from behind, the chase view of a driving scene.
+    zoom:
+        Above 1 moves the camera closer (2 is twice as close).
     """
 
     def __init__(
@@ -199,6 +231,9 @@ class coord_3d:
         aspect: str = "auto",
         size_mode: str = "scene",
         max_points: int | None = None,
+        elev: float | None = None,
+        azim: float | None = None,
+        zoom: float = 1.0,
     ):
         if aspect not in {"auto", "data", "equal"}:
             raise ValueError("aspect must be 'auto', 'data', or 'equal'")
@@ -209,13 +244,39 @@ class coord_3d:
         self.aspect = aspect
         self.size_mode = size_mode
         self.max_points = None if max_points is None else int(max_points)
+        if elev is not None and not -90.0 <= float(elev) <= 90.0:
+            raise ValueError("coord_3d(elev=) is an angle from -90 to 90 degrees")
+        if not float(zoom) > 0:
+            raise ValueError("coord_3d(zoom=) must be positive")
+        self.elev = None if elev is None else float(elev)
+        self.azim = None if azim is None else float(azim)
+        self.zoom = float(zoom)
 
     def to_spec(self) -> dict:
-        return {
+        spec = {
             "aspect": self.aspect,
             "sizeMode": self.size_mode,
             "maxPoints": self.max_points,
         }
+        if self.elev is not None or self.azim is not None or self.zoom != 1.0:
+            spec["camera"] = camera_spec(self.elev, self.azim, self.zoom)
+        return spec
+
+
+# The viewer's opening direction, as elevation and azimuth in degrees.
+_DEFAULT_ELEV = math.degrees(math.asin(0.5 / math.sqrt(0.55**2 + 0.85**2 + 0.5**2)))
+_DEFAULT_AZIM = math.degrees(math.atan2(-0.85, 0.55))
+
+
+def camera_spec(elev=None, azim=None, zoom=1.0) -> dict:
+    """Unit vector from the box centre toward the camera, and the zoom."""
+    # Straight down leaves no "up" for the orbit; stop just short of it.
+    e = math.radians(max(-89.5, min(89.5, _DEFAULT_ELEV if elev is None else float(elev))))
+    a = math.radians(_DEFAULT_AZIM if azim is None else float(azim))
+    return {
+        "dir": [math.cos(e) * math.cos(a), math.cos(e) * math.sin(a), math.sin(e)],
+        "zoom": float(zoom),
+    }
 
 
 class coord_equal:
@@ -1711,6 +1772,13 @@ def theme_classic(base_size=None, base_family=None) -> _Theme:
 def theme_minimal(base_size=None, base_family=None) -> _Theme:
     """White page, light grid, and no panel box."""
     return _theme("minimal", base_size, base_family)
+
+
+def theme_lidar(base_size=None, base_family=None) -> _Theme:
+    """A driving-scene look: black page, no box, grid, or ticks, points
+    coloured by height from green through cyan to violet, and bright class
+    colours for ``geom_box3d``."""
+    return _theme("lidar", base_size, base_family)
 
 
 class _ThemePatch:

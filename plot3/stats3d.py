@@ -380,3 +380,81 @@ def isosurface_levels(
         }
     )
     return vertices, F.astype(np.int32), used
+
+
+# Box corner order: bottom loop, then top loop (each closed), then the four
+# uprights, as six polylines.
+_BOX_LOOP = [(-1, -1), (1, -1), (1, 1), (-1, 1), (-1, -1)]
+
+
+def box3d_layers(geom, mapping: dict, data) -> list:
+    """geom_box3d rows as wireframe line layers, one layer per class.
+
+    One colour scale serves the whole figure, and a lidar scene colours its
+    points by height. So each box class becomes its own fixed-colour layer
+    with a legend entry, and the height scale stays free for the points.
+    """
+    from plot3.scales import ordered_levels
+    from plot3.stat2d import _frame, _layer
+    from plot3.table import has_column
+    from plot3.themes import _THEMES
+
+    need = ["x", "y", "z", "length", "width", "height"]
+    missing = [k for k in need if not mapping.get(k)]
+    if missing:
+        raise ValueError(
+            "geom_box3d() requires aes(x=, y=, z=, length=, width=, height=) "
+            f"(missing {', '.join(missing)}); angle= is the heading in radians"
+        )
+    colour = mapping.get("color")
+    colour = colour if colour and has_column(data, colour) else None
+    angle = mapping.get("angle")
+    cols = [mapping[k] for k in need] + ([angle] if angle else []) + ([colour] if colour else [])
+    frame = _frame(data, cols)
+    values = {k: pd.to_numeric(frame[mapping[k]], errors="coerce").to_numpy(np.float64) for k in need}
+    yaw = (
+        pd.to_numeric(frame[angle], errors="coerce").to_numpy(np.float64)
+        if angle else np.zeros(len(frame))
+    )
+    keys = frame[colour].astype(str).to_numpy() if colour else np.full(len(frame), "")
+    levels = ordered_levels(list(dict.fromkeys(keys.tolist()))) if colour else [""]
+    palette = getattr(geom, "_palette", None) or _THEMES["dark"]["cat"]
+    layers = []
+    for index, level in enumerate(levels):
+        xs, ys, zs, starts = [], [], [], []
+        for i in np.flatnonzero(keys == level):
+            cx, cy, cz, ln, wd, ht = (values[k][i] for k in need)
+            a = yaw[i] if np.isfinite(yaw[i]) else 0.0
+            if not all(np.isfinite([cx, cy, cz, ln, wd, ht])):
+                continue
+            c, s = np.cos(a), np.sin(a)
+
+            def corner(u, v, w):
+                dx, dy = u * ln / 2.0, v * wd / 2.0
+                return cx + c * dx - s * dy, cy + s * dx + c * dy, cz + w * ht / 2.0
+
+            pieces = [
+                [corner(u, v, -1) for u, v in _BOX_LOOP],
+                [corner(u, v, 1) for u, v in _BOX_LOOP],
+            ] + [[corner(u, v, -1), corner(u, v, 1)] for u, v in _BOX_LOOP[:4]]
+            for piece in pieces:
+                starts.append([len(xs), len(piece)])
+                for px, py, pz in piece:
+                    xs.append(px)
+                    ys.append(py)
+                    zs.append(pz)
+        if not starts:
+            continue
+        out_frame = pd.DataFrame({"x": xs, "y": ys, "z": zs})
+        out = _layer("line", out_frame, {"x": "x", "y": "y", "z": "z"}, geom,
+                     _groups=starts, linewidth=float(getattr(geom, "linewidth", 1.5)))
+        if colour:
+            out.const_color = geom.const_color or palette[index % len(palette)]
+            out._legend_label = level
+            out._entries_title = str(colour)
+        else:
+            out.const_color = geom.const_color or "#ffffff"
+        layers.append(out)
+    if not layers:
+        raise ValueError("geom_box3d() found no complete boxes (missing sizes or centres)")
+    return layers
