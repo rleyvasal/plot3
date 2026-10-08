@@ -845,9 +845,12 @@ def _default_3d_point_size(n: int, *, size_mode: str = "scene") -> float:
 
 
 def _axis_label(g, base_map: dict, resolved, axis: str, is3d: bool) -> str:
-    """Axis title: labs, then the ggplot mapping, then a function's variable."""
-    if g.labs.get(axis):
-        return g.labs[axis]
+    """Axis title: labs, then the ggplot mapping, then a function's variable.
+
+    ``labs(x="")`` removes the title (ggplot2's ``labs(x = NULL)``).
+    """
+    if axis in g.labs and g.labs[axis] is not None:
+        return str(g.labs[axis])
     mapped = base_map.get(axis)
     if mapped:
         return mapped
@@ -1160,6 +1163,27 @@ def _legend_position_spec(value):
         return [float(value[0]), float(value[1])]
     return value
 
+
+
+def _forced_levels(g, ccats) -> list:
+    """Colour levels shared by every facet panel, so a group keeps its colour."""
+    forced = getattr(g, "_force_color_levels", None)
+    if not forced:
+        return list(ccats)
+    return list(dict.fromkeys([str(level) for level in forced] + list(ccats)))
+
+
+def _theme_opts(g) -> dict | None:
+    """theme() settings both renderers read (grid, label angle, title hjust)."""
+    options = getattr(g, "theme_options", None) or {}
+    out = {}
+    if "panel_grid" in options:
+        out["panelGrid"] = bool(options["panel_grid"])
+    if "axis_text_x_angle" in options:
+        out["xAngle"] = float(options["axis_text_x_angle"])
+    if "plot_title_hjust" in options:
+        out["titleHjust"] = float(options["plot_title_hjust"])
+    return out or None
 
 
 def _value_part(full: str, base: str, sep: str) -> str | None:
@@ -1608,7 +1632,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                     "palette slots — fold rare categories or map a number"
                 )
             if color_scale is None:
-                color_scale = ["cat", list(ccats)]
+                color_scale = ["cat", _forced_levels(g, ccats)]
             else:
                 if color_scale[0] != "cat":
                     raise ValueError("layers disagree on colour scale type")
@@ -1746,7 +1770,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                             "palette slots — fold rare categories or map a number"
                         )
                     if color_scale is None:
-                        color_scale = ["cat", list(ccats)]
+                        color_scale = ["cat", _forced_levels(g, ccats)]
                     else:
                         color_scale[1] = list(
                             dict.fromkeys(color_scale[1] + ccats)
@@ -1923,7 +1947,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                         "palette slots — fold rare categories or map a number"
                     )
                 if color_scale is None:
-                    color_scale = ["cat", list(ccats)]
+                    color_scale = ["cat", _forced_levels(g, ccats)]
                 else:
                     color_scale[1] = list(dict.fromkeys(color_scale[1] + ccats))
                 vals["color"] = ("cat", cv, ccats)
@@ -2633,15 +2657,24 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             "x": _take("x", _axis_label(g, base_map, resolved, "x", is3d)),
             "y": _take("y", _axis_label(g, base_map, resolved, "y", is3d)),
             "z": _take("z", _axis_label(g, base_map, resolved, "z", is3d)) if is3d else "",
-            "color": _legend_title_label(
-                _take(
-                    "color",
-                    g.labs.get("color", base_map.get("color") or base_map.get("fill", "")),
-                ),
-                legend_title,
-                labs_math,
+            "color": (
+                _legend_title_label(
+                    _take(
+                        "color",
+                        g.labs.get("color", base_map.get("color") or base_map.get("fill", "")),
+                    ),
+                    legend_title,
+                    labs_math,
+                )
+                if (getattr(g, "theme_options", None) or {}).get("legend_title", True)
+                else ""
             ),
+            "subtitle": _take("subtitle", g.labs.get("subtitle")),
+            "caption": _take("caption", g.labs.get("caption")),
+            "tag": _take("tag", g.labs.get("tag")),
         },
+        "themeOpts": _theme_opts(g),
+        "facetChild": bool(getattr(g, "_facet_child", False)) or None,
         "labsMath": labs_math or None,
         "refs": _ref_specs(ref_layers, scales, theme) or None,
         "shapeLegend": shape_legend,
@@ -2654,7 +2687,10 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         "scales": {a: scales[a].spec() for a in axes},
         "color": cspec,
         "legend": legend,
-        "legendPosition": _legend_position_spec(getattr(g, "legend_position", None)),
+        "legendPosition": (
+            "none" if getattr(g, "_facet_child", False)
+            else _legend_position_spec(getattr(g, "legend_position", None))
+        ),
         "sizeLegend": size_legend,
         "transition": transition_meta,
         "slider": slider_meta,
@@ -2678,6 +2714,133 @@ def _panel_grid(n: int, ncol: int | None, nrow: int | None) -> tuple[int, int]:
         return int(math.ceil(n / nrow)), int(nrow)
     ncol = int(math.ceil(math.sqrt(n)))
     return ncol, int(math.ceil(n / ncol))
+
+
+def _level_text(level) -> str:
+    try:
+        if level is None or bool(pd.isna(level)):
+            return "NA"
+    except (TypeError, ValueError):
+        pass
+    return str(level)
+
+
+def _subset(data, column, level):
+    from plot3.table import filter_equal
+
+    if column is None:
+        return data
+    return filter_equal(data, column, None if _level_text(level) == "NA" else level)
+
+
+def _facet_colour_levels(g: ggplot) -> list[str] | None:
+    """Categorical colour/fill levels of the whole dataset, in scale order."""
+    candidates = [g.mapping.get("color"), g.mapping.get("fill")]
+    for layer in g.layers:
+        mapping = getattr(layer, "mapping", None) or {}
+        candidates += [mapping.get("color"), mapping.get("fill")]
+    for column in candidates:
+        if column and has_column(g.data, column):
+            kind, _values, cats = col_values(materialize_columns(g.data, [column])[column])
+            if kind == "cat":
+                return list(cats)
+    return None
+
+
+def _facet_legend_html(spec: dict, theme: dict) -> str:
+    """One colour legend for a faceted HTML figure."""
+    import html as _htmlesc
+
+    entries = spec.get("legend") or []
+    if not entries:
+        return ""
+    esc = _htmlesc.escape
+    title = str((spec.get("labs") or {}).get("color") or "")
+    rows = "".join(
+        f"<div><span class='sw' style='background:{esc(str(e.get('color')))}'></span>"
+        f"{esc(str(e.get('label')))}</div>"
+        for e in entries
+    )
+    head = f"<b style='color:{theme['ink']}'>{esc(title)}</b>" if title else ""
+    return f"<div id='flegend'>{head}{rows}</div>"
+
+
+def facet_cells(g: ggplot) -> dict:
+    """Panels of a faceted figure, for the HTML viewer and for ggsave.
+
+    ``cells`` lists ``{"row", "col", "fig", "strip"}``; ``fig`` is None for
+    an empty facet_grid combination. facet_wrap puts each label on its own
+    panel (``strip``); facet_grid uses ``col_strips`` above the top row and
+    ``row_strips`` to the right, as in ggplot2.
+    """
+    from plot3.geoms import facet_grid as _facet_grid
+
+    facet = g.facet
+    if g.data is None:
+        raise ValueError("ggplot has no data")
+    force = _global_numeric_domains(g) if facet.scales == "fixed" else {}
+    colour_levels = _facet_colour_levels(g)
+
+    def child(panel):
+        # Panels draw only data; the figure draws title, legend, axis titles.
+        panel._facet_child = True
+        if colour_levels:
+            panel._force_color_levels = colour_levels
+        if force:
+            panel._force_scales = force
+        return panel
+    header = {
+        key: g.labs.get(key) for key in ("title", "subtitle", "caption", "tag") if g.labs.get(key)
+    }
+    cells: list[dict] = []
+    if not isinstance(facet, _facet_grid):
+        column = facet.variable
+        if not has_column(g.data, column):
+            raise KeyError(f"facet column not in DataFrame: {column!r}")
+        levels = unique_levels(g.data, column)
+        if not levels:
+            raise ValueError("facet_wrap() found no panel levels")
+        ncol, nrow = _panel_grid(len(levels), facet.ncol, facet.nrow)
+        for index, level in enumerate(levels):
+            label = _level_text(level)
+            panel = child(_clone_ggplot_with_data(g, _subset(g.data, column, level)))
+            panel.labs = {
+                k: v for k, v in panel.labs.items()
+                if k not in {"title", "subtitle", "caption", "tag"}
+            }
+            row, col = divmod(index, ncol)
+            cells.append({"row": row, "col": col, "fig": panel, "strip": label})
+        return {"ncol": ncol, "nrow": nrow, "cells": cells, "col_strips": None,
+                "row_strips": None, "header": header, "kind": "wrap"}
+
+    for column in (facet.rows, facet.cols):
+        if column is not None and not has_column(g.data, column):
+            raise KeyError(f"facet column not in DataFrame: {column!r}")
+    row_levels = unique_levels(g.data, facet.rows) if facet.rows else [None]
+    col_levels = unique_levels(g.data, facet.cols) if facet.cols else [None]
+    nrow, ncol = len(row_levels), len(col_levels)
+    for r, row_level in enumerate(row_levels):
+        rows_data = _subset(g.data, facet.rows, row_level)
+        for c, col_level in enumerate(col_levels):
+            piece = _subset(rows_data, facet.cols, col_level)
+            if n_rows(piece) == 0:
+                cells.append({"row": r, "col": c, "fig": None, "strip": None})
+                continue
+            panel = child(_clone_ggplot_with_data(g, piece))
+            panel.labs = {
+                k: v for k, v in panel.labs.items()
+                if k not in {"title", "subtitle", "caption", "tag"}
+            }
+            cells.append({"row": r, "col": c, "fig": panel, "strip": None})
+    return {
+        "ncol": ncol,
+        "nrow": nrow,
+        "cells": cells,
+        "col_strips": [_level_text(v) for v in col_levels] if facet.cols else None,
+        "row_strips": [_level_text(v) for v in row_levels] if facet.rows else None,
+        "header": header,
+        "kind": "grid",
+    }
 
 
 def _clone_ggplot_with_data(g: ggplot, data) -> ggplot:
@@ -2745,89 +2908,101 @@ def _global_numeric_domains(g: ggplot) -> dict[str, tuple[float, float]]:
 
 
 def _build_doc_faceted(g: ggplot, facet) -> str:
-    """Render facet_wrap as a CSS grid of independent panel documents."""
+    """facet_wrap / facet_grid as a CSS grid of independent panel documents."""
     import html as _htmlesc
 
-    if g.data is None:
-        raise ValueError("ggplot has no data")
-    col = facet.variable
-    if not has_column(g.data, col):
-        raise KeyError(f"facet column not in DataFrame: {col!r}")
-
-    levels = unique_levels(g.data, col)
-
-    if not levels:
-        raise ValueError("facet_wrap() found no panel levels")
-
-    ncol, nrow = _panel_grid(len(levels), facet.ncol, facet.nrow)
+    layout = facet_cells(g)
+    ncol, nrow = layout["ncol"], layout["nrow"]
     theme = THEMES[g.theme_name]
-    force_scales = (
-        _global_numeric_domains(g) if facet.scales == "fixed" else {}
-    )
+    col_strips = layout.get("col_strips")
+    row_strips = layout.get("row_strips")
+    by_pos = {(c["row"], c["col"]): c for c in layout["cells"]}
+    first = next(c["fig"] for c in layout["cells"] if c["fig"] is not None)
+    first_spec, _pairs = build_spec(first)
+    shared_x = str((first_spec.get("labs") or {}).get("x") or "")
+    shared_y = str((first_spec.get("labs") or {}).get("y") or "")
+    legend_html = _facet_legend_html(first_spec, theme)
     cells: list[str] = []
     total_kb = 0
-    for level in levels:
-        is_na = level is None or (isinstance(level, float) and np.isnan(level))
-        try:
-            is_na = is_na or bool(pd.isna(level))
-        except (TypeError, ValueError):
-            pass
-        if is_na:
-            panel_data = filter_equal(g.data, col, None)
-            label = "NA"
-        else:
-            panel_data = filter_equal(g.data, col, level)
-            label = str(level)
-        panel = _clone_ggplot_with_data(g, panel_data)
-        # Surface facet level in the panel title.
-        base_title = panel.labs.get("title", "")
-        panel.labs = dict(panel.labs)
-        panel.labs["title"] = (
-            f"{base_title} — {label}" if base_title else label
-        )
-        if force_scales:
-            panel._force_scales = force_scales
-        try:
-            panel_html = build_doc(panel)
-        except Exception as exc:
-            panel_html = (
-                "<!doctype html><html><body style='font:12px system-ui;"
-                f"color:#888;padding:12px'>panel { _htmlesc.escape(label) }: "
-                f"{_htmlesc.escape(str(exc))}</body></html>"
+    count = 0
+    esc = _htmlesc.escape
+    # facet_grid: a strip row above the panels and a strip column to their right.
+    if col_strips:
+        cells += [f"<div class='cstrip'>{esc(t)}</div>" for t in col_strips]
+        if row_strips:
+            cells.append("<div></div>")
+    for row in range(nrow):
+        for col in range(ncol):
+            cell = by_pos.get((row, col))
+            if cell is None or cell["fig"] is None:
+                cells.append("<div class='empty'></div>")
+                continue
+            label = cell.get("strip")
+            try:
+                panel_html = build_doc(cell["fig"])
+            except Exception as exc:
+                panel_html = (
+                    "<!doctype html><html><body style='font:12px system-ui;"
+                    f"color:#888;padding:12px'>panel {esc(str(label or ''))}: "
+                    f"{esc(str(exc))}</body></html>"
+                )
+            total_kb += len(panel_html) // 1024
+            count += 1
+            strip = f"<div class='plab'>{esc(label)}</div>" if label else ""
+            cells.append(
+                "<div class='panel'>" + strip
+                + f"<iframe srcdoc=\"{esc(panel_html, quote=True)}\" title=\"panel\"></iframe></div>"
             )
-        total_kb += len(panel_html) // 1024
-        cells.append(
-            "<div class='panel'>"
-            f"<div class='plab'>{_htmlesc.escape(label)}</div>"
-            f"<iframe srcdoc=\"{_htmlesc.escape(panel_html, quote=True)}\" "
-            "title=\"panel\"></iframe></div>"
-        )
+        if row_strips:
+            cells.append(f"<div class='rstrip'><span>{esc(row_strips[row])}</span></div>")
 
-    raw_title = str(g.labs.get("title", "") or "")
-    if "$" in raw_title:
-        raw_title, _segments = split_math(raw_title)
-    title = _htmlesc.escape(raw_title)
+    header = layout.get("header") or {}
+    def text(key: str) -> str:
+        raw = str(header.get(key, "") or "")
+        if "$" in raw:
+            raw, _segments = split_math(raw)
+        return esc(raw)
+    columns = f"repeat({ncol},minmax(0,1fr))" + (" 26px" if row_strips else "")
+    rows = ("24px " if col_strips else "") + f"repeat({nrow},minmax(0,1fr))"
+    tag = f"<b style='margin-right:8px'>{text('tag')}</b>" if header.get("tag") else ""
+    subtitle = f"<div id='fsub'>{text('subtitle')}</div>" if header.get("subtitle") else ""
+    caption = f"<div id='fcap'>{text('caption')}</div>" if header.get("caption") else ""
     doc = f"""<!doctype html>
 <html><head><meta charset="utf-8"><style>
 html,body{{margin:0;height:100%;background:{theme["surface"]};color:{theme["ink"]};
   font:12px system-ui,-apple-system,"Segoe UI",sans-serif}}
 #wrap{{box-sizing:border-box;height:100%;padding:8px;display:flex;flex-direction:column}}
-#ftitle{{font-size:14px;font-weight:600;margin:0 4px 8px}}
+#ftitle{{font-size:14px;font-weight:600;margin:0 4px 2px}}
+#fsub{{font-size:12px;color:{theme["ink2"]};margin:0 4px 6px}}
+#fcap{{font-size:11px;color:{theme["muted"]};text-align:right;margin:4px 4px 0}}
+#body{{flex:1;min-height:0;display:flex;gap:6px}}
+#main{{flex:1;min-width:0;display:flex;flex-direction:column}}
+#ytitle{{width:16px;display:flex;align-items:center;justify-content:center;color:{theme["ink2"]}}}
+#ytitle span{{writing-mode:vertical-rl;transform:rotate(180deg)}}
+#xtitle{{text-align:center;color:{theme["ink2"]};padding-top:4px}}
+#flegend{{align-self:flex-start;margin-top:24px;padding:6px 9px;border:1px solid {theme["grid"]};
+  border-radius:6px;font-size:11px;line-height:1.7;color:{theme["ink2"]}}}
+#flegend .sw{{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px}}
 #grid{{flex:1;min-height:0;display:grid;gap:8px;
-  grid-template-columns:repeat({ncol},minmax(0,1fr));
-  grid-template-rows:repeat({nrow},minmax(0,1fr))}}
+  grid-template-columns:{columns};grid-template-rows:{rows}}}
 .panel{{min-height:0;min-width:0;display:flex;flex-direction:column;
   border:1px solid {theme["axis"]};border-radius:6px;overflow:hidden;
   background:{theme["surface"]}}}
 .plab{{padding:4px 8px;font-size:11px;color:{theme["ink2"]};
   border-bottom:1px solid {theme["grid"]}}}
+.cstrip,.rstrip{{background:{theme["grid"]};color:{theme["ink2"]};font-size:11px;
+  font-weight:600;display:flex;align-items:center;justify-content:center;border-radius:4px}}
+.rstrip span{{writing-mode:vertical-rl}}
 .panel iframe{{flex:1;width:100%;border:0;background:{theme["surface"]}}}
 </style></head><body><div id="wrap">
-<div id="ftitle">{title}</div>
-<div id="grid">{"".join(cells)}</div>
+<div id="ftitle">{tag}{text("title")}</div>{subtitle}
+<div id="body"><div id="ytitle"><span>{esc(shared_y)}</span></div>
+<div id="main"><div id="grid">{"".join(cells)}</div><div id="xtitle">{esc(shared_x)}</div></div>
+{legend_html}</div>{caption}
 </div></body></html>"""
+    kind = "facet_grid" if layout.get("kind") == "grid" else "facet_wrap"
     print(
-        f"plot3: facet_wrap {len(levels)} panel(s) in {nrow}x{ncol} "
+        f"plot3: {kind} {count} panel(s) in {nrow}x{ncol} "
         f"~{total_kb:,} KB portable HTML"
     )
     if total_kb > 1500:

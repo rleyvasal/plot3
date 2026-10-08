@@ -11,6 +11,7 @@ from plot3.geoms import (
     coord_equal,
     coord_polar,
     derivative,
+    facet_grid,
     facet_wrap,
     geom_bar,
     geom_boxplot,
@@ -60,6 +61,7 @@ from plot3.geoms import (
     transition_states,
     transition_time,
 )
+from plot3.compose import plot_annotation, plot_layout
 from plot3.ggplot import autohide, ggsave, ggplot  # show via ggplot.show
 from plot3.io import read_bin
 from plot3.jupyter import (
@@ -123,6 +125,7 @@ __all__ = [
     "tangent",
     "derivative",
     "facet_wrap",
+    "facet_grid",
     "coord_3d",
     "coord_equal",
     "coord_polar",
@@ -143,6 +146,8 @@ __all__ = [
     "theme_light",
     "theme_minimal",
     "ggsave",
+    "plot_layout",
+    "plot_annotation",
     "read_bin",
     "autohide",
     "enable_r_style",

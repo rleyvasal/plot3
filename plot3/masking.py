@@ -45,6 +45,7 @@ _SELECTOR_FUNCS = frozenset(
     {
         "aes",
         "facet_wrap",
+        "facet_grid",
         "transition_time",
         "transition_states",
         "slider",
@@ -318,9 +319,9 @@ class Plot3MaskTransformer(ast.NodeTransformer):
             ]
             return node
 
-        if name == "facet_wrap":
-            # facets (positional or facets=) is a column selector; other kwargs
-            # (ncol, nrow, scales) stay as-is.
+        if name in {"facet_wrap", "facet_grid"}:
+            # facets / rows / cols are column selectors; ncol, nrow, and
+            # scales stay as-is.
             node.args = [self._mask_selector(a) for a in node.args]
             new_kws: list[ast.keyword] = []
             for kw in node.keywords:

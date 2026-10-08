@@ -526,96 +526,186 @@ def _figure_commands(
     notes: bool = True,
     dropped: list[str] | None = None,
 ) -> list:
-    panels, grid, parent_title = _panels(fig)
+    from plot3.compose import Composition
+
+    if isinstance(fig, Composition):
+        return _composition_commands(fig, width, height, base_pt, notes=notes, dropped=dropped)
+    panels, layout = _panels(fig)
     if not notes:
         kept = []
-        for spec, blobs in panels:
+        for item in panels:
+            if item is None:
+                kept.append(None)
+                continue
+            spec, blobs = item
             if dropped is not None:
                 dropped.extend(str(n) for n in spec.get("notes") or [])
             kept.append((dict(spec, notes=[]), blobs))
         panels = kept
-    theme = panels[0][0].get("theme") or {}
+    first = next(item for item in panels if item is not None)
+    theme = first[0].get("theme") or {}
     surface = theme.get("surface") or "#0b1020"
-    ink = theme.get("ink") or "#ffffff"
     commands: list = [("rect", 0, 0, width, height, surface, None, 0, 1.0)]
-    if grid is None:
+    if layout is None:
         spec, blobs = panels[0]
         _draw_spec(spec, blobs, 0, 0, width, height, commands, border=False, base_pt=base_pt)
         return commands
-
-    ncol, nrow = grid
-    pad = 8
-    title_h = 0
-    if parent_title:
-        parent_title = _with_frame(parent_title, _static_label(panels[0][0]))
-        title_size = _font_sizes(width, base_pt)[1]
-        title_h = title_size + 12
-        commands.append((
-            "text", 14, 6, parent_title, title_size, ink, "start", "top", 0, 600,
-        ))
-    cell_w = (width - pad * (ncol + 1)) / ncol
-    cell_h = (height - title_h - pad * (nrow + 1)) / nrow
-    for index, (spec, blobs) in enumerate(panels):
-        row, col = divmod(index, ncol)
-        x = pad + col * (cell_w + pad)
-        y = title_h + pad + row * (cell_h + pad)
-        _draw_spec(
-            spec, blobs, x, y, cell_w, cell_h, commands, border=True, base_pt=base_pt,
-        )
+    _draw_facets(panels, layout, first[0], theme, width, height, base_pt, commands)
     return commands
 
 
+def _composition_commands(fig, width, height, base_pt, *, notes, dropped) -> list:
+    """``p1 | p2`` and ``p1 / p2``: each plot in its rectangle, one type size."""
+    from plot3.compose import _first_theme
+
+    fig = fig.tagged()
+    theme = _first_theme(fig)
+    commands: list = [("rect", 0, 0, width, height, theme["surface"], None, 0, 1.0)]
+    fonts = _font_sizes(width, base_pt)
+    if base_pt is None:
+        # The whole figure's type, so a narrow panel does not get smaller text.
+        base_pt = fonts[0] / 0.8 * 72.0 / _CSS_DPI
+    note = fig.annotation
+    header = {
+        key: str(getattr(note, key, "") or "")
+        for key in ("title", "subtitle", "caption")
+    }
+    head, foot = _draw_header_footer({}, header, fonts, theme, 0, 0, width, height, commands)
+    pad = 6.0
+    for plot, x, y, w, h in fig.rects(pad, head + pad, width - 2 * pad, height - head - foot - 2 * pad):
+        sub = _figure_commands(plot, w, h, base_pt, notes=notes, dropped=dropped)
+        commands.extend(_offset_commands(sub[1:], x, y))  # sub[0] is its page fill
+    return commands
+
+
+def _offset_commands(commands, dx: float, dy: float) -> list:
+    out = []
+    for cmd in commands:
+        op = cmd[0]
+        if op in {"rect", "circle", "text"}:
+            out.append((op, cmd[1] + dx, cmd[2] + dy, *cmd[3:]))
+        elif op == "line":
+            out.append((op, cmd[1] + dx, cmd[2] + dy, cmd[3] + dx, cmd[4] + dy, *cmd[5:]))
+        elif op in {"polyline", "polygon"}:
+            out.append((op, [(x + dx, y + dy) for x, y in cmd[1]], *cmd[2:]))
+        elif op == "polymask":
+            out.append((op, [[(x + dx, y + dy) for x, y in tri] for tri in cmd[1]], *cmd[2:]))
+        else:
+            out.append(cmd)
+    return out
+
+
+def _draw_facets(panels, layout, first_spec, theme, width, height, base_pt, commands) -> None:
+    """Panels in a grid with ggplot2's furniture: title rows, strips, one
+    x and one y title, and a single legend to the right."""
+    ncol, nrow = layout["ncol"], layout["nrow"]
+    fonts = _font_sizes(width, base_pt)
+    tick = fonts[0]
+    label = _static_label(first_spec)
+    header = {k: _with_frame(str(v), label) for k, v in (layout.get("header") or {}).items()}
+    for key in list(header):
+        if "$" in header[key]:
+            from plot3.mathtext import split_math
+
+            header[key], _segments = split_math(header[key])
+    head, foot = _draw_header_footer(
+        {"themeOpts": first_spec.get("themeOpts")}, header, fonts, theme,
+        0, 0, width, height, commands,
+    )
+    pad = 8.0
+    strip_bg = theme.get("grid") or "#1c2742"
+    ink2 = theme.get("ink2") or theme.get("ink") or "#ffffff"
+    raw_labs = first_spec.get("labs") or {}
+    x_title = _with_frame(raw_labs.get("x") or "", label)
+    y_title = _with_frame(raw_labs.get("y") or "", label)
+
+    # One legend for the figure, from the first panel (colour levels are
+    # shared, so every panel has the same keys).
+    legend_spec = dict(first_spec, legendPosition="right")
+    metrics = _legend_metrics(
+        legend_spec, theme, fonts, raw_labs.get("color") or "",
+        max_box=(width * 0.3, height - head - foot),
+    )
+    legend_w = float(metrics["w"]) + 12.0 if metrics else 0.0
+
+    col_strips = layout.get("col_strips")
+    row_strips = layout.get("row_strips")
+    wrap = layout.get("kind") != "grid"
+    strip = tick + 10.0
+    top_strip = strip if col_strips else 0.0
+    side_strip = strip if row_strips else 0.0
+    left_title = _line_height(tick) + 10.0 if y_title else 0.0
+    bottom_title = _line_height(tick) + 10.0 if x_title else 0.0
+    top = head + pad + top_strip
+    grid_w = width - left_title - legend_w - side_strip - pad * (ncol + 1)
+    grid_h = height - top - foot - bottom_title - pad * nrow
+    cell_w, cell_h = grid_w / ncol, grid_h / nrow
+
+    def origin(row, col):
+        return left_title + pad + col * (cell_w + pad), top + row * (cell_h + pad)
+
+    def strip_box(x, y, w, h, text, rotate=0):
+        commands.append(("rect", x, y, w, h, strip_bg, None, 0, 1.0))
+        commands.append(("text", x + w / 2, y + h / 2, text, tick, ink2, "middle", "middle", rotate, 600))
+
+    if col_strips:
+        for col, text in enumerate(col_strips):
+            x, _y = origin(0, col)
+            strip_box(x, top - top_strip, cell_w, top_strip - 2, text)
+    if row_strips:
+        sx = left_title + pad + ncol * (cell_w + pad) - pad + 2
+        for row, text in enumerate(row_strips):
+            _x, y = origin(row, 0)
+            strip_box(sx, y, side_strip - 2, cell_h, text, rotate=90)
+    for cell, item in zip(layout["cells"], panels):
+        if item is None:
+            continue
+        spec, blobs = item
+        x, y = origin(cell["row"], cell["col"])
+        h = cell_h
+        if wrap and cell.get("strip"):
+            strip_box(x, y, cell_w, strip - 2, cell["strip"])
+            y, h = y + strip, cell_h - strip
+        _draw_spec(spec, blobs, x, y, cell_w, h, commands, border=False, base_pt=base_pt)
+    grid_left = left_title + pad
+    grid_right = left_title + pad + ncol * (cell_w + pad) - pad
+    if x_title:
+        commands.append((
+            "text", (grid_left + grid_right) / 2, height - foot - bottom_title + 4,
+            x_title, tick, ink2, "middle", "top", 0, 400,
+        ))
+    if y_title:
+        commands.append((
+            "text", 4 + _line_height(tick) / 2, top + grid_h / 2 + pad * (nrow - 1) / 2,
+            y_title, tick, ink2, "middle", "middle", -90, 400,
+        ))
+    if metrics:
+        lx = width - legend_w + 4
+        _paint_legend(commands, (lx, top), metrics, theme, fonts)
+
 def _panels(fig):
+    """``(panels, layout)``: one panel and no layout, or facet cells.
+
+    A facet_grid cell with no rows is ``None`` and draws nothing.
+    """
     payload = getattr(fig, "_payload", None)
     if payload is not None:
-        return [(payload["spec"], payload.get("blobs") or {})], None, ""
+        return [(payload["spec"], payload.get("blobs") or {})], None
 
-    facet = getattr(fig, "facet", None)
-    if facet is None:
-        from plot3.build import build_spec
+    from plot3.build import build_spec, facet_cells
 
+    if getattr(fig, "facet", None) is None:
         spec, pairs = build_spec(fig)
-        return [(spec, dict(pairs))], None, ""
-
-    from plot3.build import (
-        _clone_ggplot_with_data,
-        _global_numeric_domains,
-        _panel_grid,
-        build_spec,
-    )
-    from plot3.mathtext import split_math
-    from plot3.table import filter_equal, has_column, unique_levels
-
-    if fig.data is None:
-        raise ValueError("ggplot has no data")
-    column = facet.variable
-    if not has_column(fig.data, column):
-        raise KeyError(f"facet column not in DataFrame: {column!r}")
-    levels = unique_levels(fig.data, column)
-    if not levels:
-        raise ValueError("facet_wrap() found no panel levels")
-    ncol, nrow = _panel_grid(len(levels), facet.ncol, facet.nrow)
-    force = _global_numeric_domains(fig) if facet.scales == "fixed" else {}
+        return [(spec, dict(pairs))], None
+    layout = facet_cells(fig)
     panels = []
-    for level in levels:
-        if _is_missing(level):
-            panel_data = filter_equal(fig.data, column, None)
-            label = "NA"
-        else:
-            panel_data = filter_equal(fig.data, column, level)
-            label = str(level)
-        panel = _clone_ggplot_with_data(fig, panel_data)
-        base = panel.labs.get("title", "")
-        panel.labs = dict(panel.labs)
-        panel.labs["title"] = f"{base} — {label}" if base else label
-        if force:
-            panel._force_scales = force
-        spec, pairs = build_spec(panel)
+    for cell in layout["cells"]:
+        if cell["fig"] is None:
+            panels.append(None)
+            continue
+        spec, pairs = build_spec(cell["fig"])
         panels.append((spec, dict(pairs)))
-    raw = str(fig.labs.get("title", "") or "")
-    if "$" in raw:
-        raw, _segments = split_math(raw)
-    return panels, (ncol, nrow), raw
+    return panels, layout
 
 
 def _is_missing(level) -> bool:
@@ -643,6 +733,11 @@ def _draw_spec(spec, blobs, x, y, w, h, commands, *, border: bool, base_pt: floa
     labs = _labs(spec)
     is3d = bool(spec.get("is3d"))
     fonts = _font_sizes(w, base_pt)
+    # Tag, title, subtitle above the panel and the caption below it take
+    # their own rows; the panel layout then sees a smaller cell, no title.
+    head, foot = _draw_header_footer(spec, labs, fonts, theme, x, y, w, h, commands)
+    y, h = y + head, max(8.0, h - head - foot)
+    labs = dict(labs, title="")
     position = _legend_position(spec)
     left = 16.0 if is3d else _y_gutter(spec, labs, fonts, w)
     # A right-hand key that cannot show its labels moves under the panel.
@@ -687,7 +782,82 @@ def _draw_spec(spec, blobs, x, y, w, h, commands, *, border: bool, base_pt: floa
 def _labs(spec) -> dict:
     label = _static_label(spec)
     raw = spec.get("labs") or {}
-    return {key: _with_frame(raw.get(key) or "", label) for key in ("title", "x", "y", "z", "color")}
+    keys = ("title", "x", "y", "z", "color", "subtitle", "caption", "tag")
+    out = {key: _with_frame(raw.get(key) or "", label) for key in keys}
+    if spec.get("facetChild"):
+        # The facet layout draws one x and one y title for the whole figure.
+        out["x"] = out["y"] = ""
+    return out
+
+
+def _thin_y_ticks(ticks, scale, height: float, tick: float):
+    """Every k-th tick when labels would sit closer than 1.6 lines apart."""
+    if len(ticks) < 3 or scale.get("kind") == "cat":
+        return ticks
+    span = float(scale.get("hi", 1.0)) - float(scale.get("lo", 0.0)) or 1.0
+    gap = abs(float(ticks[1][0]) - float(ticks[0][0])) / span * float(height)
+    step = 1
+    while gap * step < 1.6 * tick and step < len(ticks):
+        step += 1
+    return ticks[::step]
+
+
+def _x_label_drop(spec, tick: float) -> float:
+    """Extra height turned x labels need below the axis."""
+    angle = float((spec.get("themeOpts") or {}).get("xAngle", 0.0))
+    if angle <= 0:
+        return 0.0
+    labels = [str(lab) for _v, lab in _ticks((spec.get("scales") or {}).get("x") or {})]
+    longest = max((_text_width(lab, tick) for lab in labels), default=0)
+    rad = math.radians(angle)
+    return max(0.0, longest * math.sin(rad) + tick * math.cos(rad) - _line_height(tick))
+
+
+def _draw_header_footer(spec, labs, fonts, theme, x, y, w, h, commands) -> tuple[float, float]:
+    """Tag, title, and subtitle rows on top; caption row at the bottom.
+
+    Returns the heights used, so the panel can be laid out below them.
+    """
+    tick, title_size, note = fonts
+    ink = theme.get("ink") or "#ffffff"
+    ink2 = theme.get("ink2") or ink
+    muted = theme.get("muted") or "#898781"
+    opts = spec.get("themeOpts") or {}
+    hjust = float(opts.get("titleHjust", 0.0))
+    title, subtitle, tag = labs.get("title"), labs.get("subtitle"), labs.get("tag")
+    caption = labs.get("caption")
+    top = 6.0
+    tag_w = 0.0
+    if tag:
+        commands.append(("text", x + 10, y + top, tag, title_size, ink, "start", "top", 0, 700))
+        tag_w = _text_width(tag, title_size) + 10.0
+    left, right = x + 12 + tag_w, x + w - 12
+    anchor = "start" if hjust < 0.25 else "end" if hjust > 0.75 else "middle"
+    def at(width_hint: float) -> float:
+        if anchor == "start":
+            return left
+        if anchor == "end":
+            return right
+        return (left + right) / 2.0
+    used = 0.0
+    if title:
+        commands.append(("text", at(0), y + top, title, title_size, ink, anchor, "top", 0, 600))
+        used = top + title_size + 4
+    if subtitle:
+        sub_size = max(tick, title_size - 2)
+        start = used if used else top
+        commands.append(("text", at(0), y + start, subtitle, sub_size, ink2, anchor, "top", 0, 400))
+        used = start + sub_size + 4
+    if tag and not used:
+        used = top + title_size + 4
+    foot = 0.0
+    if caption:
+        size = max(8, note)
+        commands.append((
+            "text", x + w - 12, y + h - 6, caption, size, muted, "end", "alphabetic", 0, 400,
+        ))
+        foot = size + 8
+    return (used + 2 if used else 0.0), foot
 
 
 def _with_frame(text: str, label: str) -> str:
@@ -785,6 +955,7 @@ def _box_2d(spec, x, y, w, h, labs, fonts, extra_right=0.0, extra_bottom=0.0):
     left = _y_gutter(spec, labs, fonts, w)
     x_name = labs.get("x") or ""
     bottom = 6 + _line_height(tick) + (4 + _line_height(tick) if x_name else 0) + 8
+    bottom += _x_label_drop(spec, tick)
     note_lines = _note_lines(spec.get("notes") or [], note, w)
     if note_lines:
         bottom += len(note_lines) * _note_line_height(note) + 4
@@ -831,7 +1002,8 @@ def _draw_2d(
 
     # A grid painted in the page colour is invisible, and at print
     # resolution the antialiased edge still shows. Skip it.
-    if _rgb(grid) != _rgb(surface):
+    opts = spec.get("themeOpts") or {}
+    if opts.get("panelGrid", True) and _rgb(grid) != _rgb(surface):
         for value, _lab in _ticks(scales.get("x") or {}):
             u = _unit(scales.get("x") or {}, value)
             if u < window[0] - 0.02 or u > window[1] + 0.02:
@@ -857,11 +1029,20 @@ def _draw_2d(
         sx, _sy = px(u, 0)
         if sx < box[0] - 1 or sx > box[0] + box[2] + 1:
             continue
-        commands.append((
-            "text", sx, box[1] + box[3] + 4, str(lab), tick_size, muted,
-            "middle", "top", 0, 400,
-        ))
-    for value, lab in _ticks(scales.get("y") or {}):
+        angle = float(opts.get("xAngle", 0.0))
+        if angle > 0:
+            # Turned labels end at their tick, as ggplot2's hjust = 1.
+            commands.append((
+                "text", sx, box[1] + box[3] + 6, str(lab), tick_size, muted,
+                "end", "middle" if angle >= 60 else "top", -angle, 400,
+            ))
+        else:
+            commands.append((
+                "text", sx, box[1] + box[3] + 4, str(lab), tick_size, muted,
+                "middle", "top", 0, 400,
+            ))
+    y_ticks = _thin_y_ticks(_ticks(scales.get("y") or {}), scales.get("y") or {}, box[3], tick_size)
+    for value, lab in y_ticks:
         v = _unit(scales.get("y") or {}, value)
         if v < window[2] - 0.02 or v > window[3] + 0.02:
             continue
@@ -875,7 +1056,7 @@ def _draw_2d(
     if labs.get("x"):
         commands.append((
             "text", box[0] + box[2] / 2,
-            box[1] + box[3] + 6 + _line_height(tick_size),
+            box[1] + box[3] + 6 + _line_height(tick_size) + _x_label_drop(spec, tick_size),
             labs["x"], tick_size, ink2, "middle", "top", 0, 400,
         ))
     if labs.get("y"):

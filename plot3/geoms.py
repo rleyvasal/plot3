@@ -1269,16 +1269,53 @@ class facet_wrap:
         self.scales = scales
 
 
+class facet_grid:
+    """Panels in a grid: one row per level of ``rows``, one column per level
+    of ``cols`` (ggplot2 ``facet_grid``).
+
+    ``facet_grid(rows="sex", cols="day")`` or the formula ``"sex ~ day"``
+    (``". ~ day"`` for columns only). Column labels sit above the top row and
+    row labels to the right, as in ggplot2. ``scales="fixed"`` (default)
+    shares axes across panels; ``"free"`` lets each panel fit its data.
+    """
+
+    def __init__(self, facets: str | None = None, *, rows=None, cols=None, scales: str = "fixed"):
+        if facets is not None:
+            if not isinstance(facets, str) or "~" not in facets:
+                raise ValueError('facet_grid() takes "rows ~ cols", or rows= and cols=')
+            left, right = (part.strip() for part in facets.split("~", 1))
+            rows = rows if rows is not None else (left if left not in {"", "."} else None)
+            cols = cols if cols is not None else (right if right not in {"", "."} else None)
+        rows = _as_column_name(rows) if rows is not None else None
+        cols = _as_column_name(cols) if cols is not None else None
+        if rows is None and cols is None:
+            raise ValueError("facet_grid() needs rows=, cols=, or both")
+        if scales not in {"fixed", "free"}:
+            raise ValueError("scales must be 'fixed' or 'free'")
+        self.rows = rows
+        self.cols = cols
+        self.scales = scales
+
+
 class labs(dict):
-    """Titles. ``colour`` (or ``fill``) names the colour legend."""
+    """Titles. ``colour`` (or ``fill``) names the colour legend.
+
+    ``subtitle`` sits under the title, ``caption`` at the bottom right (a
+    data source, say), and ``tag`` at the top left ("A", "B" for the panels
+    of a figure).
+    """
 
     def __init__(self, title=None, x=None, y=None, z=None, color=None,
-                 colour=None, size=None, fill=None):
+                 colour=None, size=None, fill=None, subtitle=None,
+                 caption=None, tag=None):
         super().__init__()
         legend = color if color is not None else colour if colour is not None else fill
         for k, v in (("title", title), ("x", x), ("y", y), ("z", z),
                      ("color", legend),
-                     ("size", size)):
+                     ("size", size),
+                     ("subtitle", subtitle),
+                     ("caption", caption),
+                     ("tag", tag)):
             if v is not None:
                 self[k] = v
 
@@ -1531,21 +1568,53 @@ def theme_minimal(base_size=None, base_family=None) -> _Theme:
 
 
 class _ThemePatch:
-    """One theme setting that does not change the colour theme."""
+    """Theme settings that do not change the colour theme."""
 
-    def __init__(self, legend_position):
+    def __init__(self, legend_position=None, **options):
         self.legend_position = legend_position
+        self.options = options
 
 
-def theme(*, legend_position=None) -> _ThemePatch:
-    """Change one part of the theme.
+def theme(
+    *,
+    legend_position=None,
+    legend_title=None,
+    panel_grid=None,
+    axis_text_x_angle=None,
+    plot_title_hjust=None,
+    base_size=None,
+    base_family=None,
+) -> _ThemePatch:
+    """Change parts of the theme; later ``theme()`` calls add to earlier ones.
 
-    ``legend_position`` is ``"right"``, ``"bottom"``, ``"none"``, or a
-    pair ``(x, y)`` in 0–1 panel coordinates with ``(0, 0)`` at the
-    bottom left. Static export puts the legend outside on the right
-    unless you set this. ``(x, y)`` places it inside the panel.
+    ``legend_position``: ``"right"``, ``"bottom"``, ``"none"``, or a pair
+    ``(x, y)`` in 0–1 panel coordinates (inside the panel).
+    ``legend_title``: ``False`` hides the legend title.
+    ``panel_grid``: ``False`` removes the grid lines.
+    ``axis_text_x_angle``: ``45`` or ``90`` turns long x labels.
+    ``plot_title_hjust``: ``0`` left (default), ``0.5`` centred, ``1`` right.
+    ``base_size`` (points) and ``base_family`` set the type for saved files.
     """
-    return _ThemePatch(_check_legend_position(legend_position))
+    options = {}
+    if legend_title is not None:
+        options["legend_title"] = bool(legend_title)
+    if panel_grid is not None:
+        options["panel_grid"] = bool(panel_grid)
+    if axis_text_x_angle is not None:
+        angle = float(axis_text_x_angle)
+        if not 0.0 <= angle <= 90.0:
+            raise ValueError("axis_text_x_angle is from 0 to 90 degrees")
+        options["axis_text_x_angle"] = angle
+    if plot_title_hjust is not None:
+        hjust = float(plot_title_hjust)
+        if not 0.0 <= hjust <= 1.0:
+            raise ValueError("plot_title_hjust is from 0 (left) to 1 (right)")
+        options["plot_title_hjust"] = hjust
+    if base_size is not None:
+        options["base_size"] = float(base_size)
+    if base_family is not None:
+        options["base_family"] = str(base_family)
+    return _ThemePatch(_check_legend_position(legend_position), **options)
 
 
 def _check_legend_position(value):

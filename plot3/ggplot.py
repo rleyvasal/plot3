@@ -17,6 +17,7 @@ from plot3.geoms import (
     coord_equal,
     coord_polar,
     derivative,
+    facet_grid,
     facet_wrap,
     labs,
     scale_colour_continuous,
@@ -170,6 +171,7 @@ class ggplot:
         self.theme_base_size: float | None = None
         # None means static export puts the legend outside on the right.
         self.legend_position = None
+        self.theme_options: dict = {}
         self.cscale: scale_colour_continuous | None = None
         self.facet: facet_wrap | None = None
         self.coord: coord_3d | coord_equal | coord_polar | None = None
@@ -264,6 +266,20 @@ class ggplot:
         g.backend = self._detect_backend(g.data)
         return g
 
+    def __or__(self, other):
+        """``p1 | p2``: side by side in one figure."""
+        from plot3.compose import Composition, _check_plot
+
+        _check_plot(other)
+        return Composition("row", [self, other])
+
+    def __truediv__(self, other):
+        """``p1 / p2``: one above the other."""
+        from plot3.compose import Composition, _check_plot
+
+        _check_plot(other)
+        return Composition("col", [self, other])
+
     def __add__(self, other):
         g = copy.copy(self)
         g.layers = list(self.layers)
@@ -297,9 +313,15 @@ class ggplot:
         elif isinstance(other, _ThemePatch):
             if other.legend_position is not None:
                 g.legend_position = other.legend_position
+            options = dict(getattr(other, "options", {}) or {})
+            if "base_size" in options:
+                g.theme_base_size = options.pop("base_size")
+            if "base_family" in options:
+                g.theme_family = options.pop("base_family")
+            g.theme_options = {**getattr(g, "theme_options", {}), **options}
         elif isinstance(other, scale_colour_continuous):
             g.cscale = other
-        elif isinstance(other, facet_wrap):
+        elif isinstance(other, (facet_wrap, facet_grid)):
             g.facet = other
         elif isinstance(other, (coord_3d, coord_equal, coord_polar)):
             g.coord = other
@@ -620,9 +642,12 @@ def ggsave(
     Notes such as ``y clipped to [...]`` are printed, not drawn: they are
     for you, not for readers of the figure. ``notes=True`` draws them.
     """
-    if isinstance(filename, ggplot) and plot is not None and not isinstance(plot, ggplot):
+    from plot3.compose import Composition
+
+    figure_types = (ggplot, Composition)
+    if isinstance(filename, figure_types) and plot is not None and not isinstance(plot, figure_types):
         filename, plot = plot, filename  # tolerate swapped args
-    if not isinstance(plot, ggplot):
+    if not isinstance(plot, figure_types):
         raise ValueError("ggsave(filename, plot) needs the plot")
     return plot.save(
         filename,

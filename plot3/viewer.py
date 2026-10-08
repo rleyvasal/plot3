@@ -295,6 +295,32 @@ if (S.labs.title) {
   if (S.labsMath && S.labsMath.title) titleEl.innerHTML = plot3MathHTML(S.labsMath.title, S.labs.title);
   else titleEl.textContent = S.labs.title;
 }
+const THEME_OPTS = S.themeOpts || {};
+// labs(tag=, subtitle=, caption=) and theme(plot_title_hjust=).
+if (S.labs.tag) {
+  const tagEl = document.createElement('b');
+  tagEl.style.marginRight = '8px';
+  tagEl.textContent = S.labs.tag;
+  titleEl.insertBefore(tagEl, titleEl.firstChild);
+}
+if (S.labs.subtitle) {
+  const subEl = document.createElement('div');
+  subEl.style.cssText = 'font-weight:400;font-size:12px;margin-top:2px;color:' + T.ink2;
+  subEl.innerHTML = richLabel('subtitle', S.labs.subtitle);
+  titleEl.appendChild(subEl);
+}
+if (THEME_OPTS.titleHjust != null && THEME_OPTS.titleHjust > 0.25) {
+  titleEl.style.left = '14px';
+  titleEl.style.right = '14px';
+  titleEl.style.maxWidth = 'none';
+  titleEl.style.textAlign = THEME_OPTS.titleHjust > 0.75 ? 'right' : 'center';
+}
+if (S.labs.caption) {
+  const capEl = document.createElement('div');
+  capEl.style.cssText = 'flex:none;padding:0 14px 6px;text-align:right;font-size:11px;color:' + T.muted;
+  capEl.innerHTML = richLabel('caption', S.labs.caption);
+  figEl.insertAdjacentElement('afterend', capEl);
+}
 const legEl = document.getElementById('legend');
 // legend click-filtering: category index -> three.js objects
 const hiddenCats = new Set();
@@ -306,6 +332,8 @@ function regCat(ci, obj) {
 let redraw = () => {};   // 2D assigns its draw(); 3D renders continuously
 window.__plot3 = { hiddenCats, catObjs };
 function showLegendBox() {
+  // theme(legend_position="none"), and all but one panel of a facet_grid.
+  if (S.legendPosition === 'none') return;
   legEl.style.display = 'block';
   legEl.style.background = T.surface + 'e6';
   legEl.style.border = '1px solid ' + T.grid;
@@ -1428,6 +1456,14 @@ let renderNow = () => {};
 if (!S.is3d) {
   // ═════════════════════════ 2D: ortho + pan/zoom ═════════════════════════
   const M = { l: 58, r: 12, t: 30, b: 40 };
+  if (S.labs.subtitle) M.t += 16;
+  const X_ANGLE = THEME_OPTS.xAngle || 0;
+  if (X_ANGLE > 0 && S.scales.x) {
+    // Room for turned x labels (about 6.5 px per character at 11 px).
+    const labels = S.scales.x.kind === 'cat' ? S.scales.x.cats : (S.scales.x.ticks || []).map(t => t[1]);
+    const longest = Math.max(0, ...labels.map(l => String(l).length)) * 6.5;
+    M.b += Math.max(0, longest * Math.sin(X_ANGLE * Math.PI / 180) - 8);
+  }
   let W = 100, H = 100;
   const cam = new THREE.OrthographicCamera(-0.03, 1.03, 1.03, -0.03, -10, 10);
   // Equal aspect: one data unit has the same length on x and y. The panel
@@ -1784,16 +1820,22 @@ if (!S.is3d) {
     // cap tick count by panel size so labels never collide
     const xt = thin(ticksFor('x', x0, x1), Math.max(5, Math.floor(W / 80)));
     const yt = thin(ticksFor('y', y0, y1), Math.max(5, Math.floor(H / 40)));
+    const showGrid = THEME_OPTS.panelGrid !== false;
     for (const [t, lab] of xt) {
       const X = px(t);
       if (X < M.l - 1 || X > M.l + W + 1) continue;
-      s += `<line x1="${X}" y1="${M.t}" x2="${X}" y2="${M.t+H}" stroke="${T.grid}"/>`;
-      s += `<text x="${X}" y="${M.t+H+14}" fill="${T.muted}" text-anchor="middle">${lab}</text>`;
+      if (showGrid) s += `<line x1="${X}" y1="${M.t}" x2="${X}" y2="${M.t+H}" stroke="${T.grid}"/>`;
+      if (X_ANGLE > 0) {
+        const ty = M.t + H + 8;
+        s += `<text x="${X}" y="${ty}" fill="${T.muted}" text-anchor="end" dominant-baseline="middle" transform="rotate(${-X_ANGLE} ${X} ${ty})">${lab}</text>`;
+      } else {
+        s += `<text x="${X}" y="${M.t+H+14}" fill="${T.muted}" text-anchor="middle">${lab}</text>`;
+      }
     }
     for (const [t, lab] of yt) {
       const Y = py(t);
       if (Y < M.t - 1 || Y > M.t + H + 1) continue;
-      s += `<line x1="${M.l}" y1="${Y}" x2="${M.l+W}" y2="${Y}" stroke="${T.grid}"/>`;
+      if (showGrid) s += `<line x1="${M.l}" y1="${Y}" x2="${M.l+W}" y2="${Y}" stroke="${T.grid}"/>`;
       s += `<text x="${M.l-7}" y="${Y+4}" fill="${T.muted}" text-anchor="end">${lab}</text>`;
     }
     s += `<rect x="${M.l}" y="${M.t}" width="${W}" height="${H}" fill="none" stroke="${T.axis}"/>`;
@@ -1813,8 +1855,11 @@ if (!S.is3d) {
       }
       s += '</g>';
     }
-    s += `<text x="${M.l+W/2}" y="${M.t+H+30}" fill="${T.ink2}" text-anchor="middle">${plot3Esc(withFrame(S.labs.x))}</text>`;
-    s += `<text x="14" y="${M.t+H/2}" fill="${T.ink2}" text-anchor="middle" transform="rotate(-90 14 ${M.t+H/2})">${plot3Esc(withFrame(S.labs.y))}</text>`;
+    if (!S.facetChild) {
+      // A facet panel leaves the shared axis titles to the figure around it.
+      s += `<text x="${M.l+W/2}" y="${M.t+H+M.b-10}" fill="${T.ink2}" text-anchor="middle">${plot3Esc(withFrame(S.labs.x))}</text>`;
+      s += `<text x="14" y="${M.t+H/2}" fill="${T.ink2}" text-anchor="middle" transform="rotate(-90 14 ${M.t+H/2})">${plot3Esc(withFrame(S.labs.y))}</text>`;
+    }
     const anns = S.ann || [];
     const textBoxes = [];
     for (let i = 0; i < anns.length; i++) {

@@ -263,9 +263,11 @@ def test_facets_tile_panels(tmp_path):
     path = tmp_path / "nested" / "facets.svg"
     ggsave(path, fig, width=640, height=320)
     text = path.read_text(encoding="utf-8")
-    assert ">panels</text>" in text
-    assert "panels — left" in text
-    assert "panels — right" in text
+    # ggplot2 layout: the title once, a strip label on each panel.
+    assert text.count(">panels</text>") == 1
+    assert ">left</text>" in text
+    assert ">right</text>" in text
+    assert "panels — left" not in text
     assert path.parent.is_dir()
 
 
