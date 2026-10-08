@@ -45,22 +45,94 @@ def resolution(x, *, zero: bool = True) -> float:
     return float(np.min(positive))
 
 
+def _nearest_multiple(value: float, step: float) -> float:
+    """The multiple of ``step`` closest to ``value``. A tie takes the higher one."""
+    k = value / step
+    down = math.floor(k + 1e-10)
+    up = math.ceil(k - 1e-10)
+    if abs(k - down) < abs(up - k) - 1e-10:
+        return down * step
+    return up * step
+
+
+def _ticks_on_step(lo: float, hi: float, step: float) -> list[float] | None:
+    start = _nearest_multiple(lo, step)
+    end = _nearest_multiple(hi, step)
+    if end < start:
+        start, end = end, start
+    count = int(round((end - start) / step))
+    if count < 0 or count > 40:
+        return None
+    origin = int(round(start / step))
+    out = []
+    for i in range(count + 1):
+        t = (origin + i) * step
+        if abs(t) < abs(step) * 1e-8:
+            t = 0.0
+        else:
+            t = float(f"{t:.12g}")
+        out.append(t)
+    return out
+
+
+def _classic_ticks(lo: float, hi: float, n: int) -> list[float]:
+    raw = (hi - lo) / max(1, n)
+    mag = 10 ** math.floor(math.log10(max(raw, 1e-12)))
+    step = 10 * mag
+    for mult in (1, 2, 5, 10):
+        if raw <= mult * mag:
+            step = mult * mag
+            break
+    found = _ticks_on_step(lo, hi, step)
+    return found or [lo, hi]
+
+
 def nice_ticks(lo: float, hi: float, n: int = 6) -> list[float]:
+    """About ``n`` ticks on a 1-2-2.5-5 grid, at least four when the span allows.
+
+    The nice number nearest each end is included, so a sample maximum of
+    0.9997 still gets a tick at 1.
+    """
     if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
         return [lo]
-    raw = (hi - lo) / max(1, n)
-    mag = 10 ** math.floor(math.log10(raw))
-    for m in (1, 2, 5, 10):
-        if raw <= m * mag:
-            step = m * mag
-            break
-    t0 = math.ceil(lo / step) * step
-    out = []
-    t = t0
-    while t <= hi + step * 1e-9:
-        out.append(0.0 if abs(t) < step * 1e-9 else t)
-        t += step
-    return out
+    span = hi - lo
+    target = max(5, n)
+    raw = span / max(1, target - 1)
+    exp = math.floor(math.log10(max(raw, 1e-12)))
+    steps: list[float] = []
+    for shift in (-1, 0, 1):
+        base = 10.0 ** (exp + shift)
+        for mult in (1, 2, 2.5, 5):
+            step = mult * base
+            if step > 0 and step not in steps:
+                steps.append(step)
+    best: list[float] | None = None
+    best_score = math.inf
+    best_step = -1.0
+    for step in steps:
+        ticks = _ticks_on_step(lo, hi, step)
+        if not ticks or len(ticks) < 4:
+            continue
+        # A tick past either end has to sit inside the 3% view pad, or the
+        # axis draws it and then clips it. 5% of the span is that pad.
+        over_lo = (lo - ticks[0]) / span if ticks[0] < lo else 0.0
+        over_hi = (ticks[-1] - hi) / span if ticks[-1] > hi else 0.0
+        if over_lo > 0.05 or over_hi > 0.05:
+            continue
+        extra = over_lo + over_hi
+        score = abs(len(ticks) - 6)
+        if len(ticks) < 5:
+            score += 3
+        if len(ticks) > 9:
+            score += (len(ticks) - 9) * 2
+        score += extra * 2
+        if score < best_score - 1e-9 or (abs(score - best_score) <= 1e-9 and step > best_step):
+            best = ticks
+            best_score = score
+            best_step = step
+    if best:
+        return best
+    return _classic_ticks(lo, hi, n)
 
 
 def fmt_num(v: float) -> str:

@@ -991,15 +991,21 @@ def _centroid(xs, ys, baseline: float) -> tuple[float, float]:
 
 
 def _integral_text(value: float) -> str:
-    frac = Fraction(value).limit_denominator(10_000)
-    if abs(float(frac) - value) <= 1e-6 * max(1.0, abs(value)):
+    """A short fraction such as 8/3, or a decimal when the fraction is not simple.
+
+    Simpson's error on a Beta density is within 1e-6 of 1965/3599, which is
+    not an exact result. Denominators up to 12 keep 1/2, 1/3, and 8/3.
+    """
+    frac = Fraction(value).limit_denominator(12)
+    close = abs(float(frac) - value) <= 1e-6 * max(1.0, abs(value))
+    if close:
         if frac.denominator == 1:
             body = str(frac.numerator)
         else:
             body = f"{frac.numerator}/{frac.denominator}"
     else:
-        body = f"{value:.6g}"
-    return f"∫ = {body}"
+        body = f"{value:.4g}"
+    return f"∫ = {body.replace('-', '−')}"
 
 
 def _runs(index: np.ndarray) -> list[list[int]]:

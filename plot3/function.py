@@ -15,7 +15,7 @@ import pandas as pd
 
 from plot3.contour import _contour_lines, _refine_active_cells
 from plot3.expr import ExprError, Formula, _missing_param_build_message, evaluate
-from plot3.mathtext import split_math
+from plot3.mathtext import _number, split_math
 from plot3.geoms import _Geom, aes, geom_line, geom_path
 from plot3.stats3d import regular_grid_mesh
 from plot3.table import has_column, numeric_array
@@ -398,8 +398,8 @@ def _groups_from_index(index: np.ndarray) -> list[list[int]]:
 
 
 def _bound(value: float) -> str:
-    """``-2.3`` with a Unicode minus, so the caption matches the axis ticks."""
-    return f"{value:.6g}".replace("-", "−")
+    """About four significant figures, with a Unicode minus."""
+    return _number(float(value)).pretty
 
 
 def _clip_note(name: str, lo: float, hi: float, *, param: str | None = None) -> str:
@@ -434,28 +434,46 @@ def _stamp_formula(out, geom, formula: Formula) -> None:
             out._tip_latex = formula.caption_latex or formula.latex
             out._tip_pretty = formula.caption_pretty or formula.pretty
     else:
-        out._legend_label = formula.legend_pretty or formula.pretty or formula.label
-        out._legend_latex = formula.legend_latex or formula.latex or None
+        pretty = formula.pretty or formula.label
+        caption = formula.caption_pretty or pretty
+        # The title stays the short symbolic formula. The legend keeps the
+        # symbols and lists the values, so a Beta density does not expand
+        # into ``x^(2 − 1)(1 − x)^(5 − 1)/0.0333333333333``.
+        out._title_label = pretty
+        out._title_latex = formula.latex or None
+        if caption != pretty:
+            out._legend_label = caption
+            out._legend_latex = formula.caption_latex or formula.latex
+        else:
+            out._legend_label = formula.legend_pretty or pretty
+            out._legend_latex = formula.legend_latex or formula.latex or None
         out._legend_math = None
         out._tip_latex = formula.caption_latex or formula.latex or ""
-        out._tip_pretty = formula.caption_pretty or formula.pretty or out._legend_label
+        out._tip_pretty = caption
     out._is_formula = True
     out._formula_primary = True
 
 
 def _robust_window(values: np.ndarray) -> tuple[float, float, bool]:
-    """Return ``(lo, hi, blew_up)`` around the bulk of ``values``."""
+    """Return ``(lo, hi, blew_up)`` around the bulk of ``values``.
+
+    Only a side that actually leaves the bulk is pulled in. A density that
+    stays non-negative keeps its own minimum instead of a negative fence.
+    """
     med = float(np.median(values))
     mad = float(np.median(np.abs(values - med)))
     scale = max(mad * 1.4826, 1e-9)
-    lo = med - 8.0 * scale
-    hi = med + 8.0 * scale
+    fence_lo = med - 8.0 * scale
+    fence_hi = med + 8.0 * scale
     full_lo = float(np.min(values))
     full_hi = float(np.max(values))
-    blew_up = full_lo < lo - 1e-8 or full_hi > hi + 1e-8
+    blew_lo = full_lo < fence_lo - 1e-8
+    blew_hi = full_hi > fence_hi + 1e-8
+    lo = fence_lo if blew_lo else full_lo
+    hi = fence_hi if blew_hi else full_hi
     if hi <= lo:
         hi = lo + 1.0
-    return lo, hi, blew_up
+    return lo, hi, blew_lo or blew_hi
 
 
 def _expand_surface(

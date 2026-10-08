@@ -10,7 +10,7 @@ html,body{margin:0;height:100%;overflow:hidden;
   font:12px system-ui,-apple-system,"Segoe UI",sans-serif}
 body{display:flex;flex-direction:column}
 #fig{position:relative;width:100%;flex:1;min-height:0;z-index:1}
-#note{display:none;flex:none;padding:2px 14px 8px;font-size:11px;line-height:1.4}
+#note{display:none;flex:none;padding:2px 14px 8px;font-size:11px;line-height:1.4;white-space:pre-line}
 #title{position:absolute;left:14px;top:8px;max-width:calc(100% - 120px);
   font-size:14px;font-weight:600;z-index:4}
 #canvas-host{position:absolute;z-index:1}
@@ -19,7 +19,11 @@ body{display:flex;flex-direction:column}
   pointer-events:none;user-select:none}
 #axes{position:absolute;inset:0;pointer-events:none;z-index:2}
 #legend{position:absolute;right:10px;top:36px;z-index:4;padding:6px 9px;
-  border-radius:6px;font-size:11px;line-height:1.7}
+  border-radius:6px;font-size:11px;line-height:1.7;max-width:min(46%,280px);
+  box-sizing:border-box}
+#legend .lg-formula{display:block}
+#legend .lg-vals{display:flex;flex-wrap:wrap;column-gap:8px}
+#legend .lg-kv{white-space:nowrap}
 #modebar{position:absolute;top:6px;right:6px;z-index:6;
   opacity:0;transition:opacity .12s ease;user-select:none}
 #fig:hover #modebar,#modebar:focus-within,#modebar.open{opacity:1}
@@ -122,7 +126,7 @@ const noteEl = document.getElementById('note');
 if (S.notes && S.notes.length) {
   noteEl.style.display = 'block';
   noteEl.style.color = T.muted;
-  noteEl.textContent = S.notes.join('   ');
+  noteEl.textContent = S.notes.join('\\n');
 }
 
 async function decode(id, dtype) {
@@ -263,9 +267,22 @@ function sizeLegendHTML() {
 }
 function legendLabel(e) {
   if (e.math) return plot3MathHTML(e.math, e.label);
+  const plain = String(e.label || '');
+  const cut = plain.indexOf('  (');
+  // A parameter tail stays in whole "a = 2" pieces so a narrow key cannot
+  // split 0.03333. The formula above it wraps on spaces.
+  if (cut >= 0) {
+    const formula = plain.slice(0, cut);
+    let body = plain.slice(cut + 3);
+    if (body.endsWith(')')) body = body.slice(0, -1);
+    const vals = body.split(', ').filter(Boolean).map(part =>
+      '<span class="lg-kv">' + plot3Esc(part) + '</span>').join('');
+    return '<span class="lg-formula">' + plot3Esc(formula) + '</span>'
+      + '<span class="lg-vals">' + vals + '</span>';
+  }
   if (e.latex) return '<span class="plot3-math" data-latex="' + plot3Esc(e.latex) + '">'
-    + plot3Esc(e.label) + '</span>';
-  return plot3Esc(e.label);
+    + plot3Esc(plain) + '</span>';
+  return plot3Esc(plain);
 }
 function richLabel(key, plain) {
   if (S.labsMath && S.labsMath[key]) return plot3MathHTML(S.labsMath[key], plain || '');
@@ -292,6 +309,20 @@ function showLegendBox() {
   legEl.style.background = T.surface + 'e6';
   legEl.style.border = '1px solid ' + T.grid;
   legEl.style.color = T.ink2;
+}
+function placeLegend() {
+  if (!legEl || legEl.style.display === 'none' || legEl.dataset.docked === '1') return;
+  const figH = figEl.clientHeight || 0;
+  if (figH < 40) return;
+  // A key taller than the panel covers the curve. Sit it under the axes.
+  if (legEl.offsetHeight > figH * 0.40) {
+    legEl.dataset.docked = '1';
+    legEl.style.top = 'auto';
+    legEl.style.bottom = '8px';
+    legEl.style.left = '8px';
+    legEl.style.right = '8px';
+    legEl.style.maxWidth = 'none';
+  }
 }
 const szHTML = sizeLegendHTML();
 if (S.legend) {
@@ -350,23 +381,78 @@ function fmtAxis(ax, v) {                     // v in data units
   return fmt(v);
 }
 
-// nice numeric ticks (JS side for pan/zoom)
-function niceTicks(lo, hi, n) {
-  if (!(hi > lo)) return [lo];
-  const raw = (hi - lo) / Math.max(1, n);
-  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
-  let step = 10 * mag;
-  for (const m of [1, 2, 5, 10]) if (raw <= m * mag) { step = m * mag; break; }
+// nice numeric ticks (JS side for pan/zoom). Same rule as scales.nice_ticks:
+// about six labels, at least four, and the nice number nearest each end.
+function nearestMultiple(value, step) {
+  const k = value / step;
+  const down = Math.floor(k + 1e-10);
+  const up = Math.ceil(k - 1e-10);
+  if (Math.abs(k - down) < Math.abs(up - k) - 1e-10) return down * step;
+  return up * step;
+}
+function ticksOnStep(lo, hi, step) {
+  let start = nearestMultiple(lo, step);
+  let end = nearestMultiple(hi, step);
+  if (end < start) { const swap = start; start = end; end = swap; }
+  const count = Math.round((end - start) / step);
+  if (count < 0 || count > 40) return null;
+  const origin = Math.round(start / step);
   const out = [];
-  for (let t = Math.ceil(lo / step) * step; t <= hi + step * 1e-9; t += step)
-    out.push(Math.abs(t) < step * 1e-9 ? 0 : t);
+  for (let i = 0; i <= count; i++) {
+    let t = (origin + i) * step;
+    if (Math.abs(t) < Math.abs(step) * 1e-8) t = 0;
+    else t = +t.toPrecision(12);
+    out.push(t);
+  }
   return out;
+}
+function niceTicks(lo, hi, n) {
+  if (!(hi > lo) || !isFinite(lo) || !isFinite(hi)) return [lo];
+  const span = hi - lo;
+  const target = Math.max(5, n || 6);
+  const raw = span / Math.max(1, target - 1);
+  const exp = Math.floor(Math.log10(Math.max(raw, 1e-12)));
+  const steps = [];
+  for (let shift = -1; shift <= 1; shift++) {
+    const base = Math.pow(10, exp + shift);
+    for (const mult of [1, 2, 2.5, 5]) {
+      const step = mult * base;
+      if (step > 0 && steps.indexOf(step) < 0) steps.push(step);
+    }
+  }
+  let best = null, bestScore = Infinity, bestStep = -1;
+  for (const step of steps) {
+    const ticks = ticksOnStep(lo, hi, step);
+    if (!ticks || ticks.length < 4) continue;
+    let overLo = 0, overHi = 0;
+    if (ticks[0] < lo) overLo = (lo - ticks[0]) / span;
+    if (ticks[ticks.length - 1] > hi) overHi = (ticks[ticks.length - 1] - hi) / span;
+    if (overLo > 0.05 || overHi > 0.05) continue;
+    const extra = overLo + overHi;
+    let score = Math.abs(ticks.length - 6);
+    if (ticks.length < 5) score += 3;
+    if (ticks.length > 9) score += (ticks.length - 9) * 2;
+    score += extra * 2;
+    if (score < bestScore - 1e-9 || (Math.abs(score - bestScore) <= 1e-9 && step > bestStep)) {
+      best = ticks; bestScore = score; bestStep = step;
+    }
+  }
+  if (best) return best;
+  const mag = Math.pow(10, Math.floor(Math.log10(Math.max(span / Math.max(1, n || 6), 1e-12))));
+  let step = 10 * mag;
+  for (const mult of [1, 2, 5, 10]) if ((span / Math.max(1, n || 6)) <= mult * mag) { step = mult * mag; break; }
+  return ticksOnStep(lo, hi, step) || [lo, hi];
 }
 // ticks for any scale over a visible data range -> [[pos_data, label], ...]
 function thin(vis, maxN) {
   if (vis.length <= maxN) return vis;
-  const step = Math.ceil(vis.length / maxN);
-  return vis.filter((_, i) => i % step === 0);
+  const keep = Math.max(2, maxN);
+  const step = Math.ceil((vis.length - 1) / (keep - 1));
+  const out = [];
+  for (let i = 0; i < vis.length - 1; i += step) out.push(vis[i]);
+  const last = vis[vis.length - 1];
+  if (out[out.length - 1] !== last) out.push(last);
+  return out;
 }
 function ticksFor(ax, lo, hi) {
   const sc = S.scales[ax];
@@ -1584,8 +1670,8 @@ if (!S.is3d) {
     const py = v => M.t + H - (v - y0) / (y1 - y0) * H;
     let s = '';
     // cap tick count by panel size so labels never collide
-    const xt = thin(ticksFor('x', x0, x1), Math.max(3, Math.floor(W / 80)));
-    const yt = thin(ticksFor('y', y0, y1), Math.max(3, Math.floor(H / 40)));
+    const xt = thin(ticksFor('x', x0, x1), Math.max(5, Math.floor(W / 80)));
+    const yt = thin(ticksFor('y', y0, y1), Math.max(5, Math.floor(H / 40)));
     for (const [t, lab] of xt) {
       const X = px(t);
       if (X < M.l - 1 || X > M.l + W + 1) continue;
@@ -1612,6 +1698,7 @@ if (!S.is3d) {
   }
 
   function layout() {
+    placeLegend();
     W = Math.max(50, figEl.clientWidth - M.l - M.r);
     H = Math.max(50, figEl.clientHeight - M.t - M.b);
     if (equalAspect) applyEqual();
@@ -2248,6 +2335,7 @@ if (!S.is3d) {
   });
 
   function layout() {
+    placeLegend();
     const w = Math.max(figEl.clientWidth, 1), h = Math.max(figEl.clientHeight, 1);
     renderer.setSize(w, h);
     cam.aspect = w / h;

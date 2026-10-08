@@ -611,8 +611,16 @@ def _draw_spec(spec, blobs, x, y, w, h, commands, *, border: bool, base_pt: floa
     is3d = bool(spec.get("is3d"))
     fonts = _font_sizes(w, base_pt)
     position = _legend_position(spec)
-    metrics = _legend_metrics(spec, theme, fonts, labs.get("color") or "")
-    extra_right, extra_bottom = _legend_reserve(position, metrics, w, h)
+    left = 16.0 if is3d else _y_gutter(spec, labs, fonts, w)
+    # A right-hand key that cannot show its labels moves under the panel.
+    # The spec keeps the user's legendPosition; only this painting changes.
+    if position == "right" and _legend_prefers_bottom(spec, fonts, w, h, left):
+        position = "bottom"
+    max_w, max_h = _legend_budget(position, w, h, left)
+    metrics = _legend_metrics(
+        spec, theme, fonts, labs.get("color") or "", max_box=(max_w, max_h),
+    )
+    extra_right, extra_bottom = _legend_reserve(position, metrics, w, h, left)
     if is3d:
         _draw_3d(
             spec, blobs, x, y, w, h, commands, labs, theme, fonts,
@@ -628,12 +636,18 @@ def _draw_spec(spec, blobs, x, y, w, h, commands, *, border: bool, base_pt: floa
     if metrics is not None and position != "none":
         origin = _legend_origin(position, box, metrics, x, y, w, h)
         _paint_legend(commands, origin, metrics, theme, fonts)
-    notes = spec.get("notes") or []
-    if notes:
-        commands.append((
-            "text", x + 12, y + h - 4 - extra_bottom, "   ".join(str(n) for n in notes),
-            fonts[2], theme.get("muted") or "#898781", "start", "alphabetic", 0, 400,
-        ))
+    note_lines = _note_lines(spec.get("notes") or [], fonts[2], w)
+    if note_lines:
+        line_h = _line_height(fonts[2]) + 2
+        # One caption per line, stacked upward so a second curve does not
+        # run off the right edge. The axis margin reserved this space.
+        baseline = y + h - 4 - extra_bottom
+        color = theme.get("muted") or "#898781"
+        for index, line in enumerate(reversed(note_lines)):
+            commands.append((
+                "text", x + 12, baseline - index * line_h, line,
+                fonts[2], color, "start", "alphabetic", 0, 400,
+            ))
 
 
 def _labs(spec) -> dict:
@@ -734,20 +748,19 @@ def _box_3d(x, y, w, h, labs, fonts, extra_right=0.0, extra_bottom=0.0):
 
 def _box_2d(spec, x, y, w, h, labs, fonts, extra_right=0.0, extra_bottom=0.0):
     tick, title, note = fonts
-    yticks = [str(lab) for _t, lab in _ticks(spec.get("scales", {}).get("y") or {})]
-    tick_w = max((_text_width(lab, tick) for lab in yticks), default=0)
-    y_name = labs.get("y") or ""
-    name_w = _line_height(tick) if y_name else 0
-    left = 8 + name_w + (6 if y_name else 0) + tick_w + 8
+    left = _y_gutter(spec, labs, fonts, w)
     x_name = labs.get("x") or ""
-    notes = spec.get("notes") or []
     bottom = 6 + _line_height(tick) + (4 + _line_height(tick) if x_name else 0) + 8
-    if notes:
-        bottom += _line_height(note) + 4
+    note_lines = _note_lines(spec.get("notes") or [], note, w)
+    if note_lines:
+        bottom += len(note_lines) * (_line_height(note) + 2) + 4
     bottom += extra_bottom
     top = 10 + (title + 6 if labs.get("title") else 0)
     right = 14 + extra_right
-    left = min(left, w * 0.42)
+    # A long legend must not squeeze the panel down to a sliver.
+    min_panel = max(48.0, min(w * 0.42, w - left - 8.0))
+    if w - left - right < min_panel:
+        right = max(8.0, w - left - min_panel)
     # A bottom legend needs more than the usual axis margin.
     bottom_cap = 0.62 if extra_bottom else 0.38
     bottom = min(bottom, h * bottom_cap)
@@ -1165,6 +1178,282 @@ def _append_surface(layer, blobs, gz, world, colors, alpha, theme, project, tria
         triangles.append((depth, [(hit[0], hit[1]) for hit in hits], _hex(rgb), alpha))
 
 
+def _y_gutter(spec, labs, fonts, width: float) -> float:
+    """Pixels reserved on the left for the y ticks and the rotated y title."""
+    tick = fonts[0]
+    yticks = [str(lab) for _t, lab in _ticks(spec.get("scales", {}).get("y") or {})]
+    tick_w = max((_text_width(lab, tick) for lab in yticks), default=0)
+    y_name = labs.get("y") or ""
+    name_w = _line_height(tick) if y_name else 0
+    left = 8 + name_w + (6 if y_name else 0) + tick_w + 8
+    return min(float(left), float(width) * 0.42)
+
+
+def _legend_budget(position, width: float, height: float, left: float) -> tuple[float, float]:
+    """Largest legend box that stays inside the figure and leaves a panel."""
+    if position == "none":
+        return 0.0, 0.0
+    if position == "bottom":
+        return max(32.0, width - 8.0), max(24.0, height * 0.34)
+    if isinstance(position, tuple):
+        return max(32.0, width * 0.62), max(24.0, height * 0.62)
+    # The panel keeps about half the figure. The 14px base margin and a
+    # small gap sit between the panel and the legend box.
+    min_panel = max(72.0, width * 0.46)
+    box_w = width - left - 14.0 - 8.0 - min_panel
+    if box_w < 44.0:
+        box_w = max(36.0, min(width * 0.38, width - 8.0))
+    return min(max(28.0, box_w), width - 4.0), max(24.0, height - 4.0)
+
+
+_WRAP_OPS = {"−", "+", "×", "·", "=", "/", "-", "–"}
+
+
+def _wrap_pieces(text: str) -> list[str]:
+    """Words, with a lone operator glued to the word that follows it."""
+    words = [word for word in str(text).split(" ") if word]
+    pieces: list[str] = []
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word in _WRAP_OPS and index + 1 < len(words):
+            pieces.append(word + " " + words[index + 1])
+            index += 2
+        else:
+            pieces.append(word)
+            index += 1
+    return pieces
+
+
+def _wrap_text(text: str, size: float, max_width: float) -> list[str]:
+    """Break ``text`` on spaces. A token wider than the line is shortened, not split."""
+    raw = str(text).strip()
+    if not raw:
+        return []
+    limit = max(8.0, float(max_width))
+    if _text_width(raw, size) <= limit:
+        return [raw]
+    lines: list[str] = []
+    current = ""
+    for piece in _wrap_pieces(raw):
+        trial = piece if not current else current + " " + piece
+        if _text_width(trial, size) <= limit:
+            current = trial
+            continue
+        if current:
+            lines.append(current)
+            current = ""
+        if _text_width(piece, size) <= limit:
+            current = piece
+        else:
+            lines.append(_ellipsis(piece, size, limit))
+    if current:
+        lines.append(current)
+    return lines or [raw]
+
+
+def _ellipsis(text: str, size: float, limit: float) -> str:
+    if _text_width(text, size) <= limit:
+        return text
+    piece = text
+    while piece and _text_width(piece + "...", size) > limit:
+        piece = piece[:-1]
+    return (piece + "...") if piece else "..."
+
+
+def _split_caption(label: str) -> tuple[str, str]:
+    """Separate ``formula  (a = 2, b = 5)`` into the formula and the tail."""
+    text = str(label).strip()
+    if "  (" in text and text.endswith(")"):
+        formula, _, rest = text.rpartition("  (")
+        return formula.strip(), "(" + rest
+    return text, ""
+
+
+def _value_units(tail: str) -> list[str]:
+    """``(a = 2, b = 5)`` becomes ``a = 2`` and ``b = 5``, each kept whole."""
+    if not tail:
+        return []
+    body = tail[1:-1] if tail.startswith("(") and tail.endswith(")") else tail
+    return [part.strip() for part in body.split(",") if part.strip()]
+
+
+def _pack_units(units: list[str], size: float, limit: float) -> list[str]:
+    lines: list[str] = []
+    current = ""
+    for unit in units:
+        piece = unit.strip()
+        if not piece:
+            continue
+        if _text_width(piece, size) > limit:
+            if current:
+                lines.append(current)
+                current = ""
+            lines.append(_ellipsis(piece, size, limit))
+            continue
+        trial = piece if not current else current + " " + piece
+        if _text_width(trial, size) <= limit:
+            current = trial
+        else:
+            if current:
+                lines.append(current)
+            current = piece
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _cut_lines(lines: list[str], count: int, size: float, limit: float) -> list[str]:
+    if len(lines) <= count:
+        return lines
+    kept = lines[: max(0, count)]
+    if not kept:
+        return kept
+    last = kept[-1]
+    if _text_width(last + "...", size) <= limit:
+        kept[-1] = last + "..."
+    else:
+        kept[-1] = _ellipsis(last, size, limit)
+    return kept
+
+
+def _formula_segments(text: str) -> list[str]:
+    """Split juxtaposed factors ``f)(g`` so a wrap can fall between them."""
+    if ")(" not in text:
+        return [text]
+    parts = text.split(")(")
+    segments = []
+    for index, part in enumerate(parts):
+        if index == 0:
+            segments.append(part + ")")
+        elif index < len(parts) - 1:
+            segments.append("(" + part + ")")
+        else:
+            segments.append("(" + part)
+    return segments
+
+
+def _wrap_formula(text: str, size: float, limit: float) -> list[str]:
+    """Wrap a formula. A break between ``)(`` is preferred to a break before ``−``."""
+    raw = str(text).strip()
+    if not raw or _text_width(raw, size) <= limit:
+        return [raw] if raw else []
+    lines: list[str] = []
+    current = ""
+    for segment in _formula_segments(raw):
+        trial = (current + segment) if current else segment
+        if _text_width(trial, size) <= limit:
+            current = trial
+            continue
+        wrapped = _wrap_text(segment, size, limit)
+        if current:
+            lines.append(current)
+            current = ""
+        if len(wrapped) <= 1:
+            current = wrapped[0] if wrapped else ""
+        else:
+            lines.extend(wrapped[:-1])
+            current = wrapped[-1]
+    if current:
+        lines.append(current)
+    return lines or [raw]
+
+
+def _legend_parts(label: str, size: float, width: float) -> tuple[list[str], list[str]]:
+    """Formula lines and parameter lines. ``a = 2`` is never split across a line."""
+    formula, tail = _split_caption(label)
+    limit = max(8.0, float(width))
+    if tail and _text_width(tail, size) <= limit:
+        value_lines = [tail]
+    else:
+        units = _value_units(tail)
+        shown = [
+            unit + ("," if index < len(units) - 1 else "")
+            for index, unit in enumerate(units)
+        ]
+        value_lines = _pack_units(shown, size, limit)
+    formula_lines = _wrap_formula(formula, size, limit) if formula else []
+    return formula_lines, value_lines
+
+
+def _legend_lines(label: str, size: float, width: float, max_lines: int) -> list[str]:
+    """Wrap a legend label. The parameter values survive when the box is short."""
+    formula_lines, value_lines = _legend_parts(label, size, width)
+    limit = max(8.0, float(width))
+    if not value_lines:
+        return _cut_lines(formula_lines, max_lines, size, limit)
+    room = max_lines - len(value_lines)
+    if room < 1:
+        return _cut_lines(value_lines, max_lines, size, limit)
+    return _cut_lines(formula_lines, room, size, limit) + value_lines
+
+
+def _plan_entry_lines(labels: list[str], size: float, width: float, budget: int) -> list[list[str]]:
+    """Share ``budget`` lines so every entry keeps its values."""
+    if not labels:
+        return []
+    budget = max(len(labels), int(budget))
+    limit = max(8.0, float(width))
+    parts = [_legend_parts(label, size, width) for label in labels]
+    full = [formula + values for formula, values in parts]
+    if sum(len(lines) for lines in full) <= budget:
+        return full
+    value_count = sum(len(values) for _formula, values in parts)
+    if value_count > budget:
+        planned = [
+            _cut_lines(values, 1, size, limit) or values[:1]
+            for _formula, values in parts
+        ]
+        spare = budget - sum(len(lines) for lines in planned)
+        for index, (_formula, values) in enumerate(parts):
+            if spare <= 0:
+                break
+            longer = _cut_lines(values, len(planned[index]) + spare, size, limit)
+            extra = len(longer) - len(planned[index])
+            if extra > 0:
+                planned[index] = longer
+                spare -= extra
+        return planned
+    # A formula line for one curve and not the other is harder to read.
+    formula_budget = budget - value_count
+    cap = 0 if formula_budget < len(labels) else formula_budget // len(labels)
+    return [
+        (_cut_lines(formula, cap, size, limit) if cap else []) + values
+        for formula, values in parts
+    ]
+
+
+def _legend_prefers_bottom(spec, fonts, width: float, height: float, left: float) -> bool:
+    """True when a right-hand key would split a token or cover the panel."""
+    entries = [str(entry.get("label") or "") for entry in (spec.get("legend") or [])]
+    if not entries:
+        return False
+    max_w, _max_h = _legend_budget("right", width, height, left)
+    label_w = max(16.0, max_w - 16.0 - 18.0)
+    size = fonts[0]
+    row_h = _line_height(size) + 4
+    total = 0
+    for label in entries:
+        lines = _legend_lines(label, size, label_w, 100)
+        total += max(1, len(lines))
+        for line in lines:
+            if line.endswith("...") and not label.endswith("..."):
+                return True
+            if line.strip() in _WRAP_OPS:
+                return True
+    return total * row_h > float(height) * 0.40
+
+
+def _note_lines(notes, size: float, width: float) -> list[str]:
+    lines: list[str] = []
+    limit = max(40.0, float(width) - 24.0)
+    for note in notes:
+        text = str(note).strip()
+        if text:
+            lines.extend(_wrap_text(text, size, limit))
+    return lines
+
+
 def _legend_position(spec):
     raw = spec.get("legendPosition")
     if isinstance(raw, (list, tuple)) and len(raw) == 2:
@@ -1177,8 +1466,11 @@ def _legend_position(spec):
     return "right"
 
 
-def _legend_metrics(spec, theme, fonts, color_label: str = ""):
-    """Rows and the legend box size, or None when there is nothing to draw."""
+def _legend_metrics(spec, theme, fonts, color_label: str = "", max_box=None):
+    """Rows and the legend box size, or None when there is nothing to draw.
+
+    Labels wrap to ``max_box`` so the box cannot be wider than the figure.
+    """
     entries = list(spec.get("legend") or [])
     color = spec.get("color") or {}
     size_legend = spec.get("sizeLegend")
@@ -1187,12 +1479,32 @@ def _legend_metrics(spec, theme, fonts, color_label: str = ""):
     ink = theme.get("ink") or "#ffffff"
     tick = fonts[0]
     row_h = _line_height(tick) + 4
+    max_w = None if max_box is None else float(max_box[0])
+    max_h = None if max_box is None else float(max_box[1])
+    label_w = None if max_w is None else max(16.0, max_w - 16.0 - 18.0)
+    title_w = None if max_w is None else max(16.0, max_w - 16.0)
+    max_lines = 8
+    if max_h is not None and row_h:
+        max_lines = max(2, int((max_h - 8) / row_h))
     rows = []
     title = color_label or ""
+    title_count = 0
     if title and (entries or color.get("kind") == "num"):
-        rows.append(("title", title))
-    for entry in entries:
-        rows.append(("swatch", str(entry.get("label") or ""), entry.get("color") or ink))
+        parts = _legend_lines(title, tick, title_w or 10_000, max_lines) if title_w else [title]
+        rows.append(("title", parts[0] if parts else title))
+        for extra in parts[1:]:
+            rows.append(("cont", extra))
+        title_count = len(parts) if parts else 1
+    labels = [str(entry.get("label") or "") for entry in entries]
+    budget = max_lines - title_count if max_h is not None else max(max_lines, len(labels) or 1)
+    plans = _plan_entry_lines(labels, tick, label_w or 10_000, budget)
+    for entry, parts in zip(entries, plans):
+        color_hex = entry.get("color") or ink
+        if not parts:
+            parts = [str(entry.get("label") or "")]
+        rows.append(("swatch", parts[0], color_hex))
+        for extra in parts[1:]:
+            rows.append(("cont", extra))
     ramp = color.get("ramp") or []
     if not entries and color.get("kind") == "num" and ramp:
         rows.append(("ramp", ramp, color.get("lo"), color.get("hi")))
@@ -1206,34 +1518,46 @@ def _legend_metrics(spec, theme, fonts, color_label: str = ""):
     for row in rows:
         if row[0] in {"title", "size-title"}:
             text_w = max(text_w, _text_width(row[1], tick))
-        elif row[0] in {"swatch", "bubble"}:
+        elif row[0] in {"swatch", "bubble", "cont"}:
             text_w = max(text_w, _text_width(row[1], tick) + 18)
         elif row[0] == "ramp":
             text_w = max(text_w, 110)
     box_w = text_w + 16
-    box_h = 8
+    if max_w is not None:
+        box_w = min(box_w, max_w)
+    box_h = 8.0
+    kept = []
     for row in rows:
         if row[0] == "ramp":
-            box_h += 28
+            step = 28
         elif row[0] == "bubble":
-            box_h += max(row_h, 8 + int(round(row[2] * 16)))
+            step = max(row_h, 8 + int(round(row[2] * 16)))
         else:
-            box_h += row_h
-    return {"rows": rows, "w": box_w, "h": box_h, "row_h": row_h}
+            step = row_h
+        if max_h is not None and kept and box_h + step > max_h:
+            break
+        kept.append(row)
+        box_h += step
+    if max_h is not None:
+        box_h = min(box_h, max_h)
+    return {"rows": kept, "w": box_w, "h": box_h, "row_h": row_h}
 
 
-def _legend_reserve(position, metrics, width: float, height: float) -> tuple[float, float]:
+def _legend_reserve(position, metrics, width: float, height: float, left: float = 0.0) -> tuple[float, float]:
     if metrics is None or position in {"none"} or isinstance(position, tuple):
         return 0.0, 0.0
     if position == "bottom":
-        return 0.0, min(float(metrics["h"]) + 10.0, height * 0.42)
-    # "right", and anything unexpected, stays outside the panel.
-    return min(float(metrics["w"]) + 12.0, width * 0.42), 0.0
+        return 0.0, min(float(metrics["h"]) + 10.0, height * 0.36)
+    # Leave the panel at least ~46% of the figure, after the y-axis gutter.
+    room = width - left - max(64.0, width * 0.46)
+    return min(float(metrics["w"]) + 12.0, max(0.0, room)), 0.0
 
 
 def _legend_origin(position, box, metrics, x, y, w, h) -> tuple[float, float]:
-    box_w = metrics["w"]
-    box_h = metrics["h"]
+    box_w = min(float(metrics["w"]), max(1.0, w - 4.0))
+    box_h = min(float(metrics["h"]), max(1.0, h - 4.0))
+    metrics["w"] = box_w
+    metrics["h"] = box_h
     if position == "bottom":
         lx = box[0] + max(0.0, (box[2] - box_w) / 2.0)
         ly = y + h - box_h - 6
@@ -1244,8 +1568,9 @@ def _legend_origin(position, box, metrics, x, y, w, h) -> tuple[float, float]:
     else:
         lx = x + w - box_w - 6
         ly = box[1]
-    lx = min(max(lx, x + 2), x + w - box_w - 2)
-    ly = min(max(ly, y + 2), y + h - box_h - 2)
+    # A box wider than the cell used to clamp to a negative x. Pin it to the cell.
+    lx = min(max(lx, x), x + max(0.0, w - box_w))
+    ly = min(max(ly, y), y + max(0.0, h - box_h))
     return lx, ly
 
 
@@ -1270,6 +1595,9 @@ def _paint_legend(commands, origin, metrics, theme, fonts) -> None:
             cursor += row_h
         elif row[0] == "swatch":
             commands.append(("rect", lx + 8, cursor + 2, 9, 9, row[2], None, 0, 1.0))
+            commands.append(("text", lx + 22, cursor, row[1], tick, ink2, "start", "top", 0, 400))
+            cursor += row_h
+        elif row[0] == "cont":
             commands.append(("text", lx + 22, cursor, row[1], tick, ink2, "start", "top", 0, 400))
             cursor += row_h
         elif row[0] == "ramp":

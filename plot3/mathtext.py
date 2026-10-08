@@ -1,7 +1,8 @@
 """LaTeX and Unicode for a parsed formula.
 
 The walker reads the syntax tree (``^``, implicit ``*``, and grouping already
-resolved) and does not simplify. ``2x^3 + 3x^3`` stays two terms.
+resolved) and does not combine like terms. ``2x^3 + 3x^3`` stays two terms.
+A substituted constant such as ``(a - 1)`` with ``a = 2`` does fold to a number.
 """
 
 from __future__ import annotations
@@ -245,6 +246,12 @@ def render(node: ast.AST, min_prec: int, substitute: dict[str, float] | None) ->
 
 
 def _render(node: ast.AST, substitute: dict[str, float] | None) -> _Piece:
+    # (a − 1) with a = 2 is 1, not the expanded difference. Names and
+    # literals already print as themselves.
+    if substitute and not isinstance(node, (ast.Name, ast.Constant)):
+        folded = _const_value(node, substitute)
+        if folded is not None:
+            return _number(folded)
     if isinstance(node, ast.Name):
         return _name(node.id, substitute)
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
@@ -279,8 +286,56 @@ def _unary(node: ast.UnaryOp, substitute) -> _Piece:
     return _Piece(mark_l + inner.latex, mark_p + inner.pretty, _UNARY, "other")
 
 
+def _const_value(node: ast.AST, substitute: dict[str, float] | None) -> float | None:
+    """The number ``node`` stands for after substitution, if it is constant."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+        return float(node.value)
+    if isinstance(node, ast.Name) and substitute and node.id in substitute:
+        try:
+            return float(substitute[node.id])
+        except (TypeError, ValueError):
+            return None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        inner = _const_value(node.operand, substitute)
+        if inner is None:
+            return None
+        return inner if isinstance(node.op, ast.UAdd) else -inner
+    if not isinstance(node, ast.BinOp):
+        return None
+    left = _const_value(node.left, substitute)
+    right = _const_value(node.right, substitute)
+    if left is None or right is None:
+        return None
+    if isinstance(node.op, ast.Add):
+        value = left + right
+    elif isinstance(node.op, ast.Sub):
+        value = left - right
+    elif isinstance(node.op, ast.Mult):
+        value = left * right
+    elif isinstance(node.op, ast.Div):
+        if right == 0:
+            return None
+        value = left / right
+    elif isinstance(node.op, ast.Pow):
+        try:
+            value = left ** right
+        except (OverflowError, ValueError, ZeroDivisionError):
+            return None
+        if isinstance(value, complex):
+            return None
+    else:
+        return None
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
 def _binop(node: ast.BinOp, substitute) -> _Piece:
     if isinstance(node.op, ast.Pow):
+        exponent = _const_value(node.right, substitute) if substitute else None
+        # x^(a − 1) with a = 2 is x, not x¹.
+        if exponent == 1:
+            return render(node.left, _POW + 1, substitute)
         if (
             isinstance(node.left, ast.Call)
             and isinstance(node.left.func, ast.Name)
@@ -607,12 +662,15 @@ def _split_ident(name: str) -> tuple[str, str | None]:
 
 def _number(value: float) -> _Piece:
     number = float(value)
-    if math.isfinite(number) and number == int(number) and abs(number) < 1e15:
-        text = str(int(number))
-    elif math.isfinite(number):
-        text = f"{number:.12g}"
-    else:
+    if not math.isfinite(number):
         text = str(number)
+    else:
+        nearest = round(number)
+        if abs(number - nearest) <= 1e-8 * max(1.0, abs(number)) and abs(nearest) < 1e15:
+            text = str(int(nearest))
+        else:
+            # Four significant figures. 1/30 is 0.03333, not 0.0333333333333.
+            text = f"{number:.4g}"
     pretty = text.replace("-", "−")
     prec = _UNARY if text.startswith("-") else _ATOM
     return _Piece(text, pretty, prec, "num")

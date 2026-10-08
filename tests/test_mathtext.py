@@ -166,10 +166,11 @@ def test_several_functions_keep_distinct_legend_entries():
         figure = figure + geom_function("y = a x^2", a=value, xlim=(-1, 1), n=4)
     spec, _ = build_spec(figure)
     assert spec["labs"]["title"] == ""
+    # Symbols stay in the formula; the values follow, so entries differ.
     assert [entry["latex"] for entry in spec["legend"]] == [
-        r"y = 1x^{2}",
-        r"y = 2x^{2}",
-        r"y = 3x^{2}",
+        r"y = ax^{2} \quad (a = 1)",
+        r"y = ax^{2} \quad (a = 2)",
+        r"y = ax^{2} \quad (a = 3)",
     ]
     assert spec["layers"][0]["tip"]["latex"] == r"y = ax^{2} \quad (a = 1)"
 
@@ -225,10 +226,19 @@ def test_clip_note_uses_the_variable_name_and_a_unicode_minus():
     assert "pass ylim= to change" in note
     assert "-" not in note.split("clipped to ", 1)[1].split("]", 1)[0]
 
+    # Blows up in both directions, so the window has a negative bound.
     surface, _ = build_spec(
-        ggplot() + geom_function("t = exp(x*y)", n=21, xlim=(-3, 3), ylim=(-3, 3))
+        ggplot()
+        + geom_function("t = x*y/(x^2 - y^2)", n=21, xlim=(-3, 3), ylim=(-3, 3))
     )
     assert surface["notes"]
-    assert surface["notes"][0].startswith("t clipped to [")
+    assert surface["notes"][0].startswith("t clipped to [−")
     assert "pass zlim= to change" in surface["notes"][0]
-    assert "−" in surface["notes"][0]
+
+    # exp(x*y) is never negative: only the top is clipped.
+    positive, _ = build_spec(
+        ggplot() + geom_function("t = exp(x*y)", n=21, xlim=(-3, 3), ylim=(-3, 3))
+    )
+    assert positive["notes"]
+    low = positive["notes"][0].split("[", 1)[1].split(",", 1)[0]
+    assert not low.startswith(("−", "-"))

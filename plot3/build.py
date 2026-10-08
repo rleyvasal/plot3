@@ -2149,12 +2149,19 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     # have a label of their own. The curve's row would only repeat the title.
     if not str(raw_title).strip() and len(formula_geoms) == 1:
         shown = formula_geoms[0]
-        title = str(getattr(shown, "_legend_label", "") or "")
+        # Symbolic formula, not the value list. That list stays in the legend
+        # when the two differ, so the title does not become a long caption.
+        title = str(
+            getattr(shown, "_title_label", None)
+            or getattr(shown, "_legend_label", "")
+            or ""
+        )
         segments = getattr(shown, "_legend_math", None)
+        title_latex = getattr(shown, "_title_latex", None) or getattr(shown, "_legend_latex", None)
         if segments:
             labs_math["title"] = segments
-        elif getattr(shown, "_legend_latex", None):
-            labs_math["title"] = [{"text": title, "latex": str(shown._legend_latex)}]
+        elif title_latex:
+            labs_math["title"] = [{"text": title, "latex": str(title_latex)}]
         if legend:
             legend = [
                 entry for entry in legend
