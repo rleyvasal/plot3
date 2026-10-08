@@ -23,7 +23,7 @@ from plot3.geoms import (
     geom_col,
     scale_colour_continuous,
 )
-from plot3.scales import ordered_levels, Scale, col_values, fmt_num, resolution
+from plot3.scales import ordered_levels, Scale, col_values, fmt_num, fmt_ticks, nice_ticks, resolution
 
 from plot3.stats3d import isosurface_levels, regular_grid_mesh
 from plot3.table import (
@@ -1043,6 +1043,8 @@ def _axis_label(g, base_map: dict, resolved, axis: str, is3d: bool) -> str:
 
     ``labs(x="")`` removes the title (ggplot2's ``labs(x = NULL)``).
     """
+    if (getattr(g, "theme_options", None) or {}).get(f"axis_title_{axis}") is False:
+        return ""  # theme(axis_title_x=element_blank())
     if axis in g.labs and g.labs[axis] is not None:
         return str(g.labs[axis])
     pscale = getattr(g, f"{axis}scale", None)
@@ -1588,6 +1590,19 @@ def _layer_name(geom) -> str:
     return name if name.startswith(("geom_", "stat_")) else f"geom_{geom.kind}"
 
 
+def _figure_theme(g) -> dict:
+    """The named theme with theme(element_*()) colours laid over it."""
+    theme = dict(THEMES[g.theme_name])
+    tokens = (getattr(g, "theme_options", None) or {}).get("tokens") or {}
+    for key, value in tokens.items():
+        if key == "panel" and value is None:
+            theme["panel"] = theme["surface"]
+        else:
+            theme[key] = value
+    theme.setdefault("panel", theme["surface"])
+    return theme
+
+
 def _theme_opts(g) -> dict | None:
     """theme() settings both renderers read (grid, label angle, title hjust)."""
     options = getattr(g, "theme_options", None) or {}
@@ -1598,6 +1613,10 @@ def _theme_opts(g) -> dict | None:
         out["xAngle"] = float(options["axis_text_x_angle"])
     if "plot_title_hjust" in options:
         out["titleHjust"] = float(options["plot_title_hjust"])
+    # theme(axis_text_x=element_blank()): no tick labels on that axis.
+    for axis in ("x", "y"):
+        if options.get(f"axis_text_{axis}") is False:
+            out[f"{axis}Text"] = False
     return out or None
 
 
@@ -1829,7 +1848,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             step = max(1, (nrows + cap - 1) // cap)
             data = subsample_rows(data, step)
 
-    theme = THEMES[g.theme_name]
+    theme = _figure_theme(g)
     # Apply optional stat_density_3d options onto isosurface layers.
     density_stat = getattr(g, "stat_density_3d", None)
     layers_in = []
@@ -2021,6 +2040,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     dropped_log = 0
     missing_notes: list[str] = []
     size_label = str(g.labs.get("size") or "")
+    alpha_label = str(g.labs.get("alpha") or "")
     transition_meta: dict | None = None
     if transition is not None and getattr(transition, "ranges", None):
         transition_meta = _range_transition_meta(transition)
@@ -2327,6 +2347,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         ) + ([m["group"]] if "group" in m else [])
         if geom.kind == "point" and "size" in m:
             cols.append(m["size"])
+        if geom.kind == "point" and "alpha" in m:
+            cols.append(m["alpha"])
         if geom.kind == "text":
             if "label" not in m:
                 raise ValueError("geom_text() requires aes(label=)")
@@ -2504,12 +2526,22 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 sc = scales.get(axis_name)
                 if shift and sc is not None and sc.kind == "num" and axis_name in vals:
                     sc.widen(np.asarray(vals[axis_name], dtype=np.float64) + float(shift))
+        if geom.kind == "point" and "alpha" in m:
+            akind, av, _ = col_values(sub[m["alpha"]])
+            if akind != "num":
+                raise ValueError("aes(alpha=) needs a numeric column")
+            vals["alpha"] = np.asarray(av, dtype=np.float64)
+            if not alpha_label:
+                alpha_label = str(m["alpha"])
         if geom.kind == "point" and "size" in m:
             skind, sv, _ = col_values(sub[m["size"]])
             if skind != "num":
                 raise ValueError("aes(size=) needs a numeric column")
             sv = np.asarray(sv, dtype=np.float64)
-            vals["size"] = np.where(np.isfinite(sv) & (sv >= 0), sv, np.nan)
+            # Area from zero has no place for negatives; scale_size(range=)
+            # maps the whole data range, negatives included.
+            ranged = getattr(getattr(g, "size_scale", None), "kind", None) == "range"
+            vals["size"] = np.where(np.isfinite(sv) & (ranged | (sv >= 0)), sv, np.nan)
             if not size_label:
                 size_label = str(m["size"])
         _drop_log_rows(vals)
@@ -2524,6 +2556,12 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             values = [_ref_scale_value(scales[axis], v) for v in ref.values]
             scales[axis].widen(np.asarray([v for v in values if v is not None], dtype=np.float64))
 
+    # expand_limits(y=0): the axes reach these values.
+    for axis_name, values in (getattr(g, "expand", None) or {}).items():
+        sc = scales.get(axis_name)
+        if sc is not None and sc.kind in {"num", "dt"} and values:
+            points = [_ref_scale_value(sc, v) for v in values]
+            sc.widen(np.asarray([v for v in points if v is not None], dtype=np.float64))
     # A rug's values belong on the axes too, as ggplot2 trains its scales.
     for rug in rug_layers:
         for axis, series in _rug_series(rug, g):
@@ -2654,21 +2692,56 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         fr = vals.get("frames")
         if fr is not None and fr.get("size") is not None:
             size_pieces.append(np.asarray(fr["size"], dtype=np.float64).ravel())
+    # aes(alpha=): the data's range onto scale_alpha's opacities (0.1 to 1).
+    alpha_pieces = [np.asarray(v["alpha"], dtype=np.float64) for v in layer_vals if v.get("alpha") is not None]
+    alpha_map = None
+    if alpha_pieces:
+        all_a = np.concatenate(alpha_pieces)
+        all_a = all_a[np.isfinite(all_a)]
+        alpha_scale = getattr(g, "alpha_scale", None)
+        a_lo, a_hi = (alpha_scale.limits if alpha_scale is not None and alpha_scale.limits
+                      else (float(all_a.min()), float(all_a.max())) if all_a.size else (0.0, 1.0))
+        o_lo, o_hi = alpha_scale.range if alpha_scale is not None else (0.1, 1.0)
+
+        def alpha_map(v, a_lo=a_lo, a_hi=a_hi, o_lo=o_lo, o_hi=o_hi):
+            v = np.asarray(v, dtype=np.float64)
+            span = a_hi - a_lo
+            t = np.clip((v - a_lo) / span, 0.0, 1.0) if span > 0 else np.ones_like(v)
+            return np.where(np.isfinite(v), o_lo + t * (o_hi - o_lo), o_lo)
+
+        if alpha_scale is not None and alpha_scale.name:
+            alpha_label = alpha_scale.name
     size_max = None
     size_units = None
     if size_pieces:
         all_s = np.concatenate(size_pieces)
-        ok_s = all_s[np.isfinite(all_s) & (all_s >= 0)]
+        ranged = getattr(getattr(g, "size_scale", None), "kind", None) == "range"
+        ok_s = all_s[np.isfinite(all_s) & (ranged | (all_s >= 0))]
         if ok_s.size == 0:
             raise ValueError("aes(size=) has no finite, non-negative values")
         size_max = float(ok_s.max())
         size_units = _bubble_max(is3d, coord)
+        size_scale = getattr(g, "size_scale", None)
+        size_fraction = lambda v: _area_fraction(v, size_max)  # noqa: E731
+        if size_scale is not None and size_scale.kind == "area" and size_scale.max_size:
+            size_units = size_scale.max_size
+        elif size_scale is not None and size_scale.kind == "range":
+            # ggplot2's scale_size: the data's range onto (r0, r1) by area.
+            lo_s, hi_s = size_scale.limits or (float(ok_s.min()), size_max)
+            r0, r1 = size_scale.range
+            size_units = r1
+
+            def size_fraction(v, lo_s=lo_s, hi_s=hi_s, r0=r0, r1=r1):
+                v = np.asarray(v, dtype=np.float64)
+                span = hi_s - lo_s
+                t = np.where(np.isfinite(v), np.clip((v - lo_s) / span, 0.0, 1.0) if span > 0 else 1.0, np.nan)
+                return np.sqrt(r0 * r0 + t * (r1 * r1 - r0 * r0)) / r1
         for vals in layer_vals:
             if vals.get("size") is not None:
-                vals["size_frac"] = _area_fraction(vals["size"], size_max)
+                vals["size_frac"] = size_fraction(vals["size"])
             fr = vals.get("frames")
             if fr is not None and fr.get("size") is not None:
-                fr["size_frac"] = _area_fraction(fr["size"], size_max)
+                fr["size_frac"] = size_fraction(fr["size"])
 
     # Pass 2 — encode payloads per layer (quantized against the shared scales)
     # Distinct default colours so several formulas can share a legend.
@@ -3026,6 +3099,12 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                     spec_l, geom, vals, order, li, payloads, g.compress,
                     getattr(g, "shape_scale", None),
                 )
+            if vals.get("alpha") is not None and alpha_map is not None:
+                opacity = alpha_map(np.asarray(vals["alpha"], dtype=np.float64)[order])
+                enc = encode_norm(opacity, 0.0, 1.0, quantize=g.quantize, compress=g.compress)
+                pid = f"p{li}op"
+                payloads.append((pid, enc["b64"]))
+                spec_l["opacity"] = {"id": pid, "dtype": enc["dtype"]}
             if vals.get("size_frac") is not None:
                 frac = np.asarray(vals["size_frac"], dtype=np.float64)[order]
                 present = np.isfinite(frac)
@@ -3178,7 +3257,9 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             cats = color_scale[1]
             cspec = {"kind": "cat", "palette": cat_colours, "cats": cats}
             user_scale = getattr(g, "colour_scale", None)
-            if user_scale is not None:
+            if user_scale is not None and getattr(user_scale, "identity", False):
+                legend = None  # the colours are the data: nothing to explain
+            elif user_scale is not None:
                 legend = user_scale.legend_entries(list(cats), cat_colours)
                 for entry in legend:
                     entry.pop("_level", None)
@@ -3295,11 +3376,32 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         word = "value" if dropped_log == 1 else "values"
         notes.append(f"{dropped_log} non-positive {word} omitted on a log scale")
 
+    alpha_legend = None
+    if alpha_map is not None:
+        a_lo_v, a_hi_v = alpha_map.__defaults__[0], alpha_map.__defaults__[1]
+        values = [v for v in nice_ticks(a_lo_v, a_hi_v, 4) if a_lo_v <= v <= a_hi_v] or [a_lo_v, a_hi_v]
+        alpha_legend = {
+            "label": alpha_label or "alpha",
+            "breaks": [
+                {"label": label, "alpha": float(alpha_map(np.asarray([v]))[0])}
+                for v, label in zip(values, fmt_ticks(values))
+            ],
+        }
     size_legend = None
     if size_max is not None:
         breaks = []
-        for value in _size_breaks(size_max):
-            frac = 0.0 if size_max <= 0 else math.sqrt(max(value, 0.0) / size_max)
+        size_scale = getattr(g, "size_scale", None)
+        if size_scale is not None and size_scale.breaks:
+            values = list(size_scale.breaks)
+        elif size_scale is not None and size_scale.kind == "range":
+            lo_s, hi_s = size_scale.limits or (float(ok_s.min()), size_max)
+            values = [v for v in nice_ticks(lo_s, hi_s, 4) if lo_s <= v <= hi_s] or [lo_s, hi_s]
+        else:
+            values = _size_breaks(size_max)
+        if size_scale is not None and size_scale.name:
+            size_label = size_scale.name
+        for value in values:
+            frac = float(size_fraction(np.asarray([value]))[0])
             breaks.append({
                 "value": float(value),
                 "label": fmt_num(float(value)),
@@ -3312,6 +3414,14 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             "breaks": breaks,
         }
 
+    if (
+        size_legend and alpha_legend and size_legend["label"] == alpha_legend["label"]
+        and [b["label"] for b in size_legend["breaks"]] == [b["label"] for b in alpha_legend["breaks"]]
+    ):
+        # One column for both size and alpha: one legend, as ggplot2 merges them.
+        for sb, ab in zip(size_legend["breaks"], alpha_legend["breaks"]):
+            sb["alpha"] = ab["alpha"]
+        alpha_legend = None
     spec = {
         "v": 1,
         "is3d": is3d,
@@ -3368,6 +3478,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             else _legend_position_spec(getattr(g, "legend_position", None))
         ),
         "sizeLegend": size_legend,
+        "alphaLegend": alpha_legend,
         "transition": transition_meta,
         "slider": slider_meta,
         "layers": layer_specs,
@@ -3408,6 +3519,15 @@ def _panel_grid(n: int, ncol: int | None, nrow: int | None) -> tuple[int, int]:
         return (n + 2) // 3, 3
     rows = int(math.ceil(math.sqrt(n)))
     return int(math.ceil(n / rows)), rows
+
+
+def _strip_text(facet, column, level) -> str:
+    """A strip's label: the level, or the facet's labeller applied to it."""
+    from plot3.geoms import strip_label
+
+    text = _level_text(level)
+    rule = getattr(facet, "labeller", None)
+    return text if rule is None else strip_label(rule, column, text)
 
 
 def _level_text(level) -> str:
@@ -3521,6 +3641,15 @@ def _facet_legend_html(spec: dict, theme: dict) -> str:
             for b in size["breaks"]
         )
         blocks.append(f"<b style='color:{ink}'>{esc(str(size.get('label') or 'size'))}</b>{rows}")
+    alpha = spec.get("alphaLegend")
+    if alpha and alpha.get("breaks"):
+        rows = "".join(
+            f"<div><span style='display:inline-block;vertical-align:middle;margin-right:6px;"
+            f"border-radius:50%;width:10px;height:10px;background:{ink};opacity:{b.get('alpha', 1)}'>"
+            f"</span>{esc(str(b.get('label')))}</div>"
+            for b in alpha["breaks"]
+        )
+        blocks.append(f"<b style='color:{ink}'>{esc(str(alpha.get('label') or 'alpha'))}</b>{rows}")
     if not blocks:
         return ""
     return "<div id='flegend'>" + "<div style='height:6px'></div>".join(blocks) + "</div>"
@@ -3563,7 +3692,7 @@ def facet_cells(g: ggplot) -> dict:
             raise ValueError("facet_wrap() found no panel levels")
         ncol, nrow = _panel_grid(len(levels), facet.ncol, facet.nrow)
         for index, level in enumerate(levels):
-            label = _level_text(level)
+            label = _strip_text(facet, column, level)
             panel = child(_clone_ggplot_with_data(g, _subset(g.data, column, level)))
             panel.labs = {
                 k: v for k, v in panel.labs.items()
@@ -3597,8 +3726,8 @@ def facet_cells(g: ggplot) -> dict:
         "ncol": ncol,
         "nrow": nrow,
         "cells": cells,
-        "col_strips": [_level_text(v) for v in col_levels] if facet.cols else None,
-        "row_strips": [_level_text(v) for v in row_levels] if facet.rows else None,
+        "col_strips": [_strip_text(facet, facet.cols, v) for v in col_levels] if facet.cols else None,
+        "row_strips": [_strip_text(facet, facet.rows, v) for v in row_levels] if facet.rows else None,
         "header": header,
         "kind": "grid",
     }
@@ -3674,7 +3803,7 @@ def _build_doc_faceted(g: ggplot, facet) -> str:
 
     layout = facet_cells(g)
     ncol, nrow = layout["ncol"], layout["nrow"]
-    theme = THEMES[g.theme_name]
+    theme = _figure_theme(g)
     col_strips = layout.get("col_strips")
     row_strips = layout.get("row_strips")
     by_pos = {(c["row"], c["col"]): c for c in layout["cells"]}

@@ -179,7 +179,7 @@ const PAL = (S.color.palette || []).map(hex2rgb);
 
 // ── payload decode for every layer ──────────────────────────────────────────
 const axesList = S.is3d ? ['x','y','z'] : ['x','y'];
-const extraChans = ['ymin','lower','middle','upper','ymax','ox','oy'];
+const extraChans = ['ymin','lower','middle','upper','ymax','ox','oy','opacity'];
 for (const L of S.layers) {
   for (const a of axesList) {
     if (L[a] && L[a].id) L[a].data = toNorm(await decode(L[a].id, L[a].dtype));
@@ -264,7 +264,8 @@ function sizeLegendHTML() {
   const rows = sl.breaks.map(b => {
     const d = Math.max(6, Math.round((b.t || 0) * 26));
     return '<div class="sz"><span class="bub" style="width:' + d + 'px;height:' + d
-      + 'px;background:' + T.ink2 + '"></span><span>' + plot3Esc(b.label) + '</span></div>';
+      + 'px;background:' + T.ink2 + (b.alpha != null ? ';opacity:' + b.alpha : '') +
+      '"></span><span>' + plot3Esc(b.label) + '</span></div>';
   }).join('');
   const title = sl.label
     ? '<b style="color:' + T.ink + '">' + plot3Esc(sl.label) + '</b>' : '';
@@ -381,7 +382,15 @@ function keyLegendsHTML() {
   }
   return h;
 }
-const szHTML = sizeLegendHTML() + keyLegendsHTML();
+// aes(alpha=): a dot at each break's opacity.
+function alphaLegendHTML() {
+  const al = S.alphaLegend;
+  if (!al || !al.breaks || !al.breaks.length) return '';
+  const rows = al.breaks.map(b => '<div class="sz"><span class="bub" style="width:10px;height:10px;background:' +
+    T.ink + ';opacity:' + b.alpha + '"></span><span>' + plot3Esc(b.label) + '</span></div>').join('');
+  return '<div class="sz-block"><b style="color:' + T.ink + '">' + plot3Esc(al.label) + '</b>' + rows + '</div>';
+}
+const szHTML = sizeLegendHTML() + alphaLegendHTML() + keyLegendsHTML();
 // Class entries and a height colour bar together (geom_box3d on a cloud).
 function barHTML() {
   if (S.labs.colorBar == null || !S.color || S.color.kind !== 'num' || S.color.guide === false) return '';
@@ -638,6 +647,8 @@ function circleTexture() {
   return circleMap;
 }
 function bubbleMaterial(opacity, sizeAtten) {
+  // size 1: three.js sets the size uniform to the pixel ratio, so aSize is
+  // in CSS pixels on any screen, as the saved files measure it.
   const m = new THREE.PointsMaterial({
     size: 1,
     map: circleTexture(),
@@ -661,7 +672,7 @@ function bubbleMaterial(opacity, sizeAtten) {
         '#include <color_vertex>',
         '#include <color_vertex>\\nvAlpha = aAlpha;'
       )
-      .replace('gl_PointSize = size;', 'gl_PointSize = max(aSize, 0.0);');
+      .replace('gl_PointSize = size;', 'gl_PointSize = max(aSize, 0.0) * size;');
     shader.fragmentShader = shader.fragmentShader
       .replace(
         'uniform float opacity;',
@@ -724,16 +735,21 @@ function addBubbleLayer(L, ext, sizeAtten) {
     pos[i * 3 + 2] = z * ext[2];
     let sz = (typeof L.size === 'number') ? L.size : 6;
     if (L.size && L.size.data) sz = L.size.data[i] * L.size.max;
+    // The circle fills 28/32 of its sprite: widen it so the dot's diameter
+    // is the size, as in saved files.
+    if (!sizeAtten) sz /= 0.875;
     aSize[i] = sz;
-    baseAlpha[i] = 1;
-    aAlpha[i] = 1;
+    // aes(alpha=): each point's own opacity.
+    const op = (L.opacity && L.opacity.data) ? L.opacity.data[i] : 1;
+    baseAlpha[i] = op;
+    aAlpha[i] = op;
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.setAttribute('color', new THREE.BufferAttribute(cols, 3));
   g.setAttribute('aSize', new THREE.BufferAttribute(aSize, 1));
   g.setAttribute('aAlpha', new THREE.BufferAttribute(aAlpha, 1));
-  const pt = new THREE.Points(g, bubbleMaterial(L.alpha, sizeAtten));
+  const pt = new THREE.Points(g, bubbleMaterial((L.opacity && L.opacity.data) ? 1 : L.alpha, sizeAtten));
   scene.add(pt);
   const entry = { L, ext, pos, cols, aSize, aAlpha, baseAlpha, geom: g };
   bubbleEntries.push(entry);
@@ -1539,7 +1555,7 @@ if (!S.is3d) {
     const n = L.n;
     const cols = layerColors(L, hex2rgb(T.cat[0]));
     const isCat = L.color && L.color.kind === 'cat';
-    if (L.kind === 'point' && (L.frames || (L.size && L.size.id))) {
+    if (L.kind === 'point' && (L.frames || (L.size && L.size.id) || (L.opacity && L.opacity.id))) {
       addBubbleLayer(L, [1, 1, 1], false);
     } else if (L.kind === 'point') {
       if (L.shape) {
@@ -1866,11 +1882,18 @@ if (!S.is3d) {
     // cap tick count by panel size so labels never collide
     const xt = VOID2 ? [] : thin(ticksFor('x', x0, x1), Math.max(5, Math.floor(W / 80)));
     const yt = VOID2 ? [] : thin(ticksFor('y', y0, y1), Math.max(5, Math.floor(H / 40)));
-    const showGrid = THEME_OPTS.panelGrid !== false;
+    const panelFill = T.panel || T.surface;
+    // theme_grey's grey panel: behind the grid and the data.
+    if (String(panelFill).toLowerCase() !== String(T.surface).toLowerCase())
+      grid += `<rect x="${M.l}" y="${M.t}" width="${W}" height="${H}" fill="${panelFill}"/>`;
+    const showGrid = THEME_OPTS.panelGrid !== false &&
+      String(T.grid).toLowerCase() !== String(panelFill).toLowerCase();
+    const xText = THEME_OPTS.xText !== false, yText = THEME_OPTS.yText !== false;
     for (const [t, lab] of xt) {
       const X = px(t);
       if (X < M.l - 1 || X > M.l + W + 1) continue;
       if (showGrid) grid += `<line x1="${X}" y1="${M.t}" x2="${X}" y2="${M.t+H}" stroke="${T.grid}"/>`;
+      if (!xText) continue;
       if (X_ANGLE > 0) {
         const ty = M.t + H + 8;
         s += `<text x="${X}" y="${ty}" fill="${T.muted}" text-anchor="end" dominant-baseline="middle" transform="rotate(${-X_ANGLE} ${X} ${ty})">${lab}</text>`;
@@ -1882,7 +1905,7 @@ if (!S.is3d) {
       const Y = py(t);
       if (Y < M.t - 1 || Y > M.t + H + 1) continue;
       if (showGrid) grid += `<line x1="${M.l}" y1="${Y}" x2="${M.l+W}" y2="${Y}" stroke="${T.grid}"/>`;
-      s += `<text x="${M.l-7}" y="${Y+4}" fill="${T.muted}" text-anchor="end">${lab}</text>`;
+      if (yText) s += `<text x="${M.l-7}" y="${Y+4}" fill="${T.muted}" text-anchor="end">${lab}</text>`;
     }
     if (!VOID2) s += `<rect x="${M.l}" y="${M.t}" width="${W}" height="${H}" fill="none" stroke="${T.axis}"/>`;
     // geom_rug: a short tick at the panel edge for every value.
@@ -2319,7 +2342,7 @@ if (!S.is3d) {
       pos[i*3+1] = L.y.data[i] * ext[1];
       pos[i*3+2] = L.z.data[i] * ext[2];
     }
-    if (L.kind === 'point' && (L.frames || (L.size && L.size.id))) {
+    if (L.kind === 'point' && (L.frames || (L.size && L.size.id) || (L.opacity && L.opacity.id))) {
       addBubbleLayer(L, ext, sizeAtten);
     } else if (L.kind === 'point') {
       // Default size is set in Python for unit-cube scene (pcviz-relative).
@@ -2932,10 +2955,15 @@ function installSave() {
         ctx.lineTo(+el.getAttribute('x2'), +el.getAttribute('y2'));
         ctx.stroke();
       } else if (tag === 'rect') {
-        ctx.strokeStyle = el.getAttribute('stroke') || T.axis;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(+el.getAttribute('x'), +el.getAttribute('y'),
-          +el.getAttribute('width'), +el.getAttribute('height'));
+        const rx = +el.getAttribute('x'), ry = +el.getAttribute('y');
+        const rw = +el.getAttribute('width'), rh = +el.getAttribute('height');
+        const fill = el.getAttribute('fill');
+        if (fill && fill !== 'none') { ctx.fillStyle = fill; ctx.fillRect(rx, ry, rw, rh); }
+        if (el.getAttribute('stroke') || !fill) {
+          ctx.strokeStyle = el.getAttribute('stroke') || T.axis;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(rx, ry, rw, rh);
+        }
       } else if (tag === 'text') {
         const x = +el.getAttribute('x'), y = +el.getAttribute('y');
         const anchor = el.getAttribute('text-anchor') || 'start';

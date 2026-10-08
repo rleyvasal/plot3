@@ -277,8 +277,13 @@ class ColourScale:
 
     def __init__(self, kind, *, name=None, values=None, palette_fn=None,
                  breaks=None, labels=None, na_value="#7f7f7f",
-                 low=None, mid=None, high=None, midpoint=None, limits=None):
+                 low=None, mid=None, high=None, midpoint=None, limits=None,
+                 stops=None, positions=None, identity=False):
         self.kind = kind  # "discrete" | "continuous"
+        self.stops = None if stops is None else [to_hex(c) for c in stops]
+        self.positions = None if positions is None else [float(v) for v in positions]
+        # scale_*_identity(): the column holds the colours themselves.
+        self.identity = bool(identity)
         self.name = name
         self.values = values
         self.palette_fn = palette_fn
@@ -293,6 +298,8 @@ class ColourScale:
         return [to_hex(c) for c in self._colours(levels, default)]
 
     def _colours(self, levels: list[str], default: list[str]) -> list[str]:
+        if self.identity:
+            return [self.na_value if level in {"nan", "None", "<NA>"} else level for level in levels]
         if isinstance(self.values, dict):
             given = {str(k): v for k, v in self.values.items()}
             return [given.get(level, self.na_value) for level in levels]
@@ -313,6 +320,14 @@ class ColourScale:
         """Continuous stops; a diverging scale centres ``mid`` on ``midpoint``."""
         if self.kind != "continuous":
             return None
+        if self.stops is not None:
+            if self.positions is None:
+                return list(self.stops)
+            # gradientn(values=): stops at those places along the scale.
+            rgb = np.array([_hex_rgb(c) for c in self.stops])
+            where = np.asarray(self.positions, dtype=np.float64)
+            grid = np.linspace(0.0, 1.0, 65)
+            return [_rgb_hex([np.interp(u, where, rgb[:, k]) for k in range(3)]) for u in grid]
         if self.mid is None:
             return [to_hex(self.low), to_hex(self.high)]
         midpoint = 0.0 if self.midpoint is None else float(self.midpoint)
@@ -415,6 +430,40 @@ def scale_colour_gradient2(low="#832424", mid="#FFFFFF", high="#3A3A98", *, midp
                        midpoint=midpoint, limits=limits)
 
 
+def scale_colour_gradientn(colours=None, *, values=None, limits=None, name=None, colors=None):
+    """A continuous ramp through several ``colours``; ``values`` (0..1, one
+    per colour) places them along the scale."""
+    stops = colours if colours is not None else colors
+    if not stops or len(stops) < 2:
+        raise ValueError("scale_colour_gradientn() needs at least two colours")
+    if values is not None and len(values) != len(stops):
+        raise ValueError("scale_colour_gradientn(values=) needs one value per colour")
+    return ColourScale("continuous", name=name, stops=list(stops), positions=values, limits=limits)
+
+
+def scale_colour_distiller(palette="Blues", *, direction=-1, limits=None, name=None):
+    """A ColorBrewer palette stretched over a number (ggplot2's distiller).
+    ``direction=-1`` (the default, as in ggplot2) puts the darkest colour at
+    the low end."""
+    if palette not in _BREWER:
+        raise ValueError(f"palette {palette!r} is not one of {sorted(_BREWER)}")
+    stops = list(_BREWER[palette])
+    if direction == -1:
+        stops = stops[::-1]
+    return ColourScale("continuous", name=name, stops=stops, limits=limits)
+
+
+def scale_colour_identity(*, name=None, na_value="#7f7f7f"):
+    """Use the column's own colours ("red", "#1b9e77"), with no legend."""
+    return ColourScale("discrete", name=name, identity=True, na_value=na_value)
+
+
+scale_fill_gradientn = scale_colour_gradientn
+scale_color_gradientn = scale_colour_gradientn
+scale_fill_distiller = scale_colour_distiller
+scale_color_distiller = scale_colour_distiller
+scale_fill_identity = scale_colour_identity
+scale_color_identity = scale_colour_identity
 scale_fill_manual = scale_colour_manual
 scale_fill_brewer = scale_colour_brewer
 scale_fill_okabe_ito = scale_colour_okabe_ito
@@ -470,6 +519,59 @@ def scale_linetype_manual(values, *, breaks=None, labels=None, name=None):
     return KeyScale("linetype", values, breaks, labels, name)
 
 
+# ── size and alpha ───────────────────────────────────────────────────────────
+
+
+class SizeScale:
+    """How a number maps to point size: by area across a ``range``
+    (scale_size), or by area from zero (scale_size_area)."""
+
+    def __init__(self, kind, *, range=None, max_size=None, limits=None, breaks=None, name=None):
+        self.kind = kind  # "range" | "area"
+        self.range = None if range is None else (float(range[0]), float(range[1]))
+        self.max_size = None if max_size is None else float(max_size)
+        self.limits = None if limits is None else (float(limits[0]), float(limits[1]))
+        self.breaks = None if breaks is None else [float(b) for b in breaks]
+        self.name = name
+        if self.range is not None and not (0 <= self.range[0] <= self.range[1] and self.range[1] > 0):
+            raise ValueError("scale_size(range=) is (smallest, largest), for example (4, 23)")
+
+
+def scale_size(name=None, *, range=(4.0, 23.0), limits=None, breaks=None):
+    """Point area across ``range``: the smallest value gets the first size,
+    the largest the second (ggplot2's default size scale). Sizes are in the
+    units of ``geom_point(size=)`` (pixels in 2D); (4, 23) is ggplot2's
+    ``range = c(1, 6)``."""
+    return SizeScale("range", range=range, limits=limits, breaks=breaks, name=name)
+
+
+def scale_size_area(name=None, *, max_size=23.0, breaks=None):
+    """Point area in proportion to the value, zero at zero (plot3's default,
+    with ``max_size`` the largest point)."""
+    return SizeScale("area", max_size=max_size, breaks=breaks, name=name)
+
+
+class AlphaScale:
+    """How a number maps to opacity: across ``range`` (0..1)."""
+
+    def __init__(self, *, range=(0.1, 1.0), limits=None, name=None):
+        lo, hi = float(range[0]), float(range[1])
+        if not (0.0 <= lo <= 1.0 and 0.0 <= hi <= 1.0):
+            raise ValueError("scale_alpha(range=) values are opacities from 0 to 1")
+        self.range = (lo, hi)
+        self.limits = None if limits is None else (float(limits[0]), float(limits[1]))
+        self.name = name
+
+
+def scale_alpha(name=None, *, range=(0.1, 1.0), limits=None):
+    """Opacity for ``aes(alpha=)``: the smallest value is ``range[0]``, the
+    largest ``range[1]``, as in ggplot2."""
+    return AlphaScale(range=range, limits=limits, name=name)
+
+
+scale_alpha_continuous = scale_alpha
+
+
 __all__ = [
     "scale_x_continuous", "scale_y_continuous", "scale_x_reverse", "scale_y_reverse",
     "scale_x_discrete", "scale_y_discrete", "scale_x_date", "scale_y_date",
@@ -482,4 +584,8 @@ __all__ = [
     "scale_colour_gradient", "scale_fill_gradient", "scale_color_gradient",
     "scale_colour_gradient2", "scale_fill_gradient2", "scale_color_gradient2",
     "scale_shape_manual", "scale_linetype_manual",
+    "scale_colour_gradientn", "scale_fill_gradientn", "scale_color_gradientn",
+    "scale_colour_distiller", "scale_fill_distiller", "scale_color_distiller",
+    "scale_colour_identity", "scale_fill_identity", "scale_color_identity",
+    "scale_size", "scale_size_area", "scale_alpha", "scale_alpha_continuous",
 ]

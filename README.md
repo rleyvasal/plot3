@@ -187,9 +187,11 @@ and `aes(colour=)` for points and lines.
 |---|---|
 | Position | `scale_x_continuous(name, limits, breaks, labels, trans="log10"/"reverse")`, `scale_x_discrete(limits, labels)`, `scale_x_date(date_breaks, date_labels)`, `scale_x_log10`, `scale_x_reverse`, `xlim`, `ylim`, `lims` (and the `y` versions) |
 | Label formats | `"percent"`, `"comma"`, `"dollar"`, `"scientific"`, `"{:.1f} kg"`, a list, or a function |
-| Discrete colour / fill | `scale_colour_manual`, `scale_colour_brewer(palette="Set2")`, `scale_colour_viridis_d`, `scale_colour_grey`, `scale_colour_okabe_ito` (colour-blind safe) |
-| Continuous colour / fill | `scale_colour_gradient(low, high)`, `scale_colour_gradient2(low, mid, high, midpoint)`, `scale_colour_viridis_c`, `scale_colour_continuous(trans="log10")` |
+| Discrete colour / fill | `scale_colour_manual`, `scale_colour_brewer(palette="Set2")`, `scale_colour_viridis_d`, `scale_colour_grey`, `scale_colour_okabe_ito` (colour-blind safe), `scale_colour_identity` (the column holds colours) |
+| Continuous colour / fill | `scale_colour_gradient(low, high)`, `scale_colour_gradient2(low, mid, high, midpoint)`, `scale_colour_gradientn(colours, values)`, `scale_colour_distiller(palette="RdBu")`, `scale_colour_viridis_c`, `scale_colour_continuous(trans="log10")` |
+| Size / alpha | `scale_size(range=(4, 23))` (by area across the data's range, as ggplot2), `scale_size_area(max_size=)` (area from zero), `scale_alpha(range=(0.1, 1))` for `aes(alpha=)` |
 | Shape / linetype | `scale_shape_manual`, `scale_linetype_manual` |
+| Limits | `expand_limits(y=0)` makes an axis reach a value with no data there |
 
 Every colour scale has `scale_fill_*` and `scale_color_*` names. Colours can
 be CSS names (`"steelblue"`), R greys (`"grey50"`), `"rgb(1,2,3)"`, or hex.
@@ -210,7 +212,23 @@ Themes: `theme_bw` (default for saved files), `theme_classic`,
 (default in the interactive viewer), and `theme_lidar` (driving scenes). Each takes `base_size` (points) and `base_family`. `theme()` sets
 `legend_position` (`"right"`, `"bottom"`, `"none"`, or `(x, y)` inside the
 panel), `legend_title=False`, `panel_grid=False`, `axis_text_x_angle`,
-`plot_title_hjust`, `base_size`, and `base_family`.
+`plot_title_hjust`, `base_size`, and `base_family`. `theme_grey` (ggplot2's
+grey panel) and `theme_linedraw` are there too.
+
+ggplot2's elements work, with R's dotted names or underscores:
+
+```python
+(ggplot(trial, aes(x="arm", y="response")) + geom_boxplot() + theme_bw()
+ + theme(**{"axis.text.x": element_text(angle=45), "panel.grid": element_blank(),
+            "plot.title": element_text(hjust=0.5),
+            "panel.background": element_rect(fill="grey95")}))
+```
+
+`element_blank()` hides axis text, axis titles, the grid, the panel border,
+or the legend title; colours in `element_text`, `element_line`, and
+`element_rect` recolour text, grid, border, and backgrounds. Parts plot3
+does not draw (minor grid, tick length) are accepted, and anything else it
+cannot draw warns.
 
 `ggtitle("Response", subtitle=)`, `xlab()`, and `ylab()` are shortcuts for
 `labs()`. `guides(colour="none")` hides one legend (also `fill`, `size`,
@@ -230,6 +248,7 @@ remove the rows outside first.
 
 ```python
 ggplot(trial, aes(x="dose", y="response")) + geom_point() + facet_wrap("arm")
+ggplot(trial, aes(x="dose", y="response")) + geom_point() + facet_wrap("arm", labeller="label_both")
 (ggplot(trial, aes(x="dose", y="response", colour="arm"))
  + geom_point() + facet_grid("sex ~ arm"))                # rows ~ columns
 
@@ -390,9 +409,9 @@ tree) is shortened to twice its width so it does not become a thin column;
 | Positions | `position="stack"/"dodge"/"fill"/"identity"/"jitter"`, `position_dodge(width)`, `position_stack()`, `position_fill()`, `position_jitter()`, `position_jitterdodge()`, `position_nudge()` |
 | Functions | `geom_function`, `geom_vector_field`, `area`, `tangent`, `derivative` |
 | Scales | see [Scales](#scales) |
-| Coordinates | `coord_cartesian`, `coord_flip`, `coord_equal`, `coord_polar`, `coord_3d` |
-| Facets and layout | `facet_wrap`, `facet_grid`, `p1 | p2`, `p1 / p2`, `plot_layout`, `plot_annotation` |
-| Labels and themes | `labs(title, subtitle, caption, tag, x, y, colour, fill)`, `ggtitle`, `xlab`, `ylab`, `guides`, `theme_*`, `theme()` |
+| Coordinates | `coord_cartesian`, `coord_flip`, `coord_equal` / `coord_fixed`, `coord_polar`, `coord_3d` |
+| Facets and layout | `facet_wrap`, `facet_grid`, `labeller="label_both"` / `labeller(var=dict)`, `p1 | p2`, `p1 / p2`, `plot_layout`, `plot_annotation` |
+| Labels and themes | `labs(title, subtitle, caption, tag, x, y, colour, fill, alpha)`, `ggtitle`, `xlab`, `ylab`, `guides`, `theme_*`, `theme()`, `element_text`, `element_line`, `element_rect`, `element_blank` |
 | Animation | `transition_time`, `transition_states`, `slider` |
 | 3D | `geom_point3d`, `geom_surface`, `geom_isosurface`, `geom_box3d`, `stat_density_3d`, `read_bin` |
 

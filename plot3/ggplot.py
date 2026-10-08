@@ -23,6 +23,7 @@ from plot3.geoms import (
     derivative,
     facet_grid,
     facet_wrap,
+    expand_limits,
     guides,
     labs,
     scale_colour_continuous,
@@ -319,6 +320,11 @@ class ggplot:
             g._addons.append((len(g.layers) - 1, other))
         elif isinstance(other, labs):
             g.labs.update(other)
+        elif isinstance(other, expand_limits):
+            merged = dict(getattr(g, "expand", None) or {})
+            for axis, values in other.values.items():
+                merged[axis] = list(merged.get(axis, [])) + list(values)
+            g.expand = merged
         elif isinstance(other, guides):
             g.guides = {**(getattr(g, "guides", None) or {}), **other.hidden}
         elif isinstance(other, _Theme):
@@ -334,7 +340,11 @@ class ggplot:
                 g.theme_base_size = options.pop("base_size")
             if "base_family" in options:
                 g.theme_family = options.pop("base_family")
-            g.theme_options = {**getattr(g, "theme_options", {}), **options}
+            before = dict(getattr(g, "theme_options", {}) or {})
+            if "tokens" in options:
+                # Colours from element_*(): a later theme() adds to earlier ones.
+                options["tokens"] = {**before.get("tokens", {}), **options["tokens"]}
+            g.theme_options = {**before, **options}
         elif isinstance(other, scale_colour_continuous):
             g.cscale = other
         elif isinstance(other, (facet_wrap, facet_grid)):
@@ -363,6 +373,10 @@ class ggplot:
                 )
         elif isinstance(other, _scaling.ColourScale):
             g.colour_scale = other
+        elif isinstance(other, _scaling.SizeScale):
+            g.size_scale = other
+        elif isinstance(other, _scaling.AlphaScale):
+            g.alpha_scale = other
         elif isinstance(other, _scaling.KeyScale):
             if other.aesthetic == "shape":
                 g.shape_scale = other

@@ -74,6 +74,17 @@ _THEMES = {
         grid="#ffffff", axis="#ffffff", cat=_CAT_LIGHT, seq=_SEQ,
         frame="none", void=True,
     ),
+    # ggplot2's default theme_grey: a grey panel with white grid lines.
+    "grey": dict(
+        surface="#ffffff", panel="#ebebeb", ink="#000000", ink2="#000000",
+        muted="#4d4d4d", grid="#ffffff", axis="#ebebeb", cat=_CAT_LIGHT, seq=_SEQ,
+        frame="none",
+    ),
+    # ggplot2 theme_linedraw: white panel, thin dark grid, black border.
+    "linedraw": dict(
+        surface="#ffffff", ink="#000000", ink2="#000000", muted="#000000",
+        grid="#c7c7c7", axis="#000000", cat=_CAT_LIGHT, seq=_SEQ, frame="box",
+    ),
     # ggplot2 theme_minimal: white page, light grid, no axis box.
     "minimal": dict(
         surface="#ffffff", ink="#000000", ink2="#222222", muted="#4d4d4d",

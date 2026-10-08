@@ -103,6 +103,7 @@ class aes(dict):
         height=None,
         length=None,
         angle=None,
+        alpha=None,
     ):
         super().__init__()
         colour_value = color if color is not None else colour
@@ -124,7 +125,8 @@ class aes(dict):
                      ("width", width),
                      ("height", height),
                      ("length", length),
-                     ("angle", angle)):
+                     ("angle", angle),
+                     ("alpha", alpha)):
             if v is not None:
                 self[k] = _as_column_name(v)
 
@@ -330,6 +332,26 @@ class coord_equal:
 
     def to_spec(self) -> dict:
         return {"aspect": "equal", "ratio": self.ratio}
+
+
+# ggplot2's coord_fixed(ratio=) is coord_equal by another name.
+coord_fixed = coord_equal
+
+
+class expand_limits:
+    """Make the axes reach these values even with no data there:
+    ``expand_limits(y=0)`` starts bars or a line at zero (ggplot2's
+    ``expand_limits``). Each argument is one value or a list."""
+
+    def __init__(self, x=None, y=None, colour=None, color=None):
+        def as_list(v):
+            if v is None:
+                return []
+            return list(v) if isinstance(v, (list, tuple)) else [v]
+
+        self.values = {"x": as_list(x), "y": as_list(y)}
+        if colour is not None or color is not None:
+            raise ValueError("expand_limits() takes x= and y=; use scale_colour_*(limits=) for colour")
 
 
 class coord_polar:
@@ -1631,6 +1653,7 @@ class facet_wrap:
         ncol: int | None = None,
         nrow: int | None = None,
         scales: str = "fixed",
+        labeller=None,
     ):
         if not isinstance(facets, str) or not facets.strip():
             raise TypeError("facet_wrap() facets must be a column name string")
@@ -1655,6 +1678,7 @@ class facet_wrap:
         self.ncol = ncol
         self.nrow = nrow
         self.scales = scales
+        self.labeller = _check_labeller(labeller)
 
 
 class facet_grid:
@@ -1667,7 +1691,8 @@ class facet_grid:
     shares axes across panels; ``"free"`` lets each panel fit its data.
     """
 
-    def __init__(self, facets: str | None = None, *, rows=None, cols=None, scales: str = "fixed"):
+    def __init__(self, facets: str | None = None, *, rows=None, cols=None, scales: str = "fixed",
+                 labeller=None):
         if facets is not None:
             if not isinstance(facets, str) or "~" not in facets:
                 raise ValueError('facet_grid() takes "rows ~ cols", or rows= and cols=')
@@ -1683,6 +1708,61 @@ class facet_grid:
         self.rows = rows
         self.cols = cols
         self.scales = scales
+        self.labeller = _check_labeller(labeller)
+
+
+def label_value(variable, value) -> str:
+    """A strip shows the level alone: ``high``."""
+    return str(value)
+
+
+def label_both(variable, value) -> str:
+    """A strip shows the column and the level: ``arm: high``."""
+    return f"{variable}: {value}"
+
+
+def labeller(**by_variable):
+    """A labeller per facet column: ``labeller(arm=label_both)``, or a dict
+    of level names, ``labeller(sex={"F": "Female", "M": "Male"})``."""
+    parts = {name: _check_labeller(rule) for name, rule in by_variable.items()}
+
+    def label(variable, value):
+        rule = parts.get(variable)
+        return strip_label(rule, variable, value)
+
+    return label
+
+
+def as_labeller(mapping):
+    """Level names from a dict: ``as_labeller({"F": "Female", "M": "Male"})``."""
+    return _check_labeller(dict(mapping))
+
+
+def _check_labeller(rule):
+    if rule is None or callable(rule) or isinstance(rule, dict):
+        return rule
+    if isinstance(rule, str):
+        named = {"label_value": label_value, "label_both": label_both}
+        if rule not in named:
+            raise ValueError('labeller= is "label_value", "label_both", a dict, or a function')
+        return named[rule]
+    raise TypeError('labeller= is "label_value", "label_both", a dict, or a function')
+
+
+def strip_label(rule, variable, value) -> str:
+    """A facet strip's text under ``rule`` (a labeller, a dict, or None)."""
+    if rule is None:
+        return str(value)
+    if isinstance(rule, dict):
+        return str(rule.get(value, rule.get(str(value), value)))
+    import inspect
+
+    try:
+        params = [p for p in inspect.signature(rule).parameters.values()
+                  if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    except (TypeError, ValueError):
+        params = [None, None]
+    return str(rule(value) if len(params) == 1 else rule(variable, value))
 
 
 _UNSET = object()
@@ -1699,7 +1779,7 @@ class labs(dict):
 
     def __init__(self, title=_UNSET, x=_UNSET, y=_UNSET, z=_UNSET, color=_UNSET,
                  colour=_UNSET, size=_UNSET, fill=_UNSET, subtitle=_UNSET,
-                 caption=_UNSET, tag=_UNSET):
+                 caption=_UNSET, tag=_UNSET, alpha=_UNSET):
         super().__init__()
         legend = color if color is not _UNSET else colour if colour is not _UNSET else fill
         for k, v in (("title", title), ("x", x), ("y", y), ("z", z),
@@ -1707,7 +1787,8 @@ class labs(dict):
                      ("size", size),
                      ("subtitle", subtitle),
                      ("caption", caption),
-                     ("tag", tag)):
+                     ("tag", tag),
+                     ("alpha", alpha)):
             if v is not _UNSET:
                 self[k] = "" if v is None else v
 
@@ -1787,6 +1868,7 @@ class scale_colour_viridis_c(scale_colour_continuous):
 
 
 scale_color_viridis_c = scale_colour_viridis_c
+scale_fill_viridis_c = scale_colour_viridis_c
 
 
 class scale_x_log10:
@@ -2001,6 +2083,19 @@ def theme_minimal(base_size=None, base_family=None) -> _Theme:
     return _theme("minimal", base_size, base_family)
 
 
+def theme_grey(base_size=None, base_family=None) -> _Theme:
+    """ggplot2's default look: a grey panel with white grid lines."""
+    return _theme("grey", base_size, base_family)
+
+
+theme_gray = theme_grey
+
+
+def theme_linedraw(base_size=None, base_family=None) -> _Theme:
+    """A white panel with a thin dark grid and a black border."""
+    return _theme("linedraw", base_size, base_family)
+
+
 def theme_lidar(base_size=None, base_family=None) -> _Theme:
     """A driving-scene look: black page, no box, grid, or ticks, points
     coloured by height from green through cyan to violet, and bright class
@@ -2021,6 +2116,134 @@ class _ThemePatch:
         self.options = options
 
 
+class element_blank:
+    """Draw nothing for this part: ``theme(panel_grid=element_blank())``."""
+
+
+class element_text:
+    """Text settings for ``theme()``: ``element_text(angle=45, hjust=1)``."""
+
+    def __init__(self, size=None, colour=None, color=None, angle=None, hjust=None,
+                 vjust=None, face=None, family=None):
+        self.size = size
+        self.colour = colour if colour is not None else color
+        self.angle = angle
+        self.hjust = hjust
+        self.vjust = vjust
+        self.face = face
+        self.family = family
+
+
+class element_line:
+    """Line settings for ``theme()``: ``element_line(colour="grey80")``."""
+
+    def __init__(self, colour=None, color=None, linewidth=None, linetype=None, size=None):
+        self.colour = colour if colour is not None else color
+        self.linewidth = linewidth if linewidth is not None else size
+        self.linetype = linetype
+
+
+class element_rect:
+    """Box settings for ``theme()``: ``element_rect(fill="white", colour="black")``."""
+
+    def __init__(self, fill=None, colour=None, color=None, linewidth=None):
+        self.fill = fill
+        self.colour = colour if colour is not None else color
+        self.linewidth = linewidth
+
+
+# Parts of a ggplot2 theme that plot3 does not draw separately: accepted so
+# R code ports, but they change nothing.
+_THEME_QUIET = {
+    "panel_grid_minor", "panel_grid_minor_x", "panel_grid_minor_y", "axis_ticks",
+    "axis_ticks_x", "axis_ticks_y", "axis_ticks_length", "legend_key",
+    "legend_background", "plot_margin", "legend_key_size", "legend_text",
+    "legend_box", "legend_justification", "legend_direction",
+}
+
+
+def _element_options(key: str, value, options: dict, tokens: dict) -> bool:
+    """Fold one ggplot2 theme element into plot3's options and colours.
+    False when plot3 has nothing that draws it."""
+    from plot3.scaling import to_hex
+
+    blank = isinstance(value, element_blank)
+    colour = getattr(value, "colour", None)
+    fill = getattr(value, "fill", None)
+    if key in {"axis_text_x", "axis_text_y", "axis_text"}:
+        for axis in ("x", "y"):
+            if key in {"axis_text", f"axis_text_{axis}"}:
+                if blank:
+                    options[f"axis_text_{axis}"] = False
+        if isinstance(value, element_text):
+            if value.angle is not None and key in {"axis_text", "axis_text_x"}:
+                angle = abs(float(value.angle))
+                if not 0.0 <= angle <= 90.0:
+                    raise ValueError("axis text angles are from 0 to 90 degrees")
+                options["axis_text_x_angle"] = angle
+            if colour is not None:
+                tokens["muted"] = to_hex(colour)
+        return True
+    if key in {"axis_title", "axis_title_x", "axis_title_y"}:
+        for axis in ("x", "y"):
+            if key in {"axis_title", f"axis_title_{axis}"} and blank:
+                options[f"axis_title_{axis}"] = False
+        if colour is not None:
+            tokens["ink2"] = to_hex(colour)
+        return True
+    if key in {"panel_grid", "panel_grid_major", "panel_grid_major_x", "panel_grid_major_y"}:
+        if blank:
+            options["panel_grid"] = False
+        elif colour is not None:
+            tokens["grid"] = to_hex(colour)
+        return True
+    if key == "panel_background":
+        if blank:
+            tokens["panel"] = None
+        elif fill is not None:
+            tokens["panel"] = to_hex(fill)
+        return True
+    if key == "plot_background":
+        if fill is not None:
+            tokens["surface"] = to_hex(fill)
+        return True
+    if key == "panel_border":
+        if blank:
+            tokens["frame"] = "none"
+        else:
+            tokens["frame"] = "box"
+            if colour is not None:
+                tokens["axis"] = to_hex(colour)
+        return True
+    if key in {"axis_line", "axis_line_x", "axis_line_y"}:
+        if not blank:
+            tokens["frame"] = "axes"
+            if colour is not None:
+                tokens["axis"] = to_hex(colour)
+        return True
+    if key == "legend_title":
+        if blank:
+            options["legend_title"] = False
+        return True
+    if key == "plot_title":
+        if isinstance(value, element_text):
+            if value.hjust is not None:
+                options["plot_title_hjust"] = float(value.hjust)
+            if colour is not None:
+                tokens["ink"] = to_hex(colour)
+        return True
+    if key == "text":
+        if isinstance(value, element_text):
+            if value.size is not None:
+                options["base_size"] = float(value.size)
+            if value.family is not None:
+                options["base_family"] = str(value.family)
+            if colour is not None:
+                tokens.update({"ink": to_hex(colour), "ink2": to_hex(colour), "muted": to_hex(colour)})
+        return True
+    return key in _THEME_QUIET
+
+
 def theme(
     *,
     legend_position=None,
@@ -2030,6 +2253,7 @@ def theme(
     plot_title_hjust=None,
     base_size=None,
     base_family=None,
+    **elements,
 ) -> _ThemePatch:
     """Change parts of the theme; later ``theme()`` calls add to earlier ones.
 
@@ -2040,12 +2264,25 @@ def theme(
     ``axis_text_x_angle``: ``45`` or ``90`` turns long x labels.
     ``plot_title_hjust``: ``0`` left (default), ``0.5`` centred, ``1`` right.
     ``base_size`` (points) and ``base_family`` set the type for saved files.
+
+    ggplot2's elements work too, with dots or underscores:
+    ``theme(axis_text_x=element_text(angle=45))``,
+    ``theme(**{"panel.grid": element_blank()})``,
+    ``panel_background=element_rect(fill="grey95")``,
+    ``axis_title_y=element_blank()``, ``plot_title=element_text(hjust=0.5)``.
     """
+    import warnings
+
     options = {}
+    tokens: dict = {}
     if legend_title is not None:
         options["legend_title"] = bool(legend_title)
-    if panel_grid is not None:
+    if isinstance(panel_grid, element_blank):
+        options["panel_grid"] = False
+    elif panel_grid is not None and not isinstance(panel_grid, (element_line, element_rect)):
         options["panel_grid"] = bool(panel_grid)
+    elif panel_grid is not None:
+        _element_options("panel_grid", panel_grid, options, tokens)
     if axis_text_x_angle is not None:
         angle = float(axis_text_x_angle)
         if not 0.0 <= angle <= 90.0:
@@ -2060,6 +2297,20 @@ def theme(
         options["base_size"] = float(base_size)
     if base_family is not None:
         options["base_family"] = str(base_family)
+    for raw, value in elements.items():
+        key = raw.replace(".", "_")
+        if key == "legend_position":
+            legend_position = value
+            continue
+        if not isinstance(value, (element_blank, element_text, element_line, element_rect)):
+            raise TypeError(
+                f"theme({raw}=) takes element_text(), element_line(), element_rect(), "
+                "or element_blank()"
+            )
+        if not _element_options(key, value, options, tokens):
+            warnings.warn(f"theme(): plot3 does not draw {raw}; it is ignored", stacklevel=2)
+    if tokens:
+        options["tokens"] = tokens
     return _ThemePatch(_check_legend_position(legend_position), **options)
 
 

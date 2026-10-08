@@ -38,6 +38,18 @@ under **Changed**.
   polars data and per-layer `data=`.
 - `geom_freqpoly`, `geom_crossbar`, `geom_errorbarh`, and `geom_polygon`
   (concave shapes fill correctly, in the viewer and saved files).
+- Scales: `scale_*_gradientn`, `scale_*_distiller`, `scale_*_identity`,
+  `scale_fill_viridis_c`, `scale_size(range=)` (by area over the data's
+  range, as ggplot2), `scale_size_area(max_size=)`, and `aes(alpha=)` with
+  `scale_alpha(range=)`. A column mapped to both size and alpha gets one
+  legend.
+- `coord_fixed()`, `expand_limits(x=, y=)`, `theme_grey()` / `theme_gray()`
+  (ggplot2's grey panel), and `theme_linedraw()`.
+- ggplot2's theme elements: `theme(axis_text_x=element_text(angle=45),
+  panel_grid=element_blank(), panel_background=element_rect(fill=...))`,
+  with R's dotted names too. Elements plot3 cannot draw warn.
+- Facet labellers: `labeller="label_both"`, `labeller(arm=label_both)`,
+  `labeller(sex={"F": "Female"})`, `as_labeller(dict)`, or a function.
 - `position_jitter()`, `position_jitterdodge()`, and `position_nudge()`
   (`geom_point(position=...)`; `geom_text(position=position_nudge(...))`).
 - An unknown parameter warns, with the closest known one:
@@ -90,6 +102,8 @@ under **Changed**.
 - Boxplots grouped by a second variable (`aes(x="arm", colour="sex")`)
   overlapped; they now sit side by side, as ggplot2 dodges them.
 - Nudged labels could fall outside the panel; the scales now make room.
+- Sized points in the viewer were half size on high-density screens and a
+  little smaller than in saved files; they now match saved files.
 - The viewer drew its 2D grid over the data, hiding whisker stems on
   category lines; the grid is now behind the data. Box outlines in the
   viewer were 1 px and missing their right, top, and bottom sides.

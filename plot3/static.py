@@ -1031,8 +1031,9 @@ def _box_2d(spec, x, y, w, h, labs, fonts, extra_right=0.0, extra_bottom=0.0):
     void = bool((spec.get("theme") or {}).get("void"))
     left = 10.0 if void else _y_gutter(spec, labs, fonts, w)
     x_name = labs.get("x") or ""
-    bottom = 6 + _line_height(tick) + (4 + _line_height(tick) if x_name else 0) + 8
-    bottom += _x_label_drop(spec, tick)
+    x_text = (spec.get("themeOpts") or {}).get("xText") is not False
+    bottom = 6 + (_line_height(tick) if x_text else 0) + (4 + _line_height(tick) if x_name else 0) + 8
+    bottom += _x_label_drop(spec, tick) if x_text else 0
     if void:
         bottom = 10.0
     note_lines = _note_lines(spec.get("notes") or [], note, w)
@@ -1083,7 +1084,11 @@ def _draw_2d(
     # resolution the antialiased edge still shows. Skip it.
     opts = spec.get("themeOpts") or {}
     void = bool(theme.get("void"))
-    if not void and opts.get("panelGrid", True) and _rgb(grid) != _rgb(surface):
+    panel = theme.get("panel") or surface
+    if _rgb(panel) != _rgb(surface):
+        # theme_grey's grey panel (or panel_background=element_rect(fill=)).
+        commands.append(("rect", box[0], box[1], box[2], box[3], panel, None, 0, 1.0))
+    if not void and opts.get("panelGrid", True) and _rgb(grid) != _rgb(panel):
         for value, _lab in _ticks(scales.get("x") or {}):
             u = _unit(scales.get("x") or {}, value)
             if u < window[0] - 0.02 or u > window[1] + 0.02:
@@ -1107,7 +1112,7 @@ def _draw_2d(
     commands.append(("unclip",))
 
     _draw_frame(commands, box, axis, frame)
-    for value, lab in (() if void else _ticks(scales.get("x") or {})):
+    for value, lab in (() if void or opts.get("xText") is False else _ticks(scales.get("x") or {})):
         u = _unit(scales.get("x") or {}, value)
         if u < window[0] - 0.02 or u > window[1] + 0.02:
             continue
@@ -1129,7 +1134,7 @@ def _draw_2d(
                 "text", sx, box[1] + box[3] + 4, str(lab), tick_size, muted,
                 "middle", "top", 0, 400,
             ))
-    y_ticks = [] if void else _thin_y_ticks(_ticks(scales.get("y") or {}), scales.get("y") or {}, box[3], tick_size)
+    y_ticks = [] if void or opts.get("yText") is False else _thin_y_ticks(_ticks(scales.get("y") or {}), scales.get("y") or {}, box[3], tick_size)
     for value, lab in y_ticks:
         v = _unit(scales.get("y") or {}, value)
         if v < window[2] - 0.02 or v > window[3] + 0.02:
@@ -1144,7 +1149,10 @@ def _draw_2d(
     if labs.get("x") and not void:
         commands.append((
             "text", box[0] + box[2] / 2,
-            box[1] + box[3] + 6 + _line_height(tick_size) + _x_label_drop(spec, tick_size),
+            box[1] + box[3] + 6 + (
+                _line_height(tick_size) + _x_label_drop(spec, tick_size)
+                if opts.get("xText") is not False else 0
+            ),
             labs["x"], tick_size, ink2, "middle", "top", 0, 400,
         ))
     if labs.get("y") and not void:
@@ -1236,9 +1244,12 @@ def _draw_layer_2d(layer, spec, blobs, gz, px, commands) -> None:
     if kind == "point":
         radii = _point_radii(layer, blobs, gz, n, scene=False, min_dim=1.0)
         shapes = _point_shapes(layer, blobs, gz, n)
+        # aes(alpha=): one opacity per point.
+        opacity = _norm_channel(layer, "opacity", blobs, gz, n) if layer.get("opacity") else None
         for i in range(n):
             cx, cy = px(float(xs[i]), float(ys[i]))
-            _marker(commands, cx, cy, float(radii[i]), shapes[i], _hex(colors[i]), alpha)
+            a = float(opacity[i]) if opacity is not None else alpha
+            _marker(commands, cx, cy, float(radii[i]), shapes[i], _hex(colors[i]), a)
         return
     if kind == "col":
         hw = float(layer.get("width") or 0.08) * 0.5
@@ -1458,11 +1469,13 @@ def _draw_3d(
                 radii = np.maximum(
                     _raw_size_numbers(layer, blobs, gz, n) / 2.0, 0.75,
                 )
+            opacity = _norm_channel(layer, "opacity", blobs, gz, n) if layer.get("opacity") else None
             for i in range(n):
                 hit = project(world[i])
                 if hit is None:
                     continue
-                points.append((hit[2], hit[0], hit[1], float(radii[i]), _hex(colors[i]), alpha))
+                a = float(opacity[i]) if opacity is not None else alpha
+                points.append((hit[2], hit[0], hit[1], float(radii[i]), _hex(colors[i]), a))
         else:
             width = float(layer.get("linewidth") or 2.0)
             for start, count in _groups(layer, n):
@@ -1645,7 +1658,8 @@ def _append_surface(layer, blobs, gz, world, colors, alpha, theme, project, tria
 def _y_gutter(spec, labs, fonts, width: float) -> float:
     """Pixels reserved on the left for the y ticks and the rotated y title."""
     tick = fonts[0]
-    yticks = [str(lab) for _t, lab in _ticks(spec.get("scales", {}).get("y") or {})]
+    hidden = (spec.get("themeOpts") or {}).get("yText") is False
+    yticks = [] if hidden else [str(lab) for _t, lab in _ticks(spec.get("scales", {}).get("y") or {})]
     tick_w = max((_text_width(lab, tick) for lab in yticks), default=0)
     y_name = labs.get("y") or ""
     name_w = _line_height(tick) if y_name else 0
@@ -1947,6 +1961,7 @@ def _legend_metrics(
     if (
         not entries and color.get("kind") != "num" and not size_legend
         and not spec.get("shapeLegend") and not spec.get("linetypeLegend")
+        and not spec.get("alphaLegend")
     ):
         return None
     ink = theme.get("ink") or "#ffffff"
@@ -2003,14 +2018,20 @@ def _legend_metrics(
     if size_legend and size_legend.get("breaks"):
         rows.append(("size-title", str(size_legend.get("label") or "size")))
         for br in size_legend["breaks"]:
-            rows.append(("bubble", str(br.get("label") or ""), float(br.get("t") or 0)))
+            rows.append(("bubble", str(br.get("label") or ""), float(br.get("t") or 0),
+                         float(br.get("alpha", 0.85))))
+    alpha_legend = spec.get("alphaLegend")
+    if alpha_legend and alpha_legend.get("breaks"):
+        rows.append(("size-title", str(alpha_legend.get("label") or "alpha")))
+        for br in alpha_legend["breaks"]:
+            rows.append(("alpha", str(br.get("label") or ""), float(br.get("alpha") or 0)))
     if not rows:
         return None
     text_w = 0
     for row in rows:
         if row[0] in {"title", "size-title"}:
             text_w = max(text_w, _text_width(row[1], tick))
-        elif row[0] in {"swatch", "bubble", "cont"}:
+        elif row[0] in {"swatch", "bubble", "cont", "alpha"}:
             text_w = max(text_w, _text_width(row[1], tick) + 18)
         elif row[0] == "ramp":
             # A vertical colour bar (ggplot2's colourbar): bar, gap, labels.
@@ -2180,6 +2201,11 @@ def _paint_legend(commands, origin, metrics, theme, fonts) -> None:
         elif row[0] == "cont":
             commands.append(("text", lx + 22, cursor, row[1], tick, ink2, "start", "top", 0, 400))
             cursor += row_h
+        elif row[0] == "alpha":
+            # aes(alpha=): a dot at each break's opacity.
+            commands.append(("circle", lx + 13, cursor + row_h / 2 - 2, 4.5, ink, None, 0, row[2]))
+            commands.append(("text", lx + 22, cursor, row[1], tick, ink2, "start", "top", 0, 400))
+            cursor += row_h
         elif row[0] == "ramp":
             # Vertical colour bar: high at the top, as ggplot2 draws it, with
             # a few labelled values beside it (three significant figures).
@@ -2201,7 +2227,7 @@ def _paint_legend(commands, origin, metrics, theme, fonts) -> None:
             diameter = max(4.0, row[2] * 16.0)
             commands.append((
                 "circle", lx + 8 + diameter / 2, cursor + diameter / 2, diameter / 2,
-                ink2, None, 0, 0.85,
+                ink2, None, 0, row[3] if len(row) > 3 else 0.85,
             ))
             commands.append((
                 "text", lx + 8 + diameter + 6, cursor, row[1], tick, ink2, "start", "top", 0, 400,
