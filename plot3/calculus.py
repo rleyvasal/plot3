@@ -11,6 +11,8 @@ from __future__ import annotations
 from fractions import Fraction
 from typing import Any
 
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -81,7 +83,7 @@ def attach_calculus(primary, geom, formula: Formula, domains, addons) -> list:
     for addon in addons or []:
         kind = type(addon).__name__
         if kind == "area":
-            before.append(_integral_layer(geom, formula, axes, addon))
+            before.append(_integral_layer(geom, formula, axes, addon, primary))
         elif kind == "tangent":
             after.extend(_tangent_layers(geom, formula, axes, primary, addon))
         elif kind == "derivative":
@@ -475,7 +477,7 @@ def _region_inequality(geom, formula: Formula, domains) -> list:
     return layers
 
 
-def _integral_layer(geom, formula: Formula, axes, addon):
+def _integral_layer(geom, formula: Formula, axes, addon, primary=None):
     if formula.mode == "inequality":
         raise ExprError('area() integrates a curve y = f(x), not an inequality')
     if axes.kind != "curve" or axes.computed == "x":
@@ -483,11 +485,24 @@ def _integral_layer(geom, formula: Formula, axes, addon):
             'area() integrates a curve y = f(x). For example '
             'geom_function("y = x^2") + area(0, 2)'
         )
-    lo, hi = float(addon.lo), float(addon.hi)
+    asked_lo, asked_hi = float(addon.lo), float(addon.hi)
     baseline = float(addon.baseline)
     count = _sample_count(geom, grid=False)
     if (count - 1) % 2 == 1:
         count += 1
+    edge_lo, edge_hi = _curve_edges(primary)
+    lo, hi = asked_lo, asked_hi
+    if not math.isfinite(lo) or not math.isfinite(hi):
+        # area(-inf, -1.96) runs to the edge of the drawn curve.
+        if edge_lo is None:
+            raise ExprError("area() with an infinite limit needs the curve it shades")
+        lo = max(lo, edge_lo)
+        hi = min(hi, edge_hi)
+        if hi <= lo:
+            raise ExprError(
+                f"area({_num(asked_lo)}, {_num(asked_hi)}) misses the curve, "
+                f"which is drawn on ({_num(edge_lo)}, {_num(edge_hi)})"
+            )
     xs = _linspace(lo, hi, count)
     ys = _curve_values(formula, axes, xs)
     if ys.shape != xs.shape or not np.all(np.isfinite(ys)):
@@ -495,8 +510,29 @@ def _integral_layer(geom, formula: Formula, axes, addon):
             f"area() is undefined on ({_num(lo)}, {_num(hi)})"
         )
     signed = _simpson(xs, ys) - baseline * (float(xs[-1]) - float(xs[0]))
-    text = _integral_text(signed)
+    if baseline == 0.0 and _is_density(formula, axes, edge_lo, edge_hi, count):
+        name = formula.variables[0] if formula.variables else "x"
+        # The shading stops at the drawn edge; the probability does not.
+        # Student's t keeps 1.5% of its mass beyond +-5.
+        width = edge_hi - edge_lo
+        if not math.isfinite(asked_lo):
+            signed += _tail_mass(formula, axes, edge_lo, -1.0, width)
+        if not math.isfinite(asked_hi):
+            signed += _tail_mass(formula, axes, edge_hi, 1.0, width)
+        text = _probability_text(name, asked_lo, asked_hi, signed)
+    elif math.isfinite(asked_lo) and math.isfinite(asked_hi):
+        text = _integral_text(signed)
+    else:
+        # Not a density: the infinite limit stopped at the edge of the view.
+        text = _integral_text(signed).replace("∫ = ", "∫ ≈ ", 1)
     xc, yc = _centroid(xs, ys, baseline)
+    # A thin area (a 2.5% tail) has its centroid on the axis, under the
+    # label's backing. Put the label just above the shading instead.
+    peak = _curve_peak(primary)
+    if peak is not None and baseline == 0.0:
+        top = float(np.max(ys))
+        if 0.0 <= top < 0.25 * peak:
+            yc = top + 0.12 * peak
     shade = _area_layer(
         xs, ys, baseline, [[0, int(xs.size)]], color=geom.const_color, alpha=0.35
     )
@@ -988,6 +1024,106 @@ def _centroid(xs, ys, baseline: float) -> tuple[float, float]:
     xc = _trap(xs * weight, step) / mass
     yc = _trap((baseline + 0.5 * height) * weight, step) / mass
     return float(xc), float(yc)
+
+
+def _curve_peak(primary) -> float | None:
+    frame = getattr(primary, "data_override", None)
+    if frame is None or "y" not in frame:
+        return None
+    ys = np.asarray(frame["y"], dtype=np.float64)
+    ys = ys[np.isfinite(ys)]
+    if ys.size == 0 or float(ys.max()) <= 0.0:
+        return None
+    return float(ys.max())
+
+
+def _curve_edges(primary) -> tuple[float | None, float | None]:
+    frame = getattr(primary, "data_override", None)
+    if frame is None or "x" not in frame:
+        return None, None
+    xs = np.asarray(frame["x"], dtype=np.float64)
+    xs = xs[np.isfinite(xs)]
+    if xs.size == 0:
+        return None, None
+    return float(xs.min()), float(xs.max())
+
+
+def _is_density(formula, axes, lo, hi, count) -> bool:
+    """Non-negative and integrates to 1, counting the tails past the view."""
+    if lo is None or hi is None or hi <= lo:
+        return False
+    xs = _linspace(lo, hi, count)
+    ys = _curve_values(formula, axes, xs)
+    if ys.shape != xs.shape or not np.all(np.isfinite(ys)):
+        return False
+    if float(np.min(ys)) < -1e-12:
+        return False
+    width = hi - lo
+    total = (
+        _simpson(xs, ys)
+        + _tail_mass(formula, axes, lo, -1.0, width)
+        + _tail_mass(formula, axes, hi, 1.0, width)
+    )
+    return abs(total - 1.0) <= 0.005
+
+
+def _tail_mass(formula, axes, edge: float, direction: float, width: float) -> float:
+    """Integral from ``edge`` outward, in doubling steps, until it stops adding.
+
+    Returns 0 for a curve that is not finite and non-negative out there,
+    so an ordinary function never gains a spurious tail.
+    """
+    total = 0.0
+    start = float(edge)
+    span = max(float(width), 1e-9)
+    for _step in range(40):
+        stop = start + direction * span
+        xs = _linspace(min(start, stop), max(start, stop), 201)
+        ys = _curve_values(formula, axes, xs)
+        if ys.shape != xs.shape or not np.all(np.isfinite(ys)) or float(np.min(ys)) < 0.0:
+            return total
+        piece = _simpson(xs, ys)
+        total += piece
+        if piece <= 1e-9 * max(total, 1e-12) or piece < 1e-12:
+            break
+        start = stop
+        span *= 2.0
+    return total
+
+
+def _prob_number(value: float) -> str:
+    value = min(max(value, 0.0), 1.0)
+    if value == 0.0 or value >= 1e-3:
+        text = f"{value:.3g}"
+    else:
+        mantissa, power = f"{value:.2e}".split("e")
+        text = f"{mantissa} × 10^{int(power)}"
+        return _pretty_minus(text.replace("^", "", 1).replace(
+            str(int(power)), _superscript(int(power)), 1))
+    return text
+
+
+def _superscript(power: int) -> str:
+    table = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
+    return str(power).translate(table)
+
+
+def _pretty_minus(text: str) -> str:
+    return text.replace("-", "−")
+
+
+def _probability_text(name: str, lo: float, hi: float, value: float) -> str:
+    """P(0.2 ≤ X ≤ 0.5) = 0.546, or a one-sided P(X ≤ −1.96) = 0.025."""
+    var = name.upper() if len(name) == 1 else name
+    if not math.isfinite(lo) and not math.isfinite(hi):
+        event = f"−∞ < {var} < ∞"
+    elif not math.isfinite(lo):
+        event = f"{var} ≤ {_pretty_minus(f'{hi:.4g}')}"
+    elif not math.isfinite(hi):
+        event = f"{var} ≥ {_pretty_minus(f'{lo:.4g}')}"
+    else:
+        event = f"{_pretty_minus(f'{lo:.4g}')} ≤ {var} ≤ {_pretty_minus(f'{hi:.4g}')}"
+    return f"P({event}) = {_prob_number(value)}"
 
 
 def _integral_text(value: float) -> str:

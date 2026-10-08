@@ -18,6 +18,8 @@ from typing import Any, Callable
 
 import numpy as np
 
+from plot3 import special as _special
+
 from plot3.latexin import (
     is_latex,
     latex_to_source,
@@ -88,12 +90,16 @@ def math_namespace() -> dict[str, Any]:
         "e": float(np.e),
         "nan": float("nan"),
         "where": np.where,
+        # gamma, beta, erf, and R-style densities (dnorm, dbeta, pnorm, ...).
+        **_special.FUNCTIONS,
     }
 
 
 _MATH = math_namespace()
 _MATH_FUNCS = {name for name, value in _MATH.items() if callable(value)}
 _MATH_CONSTS = {name for name, value in _MATH.items() if not callable(value)}
+# Function names that are also Greek letters people use as coefficients.
+_GREEK_FUNCS = frozenset({"gamma", "beta"})
 
 
 @dataclass(frozen=True)
@@ -353,10 +359,11 @@ def _parse_math(
         if name in _MATH_FUNCS:
             namespace[name] = fn
     for name, value in numbers.items():
-        if name in _MATH_FUNCS:
+        if name in _MATH_FUNCS and name not in _GREEK_FUNCS:
             raise ExprError(
                 f"'{name}' is a math function; pass a callable to replace it"
             )
+        # beta=2 or gamma=0.5: the Greek coefficient, not the function.
         namespace[name] = float(value)
     for name, value in _MATH.items():
         if name in _MATH_CONSTS and name not in numbers:
@@ -376,6 +383,11 @@ def _parse_math(
             continue
         if name in numbers or name in _MATH_CONSTS:
             continue
+        if name in _GREEK_FUNCS and name not in callables:
+            raise ExprError(
+                f"'{name}' is the {name.capitalize()} function here. Pass "
+                f"{name}=2 at the end to use it as a coefficient, or call {name}(...)"
+            )
         if name in callables or name in _MATH_FUNCS:
             raise ExprError(f"'{name}' is a function; call it as {name}(...)")
         hint = _juxtaposition_hint(name)
@@ -518,10 +530,11 @@ def _bind_namespace(
         if name in _MATH_FUNCS:
             namespace[name] = fn
     for name, value in numbers.items():
-        if name in _MATH_FUNCS:
+        if name in _MATH_FUNCS and name not in _GREEK_FUNCS:
             raise ExprError(
                 f"'{name}' is a math function; pass a callable to replace it"
             )
+        # beta=2 or gamma=0.5: the Greek coefficient, not the function.
         namespace[name] = float(value)
     for name, value in _MATH.items():
         if name in _MATH_CONSTS and name not in numbers:
@@ -545,6 +558,11 @@ def _classify_names(
             continue
         if name in numbers or name in _MATH_CONSTS:
             continue
+        if name in _GREEK_FUNCS and name not in callables:
+            raise ExprError(
+                f"'{name}' is the {name.capitalize()} function here. Pass "
+                f"{name}=2 at the end to use it as a coefficient, or call {name}(...)"
+            )
         if name in callables or name in _MATH_FUNCS:
             raise ExprError(f"'{name}' is a function; call it as {name}(...)")
         hint = _juxtaposition_hint(name)

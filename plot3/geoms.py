@@ -488,6 +488,9 @@ class geom_function(_Geom):
         # Defer unbound coefficients (``a`` in ``y = a x^2``). The transition
         # is added with ``+`` afterwards, so it does not exist yet.
         self.formula = parse_formula(formula, bound, defer_missing=True)
+        # Kept so a slider or transition that names a free symbol (t, mu)
+        # can re-read it as a coefficient at build time.
+        self._source = formula
         self.xlim = xlim
         self.ylim = ylim
         self.zlim = zlim
@@ -507,6 +510,11 @@ class area:
     is the lower edge (default 0)::
 
         ggplot() + geom_function("y = x^2") + area(0, 2)
+
+    Under a density the label is a probability, and a limit may be
+    infinite (it stops at the edge of the curve)::
+
+        geom_function("y = dnorm(x)") + area(-inf, -1.96) + area(1.96, inf)
     """
 
     def __init__(self, lo, hi, *, baseline=0):
@@ -518,10 +526,12 @@ class area:
             raise ValueError(
                 "area() needs numeric limits, for example area(0, 2)"
             ) from exc
-        if not all(math.isfinite(value) for value in (left, right, base)):
+        if any(math.isnan(value) for value in (left, right)) or not math.isfinite(base):
             raise ValueError(
                 "area() needs numeric limits, for example area(0, 2)"
             )
+        if left == right:
+            raise ValueError("area() needs two different limits")
         if right < left:
             left, right = right, left
         self.lo = left

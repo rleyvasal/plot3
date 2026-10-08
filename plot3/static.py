@@ -883,6 +883,7 @@ def _draw_2d(
             "text", x + 8 + _line_height(tick_size) / 2, box[1] + box[3] / 2,
             labs["y"], tick_size, ink2, "middle", "middle", -90, 400,
         ))
+    placed: list[tuple[float, float, float, float]] = []
     for ann in spec.get("ann") or []:
         text = str(ann.get("text") or "")
         if not text:
@@ -897,8 +898,30 @@ def _draw_2d(
         if v < window[2] - 0.02 or v > window[3] + 0.02:
             continue
         sx, sy = px(u, v)
+        size = tick_size
+        half_w = _text_width(text, size) / 2.0 + 3.0
+        half_h = 0.65 * size + 1.0
+        # Keep the label inside the panel. A thin tail area puts its centroid
+        # on the axis; lift it clear.
+        sx = min(max(sx, box[0] + half_w + 2.0), box[0] + box[2] - half_w - 2.0)
+        sy = min(max(sy, box[1] + half_h + 2.0), box[1] + box[3] - half_h - 4.0)
+        for _try in range(len(placed) + 1):
+            hit = any(
+                abs(sx - px0) < half_w + pw and abs(sy - py0) < half_h + ph
+                for px0, py0, pw, ph in placed
+            )
+            if not hit:
+                break
+            sy -= 2.0 * half_h + 2.0
+        placed.append((sx, sy, half_w, half_h))
+        # A backing in the page colour keeps the label readable where it
+        # crosses the curve or the fill.
         commands.append((
-            "text", sx, sy, text, max(tick_size, 13), ink,
+            "rect", sx - half_w, sy - half_h, 2.0 * half_w, 2.0 * half_h,
+            surface, None, 0, 0.82,
+        ))
+        commands.append((
+            "text", sx, sy, text, size, ink,
             "middle", "middle", 0, 600,
         ))
     if labs.get("title"):

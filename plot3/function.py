@@ -18,6 +18,7 @@ from plot3.contour import _contour_lines, _refine_active_cells
 from plot3.expr import ExprError, Formula, _missing_param_build_message, evaluate
 from plot3.mathtext import _number, split_math
 from plot3.geoms import _Geom, aes, geom_line, geom_path
+from plot3.special import support_hint
 from plot3.stats3d import regular_grid_mesh
 from plot3.table import has_column, numeric_array
 
@@ -78,10 +79,11 @@ def expand_function(
     del base_mapping, data  # the formula carries its own samples
     formula: Formula = geom.formula
     domains = domains or {}
-    pending = tuple(getattr(formula, "pending", ()) or ())
     # A slider replaces a transition. build_spec rejects having both.
     sweep = slider if slider is not None else transition
     ranges = getattr(sweep, "ranges", None) or {}
+    formula = _bind_swept_symbols(geom, formula, ranges)
+    pending = tuple(getattr(formula, "pending", ()) or ())
     if pending:
         missing = [name for name in pending if name not in ranges]
         if missing:
@@ -115,6 +117,27 @@ def expand_function(
     layers = attach_calculus(primary, geom, formula, domains, extras)
     _link_colors(layers)
     return layers
+
+
+def _bind_swept_symbols(geom, formula: Formula, ranges: dict) -> Formula:
+    """Re-read symbols a slider or transition sweeps as coefficients.
+
+    ``sin(x - t)`` parses ``t`` as a second plot variable and
+    ``dnorm(x, mu, 1)`` does the same with ``mu``, which would turn a
+    travelling wave into a static surface. Naming the symbol on
+    ``transition_time(t=...)`` says it is a coefficient. Each frame sets
+    its value; the low end of the range only stands in while parsing.
+    """
+    swept = [name for name in ranges if name in (formula.variables or ())]
+    source = getattr(geom, "_source", None)
+    if not swept or source is None or formula.mode == "callable":
+        return formula
+    params = dict(getattr(geom, "params", None) or {})
+    for name in swept:
+        params[name] = float(ranges[name][0])
+    from plot3.expr import parse_formula
+
+    return parse_formula(source, params, defer_missing=True)
 
 
 def _reject_curve_extras(geom, addons) -> None:
@@ -245,6 +268,15 @@ def _domain_for(
     return _DEFAULT_DOMAIN, "default"
 
 
+def _density_domain(formula: Formula) -> tuple[float, float] | None:
+    """Support of a density such as dbeta(x, 2, 5): [0, 1], not (-10, 10)."""
+    if formula.mode != "explicit" or len(formula.variables) != 1:
+        return None
+    return support_hint(
+        getattr(formula, "body", None), formula.variables[0], formula.namespace
+    )
+
+
 def _linspace(lo: float, hi: float, count: int) -> np.ndarray:
     return np.linspace(float(lo), float(hi), int(count))
 
@@ -267,6 +299,10 @@ def _expand_curve(geom: _Geom, formula: Formula, axes: _Axes, domains: dict) -> 
     # Sideways ``x = f(y)`` samples the vertical axis. Everything else samples x.
     sample_axis = "y" if axes.computed == "x" else "x"
     (lo, hi), source = _domain_for(geom, sample_axis, domains)
+    if source == "default":
+        hint = _density_domain(formula)
+        if hint is not None:
+            (lo, hi), source = hint, "density"
     count = _sample_count(geom, grid=False)
     samples = _linspace(lo, hi, count)
     lo, hi, samples = _narrow_curve(
@@ -961,8 +997,18 @@ def _expand_curve_anim(geom, formula, axes, domains, transition) -> _Geom:
     (lo, hi), source = _domain_for(geom, sample_axis, domains)
     count = _sample_count(geom, grid=False)
     _guard_slider(transition, count, "curve samples")
-    samples = _linspace(lo, hi, count)
     steps = _parameter_steps(transition)
+    if source == "default":
+        # dbeta(x, a, b) under a slider: every frame's support, once.
+        spans = []
+        for params in steps:
+            with _bound_params(formula, params):
+                spans.append(_density_domain(formula))
+        if spans and all(span is not None for span in spans):
+            lo = min(span[0] for span in spans)
+            hi = max(span[1] for span in spans)
+            source = "density"
+    samples = _linspace(lo, hi, count)
     mat = _curve_matrix(formula, samples, steps)
     if source == "default":
         finite = np.isfinite(mat)

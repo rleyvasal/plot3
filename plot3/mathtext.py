@@ -509,7 +509,27 @@ def _call(node: ast.Call, substitute) -> _Piece:
         return _wrap_call(node.args, substitute, "\\lceil ", " \\rceil", "⌈", "⌉")
     if name in _OPS:
         return _op_call(name, node.args, substitute)
+    if name in _NAMED:
+        return _named_call(name, node.args, substitute)
     return _user_call(name, node.args, substitute)
+
+
+# Special functions with a textbook symbol: gamma(x) -> Γ(x), beta(a, b) -> B(a, b).
+_NAMED = {
+    "gamma": ("\\Gamma", "Γ"),
+    "lgamma": ("\\ln\\Gamma", "ln Γ"),
+    "beta": ("\\mathrm{B}", "B"),
+}
+
+
+def _named_call(name, args, substitute) -> _Piece:
+    latex_op, pretty_op = _NAMED[name]
+    rendered = [render(arg, 0, substitute) for arg in args]
+    inner_l = ", ".join(piece.latex for piece in rendered)
+    inner_p = ", ".join(piece.pretty for piece in rendered)
+    return _Piece(
+        f"{latex_op}\\left({inner_l}\\right)", f"{pretty_op}({inner_p})", _POW, "call"
+    )
 
 
 def _exp(arg_node, substitute) -> _Piece:

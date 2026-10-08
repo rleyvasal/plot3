@@ -1692,7 +1692,12 @@ if (!S.is3d) {
       const ann = anns[i];
       const X = px(ann.x), Y = py(ann.y);
       if (X < M.l - 2 || X > M.l + W + 2 || Y < M.t - 2 || Y > M.t + H + 2) continue;
-      s += '<text x="' + X + '" y="' + Y + '" fill="' + T.ink + '" text-anchor="middle" font-size="13" font-weight="600">' + plot3Esc(ann.text) + '</text>';
+      // Inside the panel, with a halo in the page colour so the label reads
+      // where it crosses the curve (P(X >= 1.96) sits on a thin tail).
+      const halfW = 0.29 * 12 * String(ann.text).length + 3;
+      const AX = Math.min(Math.max(X, M.l + halfW + 2), M.l + W - halfW - 2);
+      const AY = Math.min(Math.max(Y, M.t + 12), M.t + H - 10);
+      s += '<text x="' + AX + '" y="' + AY + '" fill="' + T.ink + '" text-anchor="middle" dominant-baseline="middle" font-size="12" font-weight="600" paint-order="stroke" stroke="' + T.surface + '" stroke-width="4" stroke-linejoin="round">' + plot3Esc(ann.text) + '</text>';
     }
     svg.innerHTML = s;
   }
