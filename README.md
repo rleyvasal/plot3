@@ -1,439 +1,374 @@
 # plot3
 
-Grammar-of-graphics plotting on **three.js** — 2D and 3D figures from pandas,
-Polars, tidy3, or NumPy arrays. One API locally and under `%gpu`:
+ggplot2's grammar of graphics for Python, drawn with WebGL (three.js) in the
+notebook and saved as journal-ready PNG, SVG, or PDF.
 
-```python
-ggplot(df, aes(x=wt, y=mpg)) + geom_point()
-ggplot(points, aes(x=0, y=1, z=2, colour=3)) + geom_point3d()
+```python notest
+ggplot(df, aes(x="dose", y="response", colour="arm")) + geom_point() + geom_smooth(method="lm")
 ```
 
-Figures stay small and smooth and survive
-[sslive](https://github.com/rleyvasal/sslive) slide export.
+- **ggplot2 grammar**: `+` layers, `aes()`, geoms, stats, scales, facets,
+  themes, and `ggsave()`, with ggplot2's defaults and names.
+- **Interactive 2D and 3D**: pan, zoom, hover, click a legend entry to hide
+  it, orbit 3D point clouds and surfaces, play animations, drag sliders.
+- **Publication output**: `ggsave("fig.pdf", p, width=3.5, height=2.6,
+  units="in")` with real fonts, 300 dpi metadata, and `theme_bw` by default.
+- **Maths built in**: plot `"y = x^2 + 1"`, implicit equations, surfaces,
+  densities (`dbeta`, `dnorm`), probability areas, tangents, and LaTeX.
+- **Your data as it is**: pandas, Polars, tidy3, or NumPy arrays, locally
+  or on a remote GPU kernel (CRAFT / SolveIt).
 
-Works **locally** (VS Code, terminal, JupyterLab) or under CRAFT / SolveIt.
+Contents: [Install](#install) · [Quick start](#quick-start) ·
+[Statistical plots](#statistical-plots) · [Annotation](#annotation) ·
+[Scales](#scales) · [Themes and titles](#themes-and-titles) ·
+[Facets and multi-panel figures](#facets-and-multi-panel-figures) ·
+[Saving for a paper](#saving-for-a-paper) · [Functions and maths](#functions-and-maths) ·
+[Animation and sliders](#animation-and-sliders) · [3D](#3d-and-point-clouds) ·
+[Notebooks, SolveIt, CRAFT](#notebooks-solveit-and-craft) ·
+[API reference](#api-reference) · [Differences from ggplot2](#differences-from-ggplot2)
 
-## Install (local / VS Code)
+## Install
 
 ```bash
-cd /path/to/plot3
+git clone https://github.com/rleyvasal/plot3 && cd plot3
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev,jupyter]"
+pip install -e ".[jupyter,export]"
 ```
 
-`pip install plot3[fast]` adds a faster implicit-curve contour. Matplotlib
-already installs that extra (`contourpy`).
-
-In VS Code: **Python: Select Interpreter** → this `.venv`. No CRAFT required.
-
-## SolveIt / CRAFT
-
-**One command** — works local *and* under `%gpu` (CRAFT is auto-detected):
-
-```text
-%run /app/data/gpudevd/plot3/plot3.py
-# or
-%run /path/to/plot3/plot3.py
-%run /path/to/plot3/load.py          # same loader
-```
-
-With tidy3 + optional GPU:
-
-```text
-%local
-%run /app/data/gpudevd/tidy3/tidy3.py
-%run /app/data/gpudevd/plot3/plot3.py
-# optional — only if you need %gpu:
-%run /path/to/gpudev/CRAFT.py
-%gpu
-```
-
-Order tip: load **CRAFT first** if you will use `%gpu` in the same session so
-the first `%run plot3.py` can seed immediately; otherwise the loader still
-registers a hook and seeds on the first `%gpu` cell.
-
-gpudev addons are thin wrappers around the same loaders:
-
-```text
-%run /path/to/gpudev/addons/plot3.py
-```
-
-In **SolveIt**, figures use an **inline iframe** (WebGL). Displayed cells are
-marked `skipped=1` (red eye) so viewer HTML does not enter the LLM context
-(`ggplot(..., hide=False)` or `autohide(False)` to opt out).
-
-### One API: local and `%gpu`
-
-**Always use the ggplot grammar** — same code on the host and on the GPU kernel:
-
-```python
-# Jupyter / SolveIt (R-style bare names + backticks — default on load):
-tidy(df) >> filter(x > 0) >> ggplot(aes(x=x, y=y)) + geom_point()
-ggplot(df, aes(x=`First Name`, y=`Age (%)`, colour=group)) + geom_point()
-
-# NumPy / lidar-style arrays (column positions)
-ggplot(points, aes(x=0, y=1, z=2, colour=3)) + geom_point3d()
-
-# Plain .py files still use strings:
-tidy(df) >> filter(col("x") > 0) >> ggplot(aes(x="x", y="y")) + geom_point()
-```
-
-Under **`%gpu`**, plot3 is **seeded to the remote kernel** automatically so that
-same `ggplot(...) + geom_*()` expression runs where the data lives (pandas /
-Polars / tidy3 / NumPy). After `%restart_kernel`:
-
-```python
-seed_plot3_remote(force=True)
-```
-
-There is **no separate GPU plotting language**. Prefer writing ggplot cells under
-`%gpu` rather than host-only shortcuts.
-
-<details>
-<summary>Optional host helpers (not required)</summary>
-
-These stay for convenience when you are on the **host** and want CRAFT to run a
-ggplot on the remote without putting the full expression in a `%gpu` cell.
-They are **not** the primary API:
-
-```python
-# Thin host magic → remote ggplot + PlotPayload → local display
-%plot3 df x=wt y=mpg color=cyl
-
-# Explicit remote expression (same grammar as a %gpu cell)
-show_remote("ggplot(df, aes(x='wt', y='mpg')) + geom_point()")
-```
-
-</details>
-
-### VS Code notebooks (blank plot?)
-
-plot3 figures need a real browser for WebGL + the three.js CDN. **SolveIt**
-and opening the HTML file work; the **VS Code notebook output webview** often
-shows an empty panel (CSP blocks the viewer).
-
-plot3 detects VS Code and **opens the figure in your system browser** instead
-(writes `./.plot3_preview/latest.html`). Force either mode:
-
-```bash
-export PLOT3_DISPLAY=browser   # always open browser
-export PLOT3_DISPLAY=iframe    # force inline (SolveIt)
-export PLOT3_NO_BROWSER=1      # write file only, do not auto-open
-```
-
-Or explicitly:
-
-```python
-fig.show(browser=True)                 # open system browser
-fig.save("fig.html")                   # then open the file yourself
-```
-
-### Galleries (browser HTML)
-
-```bash
-python examples/showcase_2d.py           # ggplot2-style 2D gallery + index
-python examples/showcase_3d.py           # lidar, galaxy, peaks, helix, …
-# details: examples/README.md
-```
-
-## Testing (local)
-
-```bash
-# unit + semantic suite (R optional; skips oracle if Rscript missing)
-pytest -q
-
-# HTML smoke artifacts under tests/local/output/
-python tests/local/smoke_local.py
-
-# one-shot: pytest + smoke (+ R oracle when available)
-bash tests/local/run_all.sh
-```
-
-See [`tests/local/README.md`](tests/local/README.md) for the full layout and
-R oracle notes (ggplot2/base-R stats parity for boxplots, density, histogram).
-
-```python
-from plot3 import ggplot, aes, geom_point, geom_line, geom_col, geom_histogram, labs, theme_light
-
-# Jupyter / SolveIt: bare column names (ggplot2-style); backticks if spaces
-(ggplot(df, aes(x=time, y=temp, colour=sensor))
- + geom_point(size=4)
- + geom_line(linewidth=2)
- + labs(title="Sensor temps", y="degC"))
-
-# Plain scripts / libraries: quoted strings
-(ggplot(df, aes(x="time", y="temp", colour="sensor"))
- + geom_point(size=4)
- + geom_line(linewidth=2)
- + labs(title="Sensor temps", y="degC"))
-```
-
-The mapping-first form is pipeable from tidy3, pandas, or Polars. Layers bind
-before ``>>``, so the expression needs no extra parentheses:
-
-```python
-# Jupyter
-plot = tidy(df) >> ggplot(aes(x=time, y=temp)) + geom_point()
-# .py
-plot = tidy(df) >> ggplot(aes(x="time", y="temp")) + geom_point()
-```
-
-### R-style bare names & backticks (Jupyter / SolveIt)
-
-On load, plot3 enables the same style of column masking as tidy3:
-
-| Write | Becomes |
-|-------|---------|
-| `aes(x=wt, y=mpg)` | `aes(x="wt", y="mpg")` |
-| `aes(x=\`First Name\`)` | `aes(x="First Name")` |
-| `facet_wrap(cyl)` | `facet_wrap("cyl")` |
-
-Toggle if needed: `enable_r_style()` / `disable_r_style()`.
-Plain ``.py`` files are never transformed — keep quoted strings there.
-
-Follows [ggplot2](https://github.com/tidyverse/ggplot2) conventions: `+`
-layering, `colour`/`color` both accepted, `geom_line(linewidth=)`, `geom_path`
-preserves data order while `geom_line` sorts by x, `ggsave("fig.html", p)`.
-
-## Why
-
-- **Portable**: each figure is one self-contained iframe — data uint16-quantized,
-  delta + byte-shuffle + gzip compressed (browser `DecompressionStream`),
-  three.js from CDN. Typical figures are 30–150 KB vs multi-MB Plotly HTML.
-- **Smooth**: WebGL marks; 100k+ point scatters at 60 fps, first frame instant.
-- **2D interactivity**: drag to pan, Ctrl/⌘+scroll (or trackpad pinch) to zoom,
-  double-click to reset, hover for values. `aes(z=...)` switches to a 3D orbit
-  viewer with axes box. **Click a legend entry to hide/show that category.**
-- **Validated colors**: fixed-order categorical palette and single-hue
-  sequential ramp, CVD-validated for both the dark (`#0b1020`) and light
-  themes. More than 8 categories is an error, not an eleventh hue.
-  Numeric colour uses **robust 2–98 percentile limits by default** (skewed
-  data like lidar intensity stays readable); control with
-  `scale_colour_continuous(trans="sqrt"|"log10", limits=(lo,hi)|"full")`.
-  For lidar/heatmap-style data add `scale_colour_viridis_c()` —
-  `option="viridis"|"magma"|"turbo"` (turbo ≈ the nuScenes look), exact
-  matplotlib stops, perceptually ordered and CVD-safe unlike jet/hsv.
-- **Context-safe in SolveIt**: displaying a figure red-eyes its cell
-  (`skipped=1`) so viewer HTML never eats LLM context. Opt out per figure
-  with `ggplot(..., hide=False)` or globally with `autohide(False)`.
-
-## API (v1)
-
-| Piece | Notes |
+| Extra | Adds |
 |---|---|
-| `ggplot(df, aes(...))` / `data >> ggplot(aes(...))` | figure; `quantize=False` for deep-zoom float32 payloads |
-| `aes(x, y, z, colour, group)` | `z` on every layer → 3D orbit view |
-| `geom_point(size=, alpha=)` | 2D: size in **px**; 3D: size in **scene units** |
-| `geom_point3d(size=, alpha=)` | Explicit 3D points (same engine as `geom_point`) |
-| `geom_surface(wireframe=, alpha=)` | 3D mesh from a complete regular `x`×`y` grid (`z` height) |
-| `geom_isosurface(levels=, n=, …)` | Density isosurfaces from 3D points (levels relative to peak) |
-| `stat_density_3d(n=)` | Optional density-grid settings for `geom_isosurface` |
-| `coord_3d(aspect=, size_mode=, max_points=)` | 3D aspect (`data`/`equal`), point size mode, optional subsample |
-| `coord_equal(ratio=1)` | 2D lock: one x unit has the same length as `ratio` y units. Implicit-only figures use this automatically |
-| `geom_line(linewidth=)` / `geom_path()` | line sorts by x; path keeps data order; work in 3D too |
-| `geom_function("y = 2x + 2")` | curve, implicit contour, or `z = f(x, y)` surface; `ggplot()` needs no data |
-| `geom_col(width=)` | bars from `y` heights (ggplot2 `geom_col`) |
-| `geom_bar(width=)` | count bars for discrete `x` |
-| `geom_histogram(bins=, binwidth=, method=)` | continuous `x` histogram; auto FD bins when unset |
-| NumPy arrays | `ggplot(pts, aes(x=0, y=1, z=2))` — columns are positions; 1D → index+values |
-| `geom_boxplot(width=, coef=, outlier_size=)` | Tukey box-and-whisker of `y` by `x` |
-| `geom_density(n=, adjust=, fill=)` | KDE of continuous `x` (optional `colour` groups) |
-| `geom_violin(n=, adjust=, width=)` | Mirrored KDE of `y` by `x` |
-| `facet_wrap("col", ncol=, nrow=)` | Panel grid by a discrete column |
-| `labs(title=, x=, y=, z=, colour=)` | labels |
-| `scale_colour_continuous(trans=, limits=, palette=)` | numeric colour: `sqrt`/`log10`/`linear`; limits tuple or `"full"` |
-| `scale_colour_viridis_c(option=)` | viridis / magma / turbo colormaps for numeric colour |
-| `theme_dark()` / `theme_light()` | dark is default |
-| `ggsave(filename, p)` / `p.save(path)` | standalone HTML file |
-| `read_bin(path, stride=5)` | point-cloud `.bin` → DataFrame; `remote=True` streams via CRAFT |
+| `export` | `cairosvg`: PNG with real fonts and PDF. Needs the Cairo C library (`brew install cairo`, `apt install libcairo2`). SVG needs nothing. |
+| `fast` | `contourpy`: faster implicit-curve contours (matplotlib users have it) |
+| `jupyter` | IPython integration (bare column names, `%plot3`) |
+| `polars` | Polars tables |
 
-## Functions
+Python 3.10 or newer; NumPy and pandas are the only required packages.
 
-`geom_function` plots a formula with the same grammar as a data layer. The
-quoted string is the form that works everywhere. `^` is power, and `2x` means
-`2*x`.
+## Quick start
 
-```python
-ggplot() + geom_function("y = 2x + 2")
-ggplot() + geom_function("y = a x^2 + b x + c", a=2, b=-3, c=1)
-ggplot() + geom_function("x^2 + y^2 = 1")          # contour where F = 0
-ggplot() + geom_function("z = sin(x) cos(y)")      # surface
-ggplot(df, aes(x="wt", y="mpg")) + geom_point() + geom_function("y = 37 - 5x")
-```
-
-In a notebook the transformer also accepts `geom_function(y = 2*x + 2)`.
-A callable is full Python: `geom_function(lambda x: x**2)`. Pass your own
-functions as keywords: `geom_function("y = damp(x) sin(3x)", damp=damp)`.
-A name such as `t` or `theta` becomes an axis label (`"v = 9.8 t"` labels x
-as `t` and y as `v`). A coefficient such as `a` must be passed at the end
-(`a=2`).
-
-`xlim` / `ylim` / `zlim` set the domain or clip the view. A curve uses `n=501`
-samples. A surface uses `n=80` per axis. An implicit curve uses that same
-`n=80` grid, then subdivides only the cells the contour crosses, so
-`x^2 + y^2 = 1` draws a smooth circle on the default domain.
-`pip install plot3[fast]` uses contourpy for a faster contour on large grids;
-matplotlib users already have it. A figure made only of implicit equations
-also uses `coord_equal()`, so that circle is round in a wide panel. Add
-`coord_equal()` to any other 2D plot for the same lock.
-
-## Package layout
-
-```text
-plot3/
-  __init__.py      # public API
-  geoms.py         # aes, geoms, labs, colour scales, themes
-  ggplot.py        # ggplot, ggsave, autohide
-  build.py         # stats expand + layer/spec encoding
-  expr.py          # formula parser for geom_function
-  function.py      # sample formulas into lines and surfaces
-  contour.py       # implicit-curve contours (NumPy, optional contourpy)
-  viewer.py        # three.js HTML template
-  encode.py        # quantize / gzip payloads
-  scales.py        # positional scales & ticks
-  themes.py        # palettes / theme tokens
-  io.py            # read_bin (+ optional CRAFT SSH)
-  jupyter.py       # %plot3 magic, SolveIt hide-from-AI
-load.py            # CRAFT %run entry (optional)
-```
-
-Public imports stay the same: `from plot3 import ggplot, aes, geom_point, ...`.
-
-## SolveIt / CRAFT
-
-Prefer install + extension load:
-
-```text
-%local
-# once per environment: pip install -e /path/to/plot3
-%load_ext plot3
-%plot3 df x=time y=temp color=sensor kind=line
-```
-
-Or without pip, run the package entrypoint (replaces the old monolith
-`%run .../plot3.py`):
-
-```text
-%local
-%run /path/to/plot3/load.py
-%plot3 df x=time y=temp color=sensor kind=line
-```
-
-With CRAFT loaded, `%plot3` evaluates the DataFrame expression **on the GPU
-kernel** and ships only the mapped columns over SSH; without CRAFT it evaluates
-locally (plain Jupyter works). The cell is red-eyed out of LLM context
-(`hide=0` to keep it). Point clouds:
-
-```python
-(ggplot(read_bin("/path/scan.pcd.bin", remote=True),
-        aes(x="x", y="y", z="z", color="intensity"))
- + geom_point(size=0.006))
-```
-
-```python
-# Density / violin / facets
-ggplot(df, aes(x="mpg", colour="cyl")) + geom_density()
-ggplot(df, aes(x="cyl", y="mpg")) + geom_violin()
-ggplot(df, aes(x="wt", y="mpg")) + geom_point() + facet_wrap("cyl", ncol=2)
-```
-
-## 3D and point clouds
-
-3D mode is the same grammar: map **`z`**, add a 3D-capable geom. There is no
-separate `ggplot3d` class.
-
-```python
-from plot3 import (
-    ggplot, aes, geom_point, geom_point3d, coord_3d,
-    scale_colour_viridis_c, read_bin, labs,
-)
-
-# Core form (always supported)
-ggplot(df, aes(x="x", y="y", z="z", colour="intensity")) + geom_point(size=0.008)
-
-# Explicit 3D + coordinate options (recommended for lidar)
-(
-    ggplot(df, aes(x="x", y="y", z="z", colour="intensity"))
-    + geom_point3d(size=0.008)
-    + coord_3d(aspect="data", size_mode="scene", max_points=300_000)
-    + scale_colour_viridis_c(option="turbo")
-    + labs(title="LIDAR", colour="intensity")
-)
-```
-
-### nuScenes / CRAFT lidar
-
-```python
-cloud = read_bin(
-    "/home/gpudev/nuscenes_data/samples/LIDAR_TOP/"
-    "n015-2018-07-24-11-22-45+0800__LIDAR_TOP__1532402927647951.pcd.bin",
-    remote=True,   # stream + thin on the GPU host under CRAFT
-)
-(
-    ggplot(cloud, aes(x="x", y="y", z="z", colour="intensity"))
-    + geom_point3d(size=0.001)
-    + scale_colour_viridis_c(option="turbo")
-    + coord_3d()
-)
-```
-
-`read_bin` defaults to columns `x, y, z, intensity` (stride 5 float32). Use
-`remote=True` only after CRAFT `%gpu` so `SSH_HOST` / `remote_run_` exist.
-
-### Surfaces from a grid
-
-Long-form rectangular grid (every `x`×`y` cell present once):
+The examples below share this data:
 
 ```python
 import numpy as np
 import pandas as pd
-from plot3 import ggplot, aes, geom_surface, coord_3d, scale_colour_viridis_c
+from plot3 import *
 
-xs, ys = np.linspace(-2, 2, 40), np.linspace(-2, 2, 40)
-xx, yy = np.meshgrid(xs, ys)
-grid = pd.DataFrame({
-    "x": xx.ravel(),
-    "y": yy.ravel(),
-    "height": np.sin(xx).ravel() * np.cos(yy).ravel(),
+rng = np.random.default_rng(1)
+trial = pd.DataFrame({
+    "arm": rng.choice(["placebo", "low", "high"], 150),
+    "sex": rng.choice(["F", "M"], 150),
+    "dose": rng.uniform(0, 10, 150),
 })
-(
-    ggplot(grid, aes(x="x", y="y", z="height", fill="height"))
-    + geom_surface(alpha=0.95)
-    + scale_colour_viridis_c()
-    + coord_3d(aspect="data")
-)
-# wireframe only:
-# + geom_surface(wireframe=True)
+trial["response"] = (2 + 0.6 * trial.dose + 1.5 * (trial.arm == "high")
+                     + rng.normal(0, 1.2, 150))
+sales = pd.DataFrame({"month": pd.date_range("2021-01-01", periods=36, freq="MS")})
+sales["units"] = 100 + np.cumsum(rng.normal(1, 4, 36))
+sales["lo"], sales["hi"] = sales.units - 8, sales.units + 8
 ```
 
-### Density isosurfaces
-
-From raw 3D points (density is estimated on a grid; levels are fractions of peak):
+A plot is data, an aesthetic mapping, and layers:
 
 ```python
-(
-    ggplot(df, aes(x="x", y="y", z="z"))
-    + geom_isosurface(levels=[0.2, 0.5, 0.8], n=28, alpha=0.5)
-    + coord_3d()
-)
-
-# Explicit density resolution (ggplot2-shaped):
-(
-    ggplot(df, aes(x="x", y="y", z="z"))
-    + stat_density_3d(n=24)
-    + geom_isosurface(levels=[0.35, 0.7])
-)
+p = (ggplot(trial, aes(x="dose", y="response", colour="arm"))
+     + geom_point(alpha=0.7)
+     + geom_smooth(method="lm")
+     + labs(title="Response by dose", x="Dose (mg)", y="Response"))
 ```
 
-| | 2D | 3D |
-|--|----|----|
-| Switch | no `z` | `aes(z=...)` on **all** layers |
-| Point `size` | pixels | scene units (`size_mode="scene"`) |
-| Interaction | pan / zoom | orbit |
-| Not allowed | — | `facet_wrap`, bar/box/density/violin/… |
+In a notebook, `p` on its own line displays the interactive figure. Save it:
 
-## Roadmap
+```python notest
+ggsave("response.pdf", p, width=3.5, height=2.6, units="in")   # vector, journal column
+ggsave("response.png", p, width=7, height=4, units="in", dpi=300)
+ggsave("response.html", p)                                      # interactive page
+```
 
-Smoother marching-cubes isosurfaces (beyond smoothed voxel faces), more
-`scale_*` overrides, diverging palettes, and richer 3D picking (meshes).
-scales, express-style wrappers.
+In notebooks, bare column names work too: `aes(x=dose, y=response)`.
+Plain `.py` files use strings, as above.
+
+## Statistical plots
+
+```python
+# Distributions
+ggplot(trial, aes(x="response", fill="sex")) + geom_histogram(bins=20)            # stacked by group
+ggplot(trial, aes(x="response", fill="arm")) + geom_density(alpha=0.4)
+ggplot(trial, aes(x="arm", y="response")) + geom_boxplot() + geom_jitter(width=0.15, height=0)
+ggplot(trial, aes(x="arm", y="response", fill="arm")) + geom_violin()
+ggplot(trial, aes(x="response", colour="arm")) + stat_ecdf()
+ggplot(trial, aes(sample="response")) + geom_qq() + geom_qq_line()
+
+# Counts and proportions
+ggplot(trial, aes(x="arm", fill="sex")) + geom_bar()                     # stacked
+ggplot(trial, aes(x="arm", fill="sex")) + geom_bar(position="dodge")     # side by side
+ggplot(trial, aes(x="arm", fill="sex")) + geom_bar(position="fill")      # shares
+
+# Means with uncertainty
+(ggplot(trial, aes(x="arm", y="response", fill="sex"))
+ + stat_summary(fun_data="mean_se", geom="col", position="dodge")
+ + stat_summary(fun_data="mean_cl_normal", geom="errorbar", position="dodge", width=0.3))
+
+# Trends and time series
+ggplot(trial, aes(x="dose", y="response")) + geom_point() + geom_smooth()        # loess + 95% band
+(ggplot(sales, aes(x="month", y="units"))
+ + geom_ribbon(aes(ymin="lo", ymax="hi"), alpha=0.25) + geom_line())
+```
+
+| Need | Use |
+|---|---|
+| Error bars from your own columns | `geom_errorbar(aes(ymin=, ymax=))`, `geom_pointrange`, `geom_linerange` |
+| Summaries | `stat_summary(fun_data="mean_se" / "mean_cl_normal" / "mean_sdl" / "median_hilow")` |
+| Heatmaps | `geom_tile(aes(x=, y=, fill=))` (or `geom_raster`), with `geom_text(aes(label=))` |
+| Stacked areas | `geom_area(aes(fill=))`, `position="fill"` for shares |
+| Steps, segments, rectangles | `geom_step()`, `geom_segment(aes(xend=, yend=))`, `geom_rect(aes(xmin=, xmax=, ymin=, ymax=))` |
+| Horizontal layout | `+ coord_flip()` (bars, boxplots, densities, error bars) |
+| Several datasets | `geom_rect(aes(...), data=periods)`: any layer can bring its own data |
+
+Rows with missing values are dropped, and plot3 says so: *Removed 3 rows
+containing missing values (geom_point)*.
+
+## Annotation
+
+```python
+(ggplot(trial, aes(x="dose", y="response"))
+ + geom_point()
+ + geom_hline(yintercept=5, linetype="dashed")
+ + geom_vline(xintercept=[2, 8], colour="firebrick")
+ + geom_abline(slope=0.6, intercept=2)
+ + annotate("rect", xmin=2, xmax=8, ymin=0, ymax=12)
+ + annotate("label", x=9, y=1, label="safe range")
+ + annotate("segment", x=1, y=10, xend=3, yend=8))
+
+means = trial.groupby("arm", as_index=False).response.mean()
+(ggplot(means, aes(x="arm", y="response", label="response"))
+ + geom_col() + geom_text(nudge_y=0.4))     # numbers print to 4 significant figures
+```
+
+`geom_text` / `geom_label` take `size` in millimetres (ggplot2's 3.88 mm
+default), `hjust`, `vjust`, `nudge_x`, `nudge_y`, `fontface`, and
+`check_overlap`. Line types are `"solid"`, `"dashed"`, `"dotted"`,
+`"dotdash"`, `"longdash"`, `"twodash"`, R's numbers, or hex such as `"44"`.
+
+Map more aesthetics: `aes(shape=)` (circle, triangle, square, diamond, plus,
+cross), `aes(linetype=)`, `aes(size=)` (area), `aes(fill=)` for filled shapes
+and `aes(colour=)` for points and lines.
+
+## Scales
+
+```python
+(ggplot(trial, aes(x="dose", y="response", colour="arm"))
+ + geom_point()
+ + scale_x_continuous("Dose (mg)", breaks=[0, 2.5, 5, 7.5, 10])
+ + scale_y_continuous(limits=(0, None))
+ + scale_colour_manual(values={"placebo": "grey50", "low": "#56B4E9", "high": "#D55E00"},
+                       breaks=["placebo", "low", "high"],
+                       labels=["Placebo", "Low dose", "High dose"], name="Arm"))
+
+(ggplot(sales, aes(x="month", y="units"))
+ + geom_line()
+ + scale_x_date(date_breaks="6 months", date_labels="%b %Y")
+ + scale_y_continuous(labels="dollar"))
+```
+
+| Scale | Functions |
+|---|---|
+| Position | `scale_x_continuous(name, limits, breaks, labels, trans="log10"/"reverse")`, `scale_x_discrete(limits, labels)`, `scale_x_date(date_breaks, date_labels)`, `scale_x_log10`, `scale_x_reverse`, `xlim`, `ylim`, `lims` (and the `y` versions) |
+| Label formats | `"percent"`, `"comma"`, `"dollar"`, `"scientific"`, `"{:.1f} kg"`, a list, or a function |
+| Discrete colour / fill | `scale_colour_manual`, `scale_colour_brewer(palette="Set2")`, `scale_colour_viridis_d`, `scale_colour_grey`, `scale_colour_okabe_ito` (colour-blind safe) |
+| Continuous colour / fill | `scale_colour_gradient(low, high)`, `scale_colour_gradient2(low, mid, high, midpoint)`, `scale_colour_viridis_c`, `scale_colour_continuous(trans="log10")` |
+| Shape / linetype | `scale_shape_manual`, `scale_linetype_manual` |
+
+Every colour scale has `scale_fill_*` and `scale_color_*` names. Colours can
+be CSS names (`"steelblue"`), R greys (`"grey50"`), `"rgb(1,2,3)"`, or hex.
+Limits on a continuous axis drop the rows outside them and say how many.
+
+## Themes and titles
+
+```python
+(ggplot(trial, aes(x="arm", y="response", fill="arm"))
+ + geom_boxplot()
+ + labs(title="Response", subtitle="150 patients", caption="Source: simulated", tag="A")
+ + theme_classic()
+ + theme(legend_position="none", axis_text_x_angle=45, plot_title_hjust=0.5))
+```
+
+Themes: `theme_bw` (default for saved files), `theme_classic`,
+`theme_minimal`, `theme_light`, `theme_dark` (default in the interactive
+viewer). Each takes `base_size` (points) and `base_family`. `theme()` sets
+`legend_position` (`"right"`, `"bottom"`, `"none"`, or `(x, y)` inside the
+panel), `legend_title=False`, `panel_grid=False`, `axis_text_x_angle`,
+`plot_title_hjust`, `base_size`, and `base_family`.
+
+## Facets and multi-panel figures
+
+```python
+ggplot(trial, aes(x="dose", y="response")) + geom_point() + facet_wrap("arm")
+(ggplot(trial, aes(x="dose", y="response", colour="arm"))
+ + geom_point() + facet_grid("sex ~ arm"))                # rows ~ columns
+
+a = ggplot(trial, aes(x="dose", y="response", colour="arm")) + geom_point()
+b = ggplot(trial, aes(x="arm", y="response", fill="arm")) + geom_boxplot() + theme(legend_position="none")
+c = ggplot(sales, aes(x="month", y="units")) + geom_line()
+fig = ((a | b) / c) + plot_annotation(title="Overview", tag_levels="A")
+fig2 = (a | b) + plot_layout(widths=[2, 1])
+```
+
+Facet panels share scales, colours, one legend, and one pair of axis titles,
+as in ggplot2. `|` puts plots side by side, `/` stacks them, and
+`tag_levels` is `"A"`, `"a"`, `"1"`, or `"I"`. Save a composed figure with
+`ggsave` like any plot.
+
+## Saving for a paper
+
+```python notest
+ggsave("fig1.pdf", p, width=3.5, height=2.6, units="in")             # one column
+ggsave("fig1.png", p, width=7, height=4.5, units="in", dpi=300)       # two columns
+ggsave("fig1.svg", p, width=18, height=12, units="cm", fontsize=9, family="Arial")
+```
+
+- PNG, SVG, and PDF draw the same picture with real fonts. PNGs carry their
+  DPI, so Word and journal portals size them correctly.
+- Saved files use `theme_bw` unless you add a theme.
+- Crowded category labels turn or thin automatically; set
+  `theme(axis_text_x_angle=)` to choose.
+- Non-Latin text (東京, 서울, ✓) uses an installed font that has the glyphs.
+- Notes such as *Removed 3 rows…* are printed, not drawn; `notes=True` draws them.
+- Without the `export` extra, `.svg` works everywhere and `.png` falls back to
+  a built-in bitmap font.
+
+The interactive viewer also has a **Save** button (HTML, SVG, PNG, video for
+animations, copy to clipboard).
+
+## Functions and maths
+
+`geom_function` plots a formula with the same grammar as data. `^` is power
+and `2x` means `2*x`.
+
+```python
+ggplot() + geom_function("y = 2x + 2")
+ggplot() + geom_function("y = a x^2 + b x + c", a=2, b=-3, c=1)    # coefficients at the end
+ggplot() + geom_function("x^2 + y^2 = 1")                          # implicit: a round circle
+ggplot() + geom_function("z = sin(x) cos(y)", xlim=(-3, 3), ylim=(-3, 3))   # 3D surface
+ggplot() + geom_function(r"y = \frac{\sin x}{x}")                  # LaTeX input
+ggplot() + geom_function("r = 1 + cos(theta)") + coord_polar()
+ggplot() + geom_function("y > x^2")                                # shaded region
+ggplot(trial, aes(x="dose", y="response")) + geom_point() + geom_function("y = 2 + 0.6x")
+```
+
+Distributions and probability areas (no SciPy needed):
+
+```python
+inf = float("inf")
+ggplot() + geom_function("y = dbeta(x, 2, 5)") + area(0.2, 0.5)            # P(0.2 ≤ X ≤ 0.5) = 0.546
+ggplot() + geom_function("y = dnorm(x)") + area(-inf, -1.96) + area(1.96, inf)
+ggplot() + geom_function("y = dt(x, 3)") + area(2.353, inf)               # P(X ≥ 2.353) = 0.05
+ggplot() + geom_function("y = x^3 - 3x") + tangent(at=1) + derivative()
+```
+
+Formulas know `sin cos tan exp log ln sqrt abs floor ceil gamma lgamma beta
+erf erfc`, the densities `dnorm dbeta dt dchisq dgamma dexp dunif dlnorm`, and
+`pnorm qnorm pt qt pbeta pexp punif`. A density opens on its own support
+(`dbeta` on [0, 1]). Poles (`1/x`, `tan x`) are clipped with a note; steep but
+finite curves are not. Pass your own functions as keywords:
+`geom_function("y = damp(x) sin(3x)", damp=my_damp)`, or a lambda.
+
+## Animation and sliders
+
+```python
+ggplot() + geom_function("y = sin(x - t)") + transition_time(t=(0, 6.28))   # travelling wave
+ggplot() + geom_function("y = dbeta(x, a, b)") + slider(a=(0.5, 5), b=(0.5, 5))
+```
+
+Data animations follow `gganimate`:
+
+```python notest
+(ggplot(gapminder, aes(x="gdp", y="life", size="pop", colour="continent", group="country"))
+ + geom_point() + scale_x_log10() + transition_time("year") + labs(title="{frame_time}"))
+```
+
+The viewer interpolates between frames in the browser, with play, pause,
+scrubbing, speed, and video recording.
+
+## 3D and point clouds
+
+Map `z` on every layer for an orbit view.
+
+```python notest
+(ggplot(cloud, aes(x="x", y="y", z="z", colour="intensity"))
+ + geom_point3d(size=0.008)
+ + coord_3d(aspect="data", max_points=300_000)
+ + scale_colour_viridis_c(option="turbo"))
+
+ggplot(grid, aes(x="x", y="y", z="height", fill="height")) + geom_surface()
+ggplot(points, aes(x="x", y="y", z="z")) + geom_isosurface(levels=[0.2, 0.5, 0.8])
+read_bin("scan.pcd.bin")          # nuScenes-style point clouds; remote=True under CRAFT
+```
+
+NumPy arrays use column positions: `ggplot(pts, aes(x=0, y=1, z=2, colour=3))`.
+
+## Notebooks, SolveIt, and CRAFT
+
+- **Jupyter / SolveIt**: bare column names and backticks work in `aes()`,
+  `facet_wrap()`, and `facet_grid()` (`aes(x=`First Name`)`). Toggle with
+  `enable_r_style()` / `disable_r_style()`. `.py` files keep quoted strings.
+- **SolveIt** draws figures inline and hides their HTML from the model's
+  context (`autohide(False)` to opt out).
+- **VS Code notebooks** block WebGL in output cells, so plot3 opens figures
+  in your browser (`PLOT3_DISPLAY=browser|iframe` to force a mode).
+- **CRAFT / `%gpu`**: the same `ggplot(...)` code runs on the remote kernel;
+  stats run where the data lives and only a compact payload comes back.
+
+```text
+%run /path/to/plot3/plot3.py        # loads plot3 locally and seeds the GPU kernel
+%plot3 df x=wt y=mpg color=cyl       # optional shortcut magic
+```
+
+## API reference
+
+| Area | Functions |
+|---|---|
+| Figure | `ggplot(data, aes(...))`, `data >> ggplot(aes(...))`, `+`, `p.show()`, `p.save()`, `ggsave()` |
+| Aesthetics | `aes(x, y, z, colour, fill, size, shape, linetype, group, label, ymin, ymax, xmin, xmax, xend, yend, sample)` |
+| Points and lines | `geom_point`, `geom_jitter`, `geom_line`, `geom_path`, `geom_step`, `geom_segment`, `geom_text`, `geom_label` |
+| Bars and areas | `geom_col`, `geom_bar`, `geom_histogram`, `geom_area`, `geom_ribbon`, `geom_rect`, `geom_tile`/`geom_raster` |
+| Distributions | `geom_boxplot`, `geom_violin`, `geom_density`, `geom_qq`, `geom_qq_line`, `stat_ecdf`, `stat_summary` |
+| Uncertainty and fits | `geom_errorbar`, `geom_pointrange`, `geom_linerange`, `geom_smooth(method="loess"/"lm")` |
+| Reference | `geom_hline`, `geom_vline`, `geom_abline`, `annotate("text"/"label"/"rect"/"segment"/"point")` |
+| Positions | `position="stack"/"dodge"/"fill"/"identity"`, `position_dodge(width)`, `position_stack()`, `position_fill()` |
+| Functions | `geom_function`, `geom_vector_field`, `area`, `tangent`, `derivative` |
+| Scales | see [Scales](#scales) |
+| Coordinates | `coord_flip`, `coord_equal`, `coord_polar`, `coord_3d` |
+| Facets and layout | `facet_wrap`, `facet_grid`, `p1 | p2`, `p1 / p2`, `plot_layout`, `plot_annotation` |
+| Labels and themes | `labs(title, subtitle, caption, tag, x, y, colour, fill)`, `theme_*`, `theme()` |
+| Animation | `transition_time`, `transition_states`, `slider` |
+| 3D | `geom_point3d`, `geom_surface`, `geom_isosurface`, `stat_density_3d`, `read_bin` |
+
+## Differences from ggplot2
+
+- Python needs quotes outside notebooks: `aes(x="wt")`. In Jupyter and
+  SolveIt, `aes(x=wt)` works.
+- `labs(x="")` removes a title (ggplot2's `labs(x = NULL)`).
+- `fill` colours filled shapes; points and lines use `colour`, as in ggplot2.
+- Categories sort alphabetically (numbers numerically); use
+  `pd.Categorical` or `scale_x_discrete(limits=)` for your own order.
+- Text `size` is in millimetres, as in ggplot2; `geom_point(size=)` is in
+  pixels in 2D.
+- Saved files default to `theme_bw`, the interactive viewer to `theme_dark`.
+
+## Development
+
+```bash
+pytest -q                       # ~600 tests, including every example in this README
+python examples/showcase_2d.py  # 2D gallery in the browser
+python examples/showcase_3d.py  # 3D gallery
+```
+
+The code is in `plot3/`: `geoms.py` (grammar objects), `scaling.py`
+(scale functions), `build.py` (stats to a figure spec), `stat2d.py` and
+`flip.py` (statistical layers), `static.py` (PNG/SVG/PDF), `viewer.py` (the
+WebGL viewer), `expr.py` / `function.py` / `calculus.py` (formulas),
+`compose.py` (multi-panel figures). See [CHANGELOG.md](CHANGELOG.md) for
+changes between versions.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

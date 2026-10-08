@@ -4,13 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plot3"
-version = "0.2.0"
-description = "Grammar-of-graphics plotting on three.js (2D/3D) for Jupyter and local Python"
+version = "0.3.0"
+description = "ggplot2 grammar of graphics for Python: interactive WebGL figures and journal-ready PNG, SVG, and PDF"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "rleyvasal" }]
-keywords = ["ggplot", "visualization", "three.js", "dataframe"]
+keywords = ["ggplot", "ggplot2", "grammar of graphics", "visualization", "plotting", "three.js", "dataframe"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Framework :: Jupyter",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Visualization",
+]
 dependencies = [
   "numpy>=1.24",
   "pandas>=2.0",
@@ -25,6 +33,7 @@ export = ["cairosvg>=2.7"]
 
 [project.urls]
 Homepage = "https://github.com/rleyvasal/plot3"
+Changelog = "https://github.com/rleyvasal/plot3/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["."]

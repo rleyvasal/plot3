@@ -1,3 +1,7 @@
+> **Status: implemented in 0.3.0.** This is the original design document
+> for `geom_function`, kept for its reasoning. For usage see the README's
+> [Functions and maths](../README.md#functions-and-maths) section.
+
 # geom_function plan (plot3)
 
 Plot mathematical functions and equations with the same grammar as data layers:
