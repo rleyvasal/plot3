@@ -359,7 +359,7 @@ _REF_KINDS = frozenset({"hline", "vline", "abline"})
 _MM_TO_PX = 96.0 / 25.4
 
 
-def _text_annotations(geom, vals, color_scale, theme) -> list[dict]:
+def _text_annotations(geom, vals, color_scale, theme, palette=None) -> list[dict]:
     """geom_text / geom_label rows as annotation entries in scale units."""
     xs = np.asarray(vals["x"], dtype=np.float64) + float(getattr(geom, "nudge_x", 0.0))
     ys = np.asarray(vals["y"], dtype=np.float64) + float(getattr(geom, "nudge_y", 0.0))
@@ -367,7 +367,7 @@ def _text_annotations(geom, vals, color_scale, theme) -> list[dict]:
     colours: list[str | None] = [geom.const_color or theme["ink"]] * len(labels)
     if vals.get("color") and vals["color"][0] == "cat" and color_scale and color_scale[0] == "cat":
         _kind, codes, local = vals["color"]
-        palette = theme["cat"]
+        palette = palette or theme["cat"]
         for i, code in enumerate(codes):
             if math.isfinite(code):
                 name = local[int(code)]
@@ -899,6 +899,9 @@ def _axis_label(g, base_map: dict, resolved, axis: str, is3d: bool) -> str:
     """
     if axis in g.labs and g.labs[axis] is not None:
         return str(g.labs[axis])
+    pscale = getattr(g, f"{axis}scale", None)
+    if pscale is not None and pscale.name is not None:
+        return str(pscale.name)
     mapped = base_map.get(axis)
     if mapped:
         return mapped
@@ -1053,6 +1056,12 @@ def _filter_rows(vals: dict, ok: np.ndarray) -> None:
                 vals[key] = (gv[ok], gcats)
         elif key == "ids" and isinstance(item, list) and len(item) == n:
             vals[key] = [item[i] for i, keep in enumerate(ok) if keep]
+        elif key == "label" and isinstance(item, list) and len(item) == n:
+            vals[key] = [item[i] for i, keep in enumerate(ok) if keep]
+        elif key in {"shape", "linetype"} and isinstance(item, tuple) and len(item) == 2:
+            codes, cats = item
+            if isinstance(codes, np.ndarray) and codes.shape[:1] == (n,):
+                vals[key] = (codes[ok], cats)
 
 
 def _pivot_transition(sub: pd.DataFrame, mapping: dict, transition) -> dict:
@@ -1221,6 +1230,38 @@ def _forced_levels(g, ccats) -> list:
     return list(dict.fromkeys([str(level) for level in forced] + list(ccats)))
 
 
+def _limits_in_scale(pscale, sc) -> tuple[float | None, float | None]:
+    """Scale limits in the scale's own units (log10, epoch seconds)."""
+    lo, hi = pscale.limits
+    def conv(value):
+        if value is None:
+            return None
+        if pscale.kind == "date" or (sc is not None and sc.kind == "dt"):
+            return float(pd.Timestamp(value).timestamp())
+        number = float(value)
+        if sc is not None and getattr(sc, "trans", None) == "log10":
+            if number <= 0:
+                raise ValueError("log scale limits must be positive")
+            return math.log10(number)
+        return number
+    a, b = conv(lo), conv(hi)
+    if a is not None and b is not None and b < a:
+        a, b = b, a
+    return a, b
+
+
+def _hex_or_none(colour):
+    """#rrggbb for the viewer, which does not know R's 'grey50'."""
+    if not colour:
+        return colour
+    from plot3.scaling import to_hex
+
+    try:
+        return to_hex(colour)
+    except ValueError:
+        return colour
+
+
 def _layer_name(geom) -> str:
     """The geom as the user wrote it, for messages: geom_point, geom_line."""
     name = type(geom).__name__
@@ -1326,18 +1367,41 @@ def _num_key(text: str) -> float:
         return math.inf
 
 
-def _encode_dashes(spec_l: dict, geom, vals: dict, order: np.ndarray) -> None:
+def _linetype_names(cats, key_scale=None) -> list:
+    from plot3.geoms import LINETYPE_ORDER
+
+    if key_scale is not None:
+        return [key_scale.value_for(i, str(c)) for i, c in enumerate(cats)]
+    return [LINETYPE_ORDER[i % len(LINETYPE_ORDER)] for i in range(len(cats))]
+
+
+def _shape_names(cats, key_scale=None) -> list:
+    from plot3.geoms import SHAPE_ORDER
+
+    if key_scale is not None:
+        return [key_scale.value_for(i, str(c)) for i, c in enumerate(cats)]
+    if len(cats) > len(SHAPE_ORDER):
+        raise ValueError(
+            f"aes(shape=) has {len(cats)} levels; at most {len(SHAPE_ORDER)} "
+            "shapes are distinct. Map a column with fewer levels to shape, or "
+            "give scale_shape_manual(values=[...]) one shape per level"
+        )
+    return [SHAPE_ORDER[i] for i in range(len(cats))]
+
+
+def _encode_dashes(spec_l: dict, geom, vals: dict, order: np.ndarray, key_scale=None) -> None:
     """Dash patterns for a line layer: one per group, or one for the layer."""
-    from plot3.geoms import LINETYPE_ORDER, LINETYPES, dash_pattern
+    from plot3.geoms import dash_pattern
 
     mapped = vals.get("linetype")
     if mapped is not None:
         codes = np.asarray(mapped[0], dtype=np.float64)[order]
+        names = _linetype_names(mapped[1], key_scale)
         dashes = []
         for start, _count in spec_l.get("groups") or []:
             code = codes[int(start)]
-            name = LINETYPE_ORDER[int(code) % len(LINETYPE_ORDER)] if math.isfinite(code) else "solid"
-            pattern = LINETYPES[name]
+            name = names[int(code) % len(names)] if math.isfinite(code) else "solid"
+            pattern = dash_pattern(name)
             dashes.append(list(pattern) if pattern else None)
         if any(dashes):
             spec_l["dashes"] = dashes
@@ -1347,51 +1411,40 @@ def _encode_dashes(spec_l: dict, geom, vals: dict, order: np.ndarray) -> None:
         spec_l["dash"] = list(pattern)
 
 
-def _encode_shapes(spec_l: dict, geom, vals: dict, order: np.ndarray, li: int, payloads: list, compress: bool) -> None:
+def _encode_shapes(spec_l: dict, geom, vals: dict, order: np.ndarray, li: int, payloads: list, compress: bool, key_scale=None) -> None:
     """Point symbols: per-point codes with their names, or one shape."""
-    from plot3.geoms import SHAPE_ORDER
-
     mapped = vals.get("shape")
     if mapped is not None:
         codes, cats = mapped
-        if len(cats) > len(SHAPE_ORDER):
-            raise ValueError(
-                f"aes(shape=) has {len(cats)} levels; at most {len(SHAPE_ORDER)} "
-                "shapes are distinct. Map a column with fewer levels to shape"
-            )
+        names = _shape_names(cats, key_scale)
         ordered = np.asarray(codes, dtype=np.float64)[order]
         packed = np.where(np.isfinite(ordered), ordered, 0).astype("<u2")
         pid = f"p{li}sh"
         payloads.append((pid, pack_u16(packed, compress)))
-        spec_l["shape"] = {
-            "id": pid,
-            "dtype": "u16",
-            "names": [SHAPE_ORDER[i] for i in range(len(cats))],
-        }
+        spec_l["shape"] = {"id": pid, "dtype": "u16", "names": names}
     elif getattr(geom, "shape", None):
         spec_l["shape"] = str(geom.shape)
 
 
-def _aux_legends(resolved, layer_vals, legend):
+def _aux_legends(resolved, layer_vals, legend, shape_scale=None, linetype_scale=None):
     """Shape and linetype keys: on the colour legend when they map the same
     column, otherwise a legend of their own."""
-    from plot3.geoms import LINETYPE_ORDER, LINETYPES, SHAPE_ORDER
+    from plot3.geoms import dash_pattern
 
     extra = {}
     for (geom, m), vals in zip(resolved, layer_vals):
-        for aes_name, key, values in (
-            ("shape", "shape", SHAPE_ORDER),
-            ("linetype", "dash", LINETYPE_ORDER),
-        ):
+        for aes_name, key in (("shape", "shape"), ("linetype", "dash")):
             mapped = vals.get(aes_name)
             if mapped is None or aes_name in extra:
                 continue
             cats = mapped[1]
             if key == "dash":
-                styles = [list(LINETYPES[values[i % len(values)]] or []) for i in range(len(cats))]
+                styles = [list(dash_pattern(n) or []) for n in _linetype_names(cats, linetype_scale)]
             else:
-                styles = [values[i % len(values)] for i in range(len(cats))]
+                styles = _shape_names(cats, shape_scale)
             column = m.get(aes_name)
+            key_scale = shape_scale if key == "shape" else linetype_scale
+            title = key_scale.name if key_scale is not None and key_scale.name else column
             by_label = dict(zip(cats, styles))
             if legend and column == m.get("color") and all(e["label"] in by_label for e in legend):
                 for entry in legend:
@@ -1399,7 +1452,7 @@ def _aux_legends(resolved, layer_vals, legend):
                 extra[aes_name] = None
             else:
                 extra[aes_name] = {
-                    "label": str(column),
+                    "label": str(title),
                     "entries": [{"label": c, key: st} for c, st in zip(cats, styles)],
                 }
     # One constant symbol for every point layer (geom_point(shape="triangle"))
@@ -1596,6 +1649,11 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
 
     axes = ["x", "y", "z"] if is3d else ["x", "y"]
     scales: dict[str, Scale] = {}
+    # scale_x_discrete(limits=[...]) / xlim("a", "b"): that order, first.
+    for _axis_name, _pscale in (("x", getattr(g, "xscale", None)), ("y", getattr(g, "yscale", None))):
+        if _pscale is not None and _pscale.kind == "discrete" and _pscale.limits:
+            scales[_axis_name] = Scale("cat")
+            scales[_axis_name].cats = list(_pscale.limits)
     color_scale = None  # ("num", lo, hi) | ("cat", cats)
     num_color_vals: list[np.ndarray] = []
     dropped_log = 0
@@ -1681,11 +1739,6 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         nonlocal color_scale
         kind = column_values_kind
         if kind == "cat" or (kind == "num" and ccats):
-            if len(ccats) > len(theme["cat"]):
-                raise ValueError(
-                    f"{len(ccats)} colour categories > {len(theme['cat'])} "
-                    "palette slots — fold rare categories or map a number"
-                )
             if color_scale is None:
                 color_scale = ["cat", _forced_levels(g, ccats)]
             else:
@@ -1705,6 +1758,35 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 color_scale[2] = max(color_scale[2], float(finite.max()))
             num_color_vals.append(np.asarray(cv, dtype=np.float64))
             into["color"] = ("num", cv, None)
+
+    def _limit_rows(vals: dict, geom) -> None:
+        """Rows outside scale limits are dropped, as in ggplot2, and reported."""
+        if "frames" in vals or getattr(geom, "data_override", None) is not None:
+            return
+        n = len(vals["x"])
+        ok = np.ones(n, dtype=bool)
+        for axis_name in ("x", "y"):
+            pscale = getattr(g, f"{axis_name}scale", None)
+            if pscale is None or axis_name not in vals or pscale.limits is None:
+                continue
+            v = np.asarray(vals[axis_name], dtype=np.float64)
+            if pscale.kind == "discrete":
+                ok &= np.isfinite(v) & (v < len(pscale.limits))
+                continue
+            lo, hi = _limits_in_scale(pscale, scales.get(axis_name))
+            tol = 1e-9 * max(1.0, abs(lo or 0.0), abs(hi or 0.0))
+            if lo is not None:
+                ok &= v >= lo - tol
+            if hi is not None:
+                ok &= v <= hi + tol
+        if ok.all():
+            return
+        removed = int((~ok).sum())
+        word = "row" if removed == 1 else "rows"
+        missing_notes.append(
+            f"Removed {removed} {word} outside the scale limits ({_layer_name(geom)})"
+        )
+        _filter_rows(vals, ok)
 
     def _drop_log_rows(vals: dict) -> None:
         log_on = any(
@@ -1819,11 +1901,6 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             if "color" in m and m["color"] in sub.columns:
                 kind, cv, ccats = col_values(sub[m["color"]])
                 if kind == "cat" or (kind == "num" and ccats):
-                    if len(ccats) > len(theme["cat"]):
-                        raise ValueError(
-                            f"{len(ccats)} colour categories > {len(theme['cat'])} "
-                            "palette slots — fold rare categories or map a number"
-                        )
                     if color_scale is None:
                         color_scale = ["cat", _forced_levels(g, ccats)]
                     else:
@@ -2005,11 +2082,6 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         if "color" in m:
             kind, cv, ccats = col_values(sub[m["color"]])
             if kind == "cat" or (kind == "num" and ccats):
-                if len(ccats) > len(theme["cat"]):
-                    raise ValueError(
-                        f"{len(ccats)} colour categories > {len(theme['cat'])} "
-                        "palette slots — fold rare categories or map a number"
-                    )
                 if color_scale is None:
                     color_scale = ["cat", _forced_levels(g, ccats)]
                 else:
@@ -2042,6 +2114,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             if not size_label:
                 size_label = str(m["size"])
         _drop_log_rows(vals)
+        _limit_rows(vals, geom)
         layer_vals.append(vals)
 
     # Reference lines are part of the picture: ggplot2 widens the scales so
@@ -2068,6 +2141,27 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             scales[ax].hi = hi_f
             if scales[ax].hi <= scales[ax].lo:
                 scales[ax].hi = scales[ax].lo + 1.0
+
+    # scale_x_continuous(limits=, breaks=, labels=), xlim(), scale_y_reverse()…
+    for axis_name in ("x", "y"):
+        pscale = getattr(g, f"{axis_name}scale", None)
+        sc = scales.get(axis_name)
+        if pscale is None or sc is None:
+            continue
+        if pscale.kind == "discrete" and sc.kind == "cat" and pscale.limits:
+            sc.cats = list(pscale.limits)
+            sc.finish()
+        elif pscale.limits is not None and sc.kind in {"num", "dt"}:
+            lo, hi = _limits_in_scale(pscale, sc)
+            if lo is not None:
+                sc.lo = lo
+            if hi is not None:
+                sc.hi = hi
+            if sc.hi <= sc.lo:
+                sc.hi = sc.lo + 1.0
+        sc.custom = pscale
+        if pscale.trans == "reverse" and sc.kind == "num":
+            sc.lo, sc.hi = sc.hi, sc.lo
 
     # A function's ylim/zlim clips the view even when samples sit inside it.
     for geom, _locked_mapping in resolved:
@@ -2097,6 +2191,15 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if color_scale is not None and color_scale[0] == "num":
         allv = np.concatenate(num_color_vals) if num_color_vals else np.array([0.0, 1.0])
         cs = g.cscale or scale_colour_continuous()
+        user_scale = getattr(g, "colour_scale", None)
+        if user_scale is not None and user_scale.kind == "discrete":
+            raise ValueError(
+                "this colour is numeric; scale_colour_manual() and brewer are for "
+                "groups. Use scale_colour_gradient(), or map a text column"
+            )
+        if user_scale is not None and user_scale.kind == "continuous":
+            # ggplot2 maps the whole data range, unless limits are given.
+            cs = scale_colour_continuous(limits=user_scale.limits or "full")
         if "color" in force:
             lo_c, hi_c = force["color"]
             lo_c, hi_c = float(lo_c), float(hi_c)
@@ -2170,6 +2273,23 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
 
     payloads: list[tuple[str, str]] = []
     layer_specs = []
+    # One palette for the colour/fill groups: a scale_*_manual / brewer /
+    # viridis_d scale, else the theme's colours extended past eight groups.
+    cat_colours: list[str] = []
+    if color_scale is not None and color_scale[0] == "cat":
+        user_scale = getattr(g, "colour_scale", None)
+        if user_scale is not None and user_scale.kind == "continuous":
+            raise ValueError(
+                "scale_colour_gradient() is for numbers; this colour is categorical. "
+                "Use scale_colour_manual() or scale_colour_brewer()"
+            )
+        if user_scale is not None:
+            cat_colours = user_scale.colours(list(color_scale[1]), theme["cat"])
+        else:
+            from plot3.scaling import extend_palette
+
+            cat_colours = extend_palette(theme["cat"], len(color_scale[1]))
+
     # Text layers are positioned through the scales like any layer (a label
     # at x="Sat" lands on Sat), then drawn as annotations by both renderers.
     text_anns: list[dict] = []
@@ -2178,7 +2298,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         if geom.kind == "text":
             if is3d:
                 raise ValueError("geom_text() is for 2D figures")
-            text_anns.extend(_text_annotations(geom, vals, color_scale, theme))
+            text_anns.extend(_text_annotations(geom, vals, color_scale, theme, cat_colours))
         else:
             kept_pairs.append(((geom, m), vals))
     if len(kept_pairs) != len(resolved):
@@ -2230,8 +2350,10 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             "alpha": geom.alpha,
             # Error bars, reference lines, and text default to the ink colour
             # (black on a light theme), as in ggplot2.
-            "constColor": geom.const_color
-            or (theme["ink"] if getattr(geom, "_ink_default", False) else None),
+            "constColor": _hex_or_none(
+                geom.const_color
+                or (theme["ink"] if getattr(geom, "_ink_default", False) else None)
+            ),
         }
 
         def _encode_channel(name: str, values: np.ndarray, axis: str):
@@ -2394,7 +2516,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             if geom.kind in {"area", "poly"} and spec_l["alpha"] is None:
                 spec_l["alpha"] = 0.4 if geom.kind == "area" else 0.45
             if geom.kind == "line":
-                _encode_dashes(spec_l, geom, vals, order)
+                _encode_dashes(spec_l, geom, vals, order, getattr(g, "linetype_scale", None))
             if geom.kind == "area":
                 scy = scales["y"]
                 baseline = getattr(geom, "_baseline", None)
@@ -2446,7 +2568,10 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 spec_l["alpha"] = 0.9
         else:
             if geom.kind == "point":
-                _encode_shapes(spec_l, geom, vals, order, li, payloads, g.compress)
+                _encode_shapes(
+                    spec_l, geom, vals, order, li, payloads, g.compress,
+                    getattr(g, "shape_scale", None),
+                )
             if vals.get("size_frac") is not None:
                 frac = np.asarray(vals["size_frac"], dtype=np.float64)[order]
                 present = np.isfinite(frac)
@@ -2592,13 +2717,20 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if color_scale is not None:
         if color_scale[0] == "cat":
             cats = color_scale[1]
-            cspec = {"kind": "cat", "palette": theme["cat"][: len(cats)],
-                     "cats": cats}
-            legend = [{"label": c, "color": theme["cat"][i]}
-                      for i, c in enumerate(cats)]
+            cspec = {"kind": "cat", "palette": cat_colours, "cats": cats}
+            user_scale = getattr(g, "colour_scale", None)
+            if user_scale is not None:
+                legend = user_scale.legend_entries(list(cats), cat_colours)
+                for entry in legend:
+                    entry.pop("_level", None)
+            else:
+                legend = [{"label": c, "color": cat_colours[i]} for i, c in enumerate(cats)]
         else:
             pal = (g.cscale.palette if g.cscale else "blue")
             ramp = _CONT_PALETTES.get(pal, theme["seq"])
+            user_scale = getattr(g, "colour_scale", None)
+            if user_scale is not None and user_scale.kind == "continuous":
+                ramp = user_scale.ramp(num_color[0], num_color[1])
             cspec = {"kind": "num", "lo": num_color[0], "hi": num_color[1],
                      "trans": num_color[2], "ramp": ramp}
     if legend is None:
@@ -2621,7 +2753,10 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         if entries:
             legend = entries
 
-    legend, shape_legend, linetype_legend = _aux_legends(resolved, layer_vals, legend)
+    legend, shape_legend, linetype_legend = _aux_legends(
+        resolved, layer_vals, legend,
+        getattr(g, "shape_scale", None), getattr(g, "linetype_scale", None),
+    )
 
     base_map = dict(g.mapping)
     coord_spec = _coord_spec(coord, is3d, resolved)
@@ -2725,7 +2860,11 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 _legend_title_label(
                     _take(
                         "color",
-                        g.labs.get("color", base_map.get("color") or base_map.get("fill", "")),
+                        g.labs.get(
+                            "color",
+                            getattr(getattr(g, "colour_scale", None), "name", None)
+                            or base_map.get("color") or base_map.get("fill", ""),
+                        ),
                     ),
                     legend_title,
                     labs_math,

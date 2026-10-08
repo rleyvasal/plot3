@@ -237,16 +237,20 @@ class Scale:
 
     def spec(self) -> dict:
         d = {"kind": self.kind, "lo": self.lo, "hi": self.hi}
+        lo, hi = min(self.lo, self.hi), max(self.lo, self.hi)  # a reversed axis
         if self.trans:
             d["trans"] = self.trans
         if self.kind == "cat":
             d["cats"] = self.cats
         elif self.kind == "dt":
-            d["ladder"] = dt_ladder(self.lo, self.hi)
+            d["ladder"] = dt_ladder(lo, hi)
         elif self.trans == "log10":
-            d["ticks"] = log_ticks(self.lo, self.hi)
+            d["ticks"] = log_ticks(lo, hi)
         else:
-            d["ticks"] = [[t, fmt_num(t)] for t in nice_ticks(self.lo, self.hi)]
+            d["ticks"] = [[t, fmt_num(t)] for t in nice_ticks(lo, hi)]
+        custom = getattr(self, "custom", None)
+        if custom is not None:
+            _apply_custom(d, self, custom, lo, hi)
         return d
 
 
@@ -303,3 +307,62 @@ def col_values(s: pd.Series) -> tuple[str, np.ndarray, list[str]]:
     idx = {c: i for i, c in enumerate(cats)}
     return "cat", s.astype(str).map(idx).to_numpy(np.float64), cats
 
+
+
+def _apply_custom(d: dict, scale: "Scale", custom, lo: float, hi: float) -> None:
+    """scale_x_continuous(breaks=, labels=), scale_x_discrete(labels=), and
+    scale_x_date(date_breaks=, date_labels=) on a resolved scale spec.
+
+    ``fixed`` tells the viewer to keep these ticks when it zooms.
+    """
+    from plot3.scaling import date_freq, format_label
+
+    labels = custom.labels
+    if scale.kind == "cat":
+        if isinstance(labels, dict):
+            d["cats"] = [str(labels.get(c, c)) for c in scale.cats]
+        elif isinstance(labels, (list, tuple)):
+            d["cats"] = [str(labels[i]) if i < len(labels) else c for i, c in enumerate(scale.cats)]
+        elif callable(labels):
+            d["cats"] = [str(labels(c)) for c in scale.cats]
+        return
+    if scale.kind == "dt":
+        fmt = custom.date_labels
+        if custom.date_breaks:
+            start = pd.Timestamp(lo, unit="s")
+            stop = pd.Timestamp(hi, unit="s")
+            freq = date_freq(custom.date_breaks)
+            stamps = pd.date_range(start.floor("D"), stop, freq=freq)
+            stamps = [t for t in stamps if lo <= t.timestamp() <= hi]
+            d["ticks"] = [[t.timestamp(), t.strftime(fmt or "%Y-%m-%d")] for t in stamps]
+            d["fixed"] = True
+        elif fmt:
+            d["ladder"] = [
+                [[t, pd.Timestamp(t, unit="s").strftime(fmt)] for t, _label in level]
+                for level in d.get("ladder") or []
+            ]
+        return
+    log = scale.trans == "log10"
+    if custom.breaks is not None:
+        ticks = []
+        for i, value in enumerate(custom.breaks):
+            value = float(value)
+            if log and value <= 0:
+                continue
+            pos = math.log10(value) if log else value
+            if not lo - 1e-9 <= pos <= hi + 1e-9:
+                continue
+            if isinstance(labels, (list, tuple)):
+                text = str(labels[i])
+            elif labels is not None:
+                text = format_label(value, labels)
+            else:
+                text = fmt_num(value)
+            ticks.append([pos, text])
+        d["ticks"] = ticks
+        d["fixed"] = True
+    elif labels is not None and not isinstance(labels, (list, tuple)):
+        d["ticks"] = [
+            [pos, format_label(10 ** pos if log else pos, labels)] for pos, _text in d.get("ticks") or []
+        ]
+        d["fixed"] = True

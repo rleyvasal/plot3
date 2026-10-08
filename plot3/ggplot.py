@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+
+from plot3 import scaling as _scaling
 import html as _htmlesc
 import os
 import sys
@@ -182,6 +184,12 @@ class ggplot:
         self.stat_density_3d: stat_density_3d | None = None
         self.scale_x: scale_x_log10 | None = None
         self.scale_y: scale_y_log10 | None = None
+        # scale_x_continuous / xlim / scale_colour_manual / scale_shape_manual …
+        self.xscale = None
+        self.yscale = None
+        self.colour_scale = None
+        self.shape_scale = None
+        self.linetype_scale = None
         self.transition: transition_time | transition_states | None = None
         self.slider: slider | None = None
         self.height = height if isinstance(height, str) else f"{int(height)}px"
@@ -334,6 +342,27 @@ class ggplot:
             g.scale_x = other
         elif isinstance(other, scale_y_log10):
             g.scale_y = other
+        elif isinstance(other, _scaling._Lims):
+            for part in other:
+                g = g + part
+        elif isinstance(other, _scaling.PositionScale):
+            if other.axis == "x":
+                g.xscale = other
+                g.scale_x = scale_x_log10() if other.trans == "log10" else (
+                    None if other.kind == "continuous" else g.scale_x
+                )
+            else:
+                g.yscale = other
+                g.scale_y = scale_y_log10() if other.trans == "log10" else (
+                    None if other.kind == "continuous" else g.scale_y
+                )
+        elif isinstance(other, _scaling.ColourScale):
+            g.colour_scale = other
+        elif isinstance(other, _scaling.KeyScale):
+            if other.aesthetic == "shape":
+                g.shape_scale = other
+            else:
+                g.linetype_scale = other
         elif isinstance(other, slider):
             if self.transition is not None:
                 raise ValueError(

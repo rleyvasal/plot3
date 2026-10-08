@@ -440,7 +440,7 @@ def test_color_and_missing_data_still_errors():
     spec, _ = build_spec(
         ggplot() + geom_function("y = x", color="firebrick", xlim=(0, 1), n=4)
     )
-    assert spec["layers"][0]["constColor"] == "firebrick"
+    assert spec["layers"][0]["constColor"] == "#b22222"  # firebrick, as hex for the viewer
     with pytest.raises(ValueError, match="no data"):
         build_spec(ggplot() + geom_point())
 

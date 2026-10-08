@@ -509,6 +509,9 @@ function thin(vis, maxN) {
 }
 function ticksFor(ax, lo, hi) {
   const sc = S.scales[ax];
+  if (lo > hi) { const t = lo; lo = hi; hi = t; }  // scale_*_reverse()
+  // scale_*_continuous(breaks=, labels=): keep the chosen ticks when zooming.
+  if (sc.fixed && sc.ticks) return sc.ticks.filter(t => t[0] >= lo && t[0] <= hi);
   if (sc.kind === 'cat')
     return thin(sc.cats.map((c, i) => [i, c])
       .filter(t => t[0] >= lo && t[0] <= hi), 12);

@@ -62,6 +62,8 @@ from plot3.geoms import (
     transition_time,
 )
 from plot3.compose import plot_annotation, plot_layout
+from plot3.scaling import *  # noqa: F401,F403 - scale_* functions
+from plot3.scaling import __all__ as _scaling_all
 from plot3.ggplot import autohide, ggsave, ggplot  # show via ggplot.show
 from plot3.io import read_bin
 from plot3.jupyter import (
@@ -167,6 +169,7 @@ __all__ = [
     "remote_ggplot_payload",
     "show_remote",
     "__version__",
+    *_scaling_all,
 ]
 
 # Auto-register magics when loaded inside IPython (CRAFT / Jupyter).
