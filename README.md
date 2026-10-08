@@ -30,9 +30,21 @@ Contents: [Install](#install) · [Quick start](#quick-start) ·
 ## Install
 
 ```bash
+pip install "plot3[jupyter,export]"
+```
+
+The latest unreleased code installs straight from GitHub:
+
+```bash
+pip install "plot3[jupyter,export] @ git+https://github.com/rleyvasal/plot3"
+```
+
+To work on plot3 itself:
+
+```bash
 git clone https://github.com/rleyvasal/plot3 && cd plot3
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[jupyter,export]"
+pip install -e ".[dev,jupyter,export]"
 ```
 
 | Extra | Adds |
