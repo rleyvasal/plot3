@@ -28,6 +28,7 @@ from plot3.geoms import (
     transition_states,
     transition_time,
     _Theme,
+    _ThemePatch,
 )
 from plot3.table import as_table, detect_backend
 from plot3.themes import _THEMES
@@ -167,6 +168,8 @@ class ggplot:
         # Font for ggsave. None keeps the size ladder and Helvetica/Arial.
         self.theme_family: str | None = None
         self.theme_base_size: float | None = None
+        # None means static export puts the legend outside on the right.
+        self.legend_position = None
         self.cscale: scale_colour_continuous | None = None
         self.facet: facet_wrap | None = None
         self.coord: coord_3d | coord_equal | coord_polar | None = None
@@ -291,6 +294,9 @@ class ggplot:
             g.theme_name = other.name
             g.theme_family = other.base_family
             g.theme_base_size = other.base_size
+        elif isinstance(other, _ThemePatch):
+            if other.legend_position is not None:
+                g.legend_position = other.legend_position
         elif isinstance(other, scale_colour_continuous):
             g.cscale = other
         elif isinstance(other, facet_wrap):
@@ -434,7 +440,8 @@ class ggplot:
         suffix writes the standalone HTML viewer. ``width`` and ``height``
         are pixels unless ``units`` is ``"in"``, ``"cm"``, or ``"mm"``.
         ``dpi`` is the PNG resolution for a physical size (default 300).
-        PDF needs the optional ``plot3[export]`` extra.
+        PDF needs ``plot3[export]`` and the Cairo C library. ``.svg``
+        needs neither.
         """
         suffix = Path(path).suffix.lower()
         if suffix in {".png", ".svg", ".pdf"}:
@@ -592,8 +599,10 @@ def ggsave(
 
     ``ggsave("fig.png", p)`` and ``ggsave("fig.svg", p)`` write a static
     image. ``ggsave("fig.pdf", p)`` writes a PDF when ``plot3[export]`` is
-    installed. Any other suffix, including ``.html``, writes the standalone
-    viewer. The plot and the filename can be passed in either order.
+    installed. That extra also needs the Cairo C library; ``.svg`` writes
+    the same drawing with no extra dependencies. Any other suffix,
+    including ``.html``, writes the standalone viewer. The plot and the
+    filename can be passed in either order.
 
     ``width`` and ``height`` are pixels by default, so ``width=640`` stays
     640 pixels. A journal size uses physical units::

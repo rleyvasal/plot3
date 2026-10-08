@@ -3,8 +3,11 @@
 PNG, SVG, and PDF replay one list of drawing commands. SVG is text.
 PNG and PDF are that same SVG rendered by cairosvg when the optional
 ``plot3[export]`` extra is installed, so the three files share one
-drawing and one font. Without cairosvg, PNG falls back to a zlib RGB
-file and a built-in 5×7 font, and PDF raises with an install hint.
+drawing and one font. That extra needs the Cairo C library as well as
+the Python package (``libcairo2``, or the GTK runtime on Windows).
+Without cairosvg, PNG falls back to a zlib RGB file and a built-in
+5×7 font, and PDF raises with an install hint. ``.svg`` needs nothing
+extra.
 The geometry is the static channel already stored on each layer (the
 last frame of a transition, the low end of a slider).
 """
@@ -15,12 +18,15 @@ import base64
 import gzip
 import io
 import math
+import re
 import struct
 import zlib
 from pathlib import Path
 from xml.sax.saxutils import escape, quoteattr
 
 import numpy as np
+
+from plot3.__version__ import __version__
 
 _MAX_PX = 8192
 _CSS_DPI = 96.0
@@ -34,8 +40,11 @@ _UNIT_INCH = {
     "mm": 1.0 / 25.4,
 }
 _EXPORT_HINT = (
-    "ggsave() needs the optional export extra to write this file with a "
-    "journal font. Install it with: pip install 'plot3[export]'"
+    "ggsave() needs the Cairo C library to write PDF with a journal font. "
+    "Install the Python extra with: pip install 'plot3[export]'. "
+    "Windows and minimal Linux images also need the Cairo library itself "
+    "(for example the libcairo2 package, or the GTK runtime). "
+    "ggsave('fig.svg', plot) writes the same drawing with no extra dependencies."
 )
 
 # Column bitmasks, LSB = top row. 5x7, authored for axis labels and titles.
@@ -180,7 +189,9 @@ def save_static(
     Bare ``width`` and ``height`` are pixels. ``units="in"`` (also
     ``"cm"`` and ``"mm"``) with ``dpi`` (default 300) sets a physical
     page. Layout stays in CSS pixels (96 per inch) so type keeps its
-    size, and cairosvg rasterizes that SVG at ``dpi``.
+    size, and cairosvg rasterizes that SVG at ``dpi``. PDF and a
+    journal-font PNG need the Cairo C library (``pip install
+    'plot3[export]'``). ``.svg`` needs nothing extra.
     """
     path = Path(path)
     suffix = path.suffix.lower()
@@ -207,6 +218,8 @@ def save_static(
         data = _pdf_bytes(svg)
     else:
         data, fallback = _png_file_bytes(svg, commands, size)
+    if suffix == ".pdf":
+        data = _stamp_pdf(data, __version__)
     path.write_bytes(data)
     print(f"plot3: saved {path} ({len(data) // 1024} KB)")
     if fallback:
@@ -380,14 +393,15 @@ def _pdf_bytes(svg: str) -> bytes:
 
 
 def _png_file_bytes(svg: str, commands, size: dict) -> tuple[bytes, bool]:
-    data = _cairo_bytes("svg2png", svg, dpi=size["dpi"])
+    dpi = size["dpi"]
+    data = _cairo_bytes("svg2png", svg, dpi=dpi)
     if data:
-        return data, False
+        return _with_phys(data, dpi), False
     sx, sy = size["scale"]
     png_w, png_h = size["png"]
     if sx != 1.0 or sy != 1.0:
         commands = _scale_commands(commands, sx, sy)
-    return _png_bytes(_raster(commands, png_w, png_h)), True
+    return _png_bytes(_raster(commands, png_w, png_h), dpi), True
 
 
 def _scale_commands(commands, sx: float, sy: float) -> list:
@@ -596,18 +610,28 @@ def _draw_spec(spec, blobs, x, y, w, h, commands, *, border: bool, base_pt: floa
     labs = _labs(spec)
     is3d = bool(spec.get("is3d"))
     fonts = _font_sizes(w, base_pt)
+    position = _legend_position(spec)
+    metrics = _legend_metrics(spec, theme, fonts, labs.get("color") or "")
+    extra_right, extra_bottom = _legend_reserve(position, metrics, w, h)
     if is3d:
-        _draw_3d(spec, blobs, x, y, w, h, commands, labs, theme, fonts)
+        _draw_3d(
+            spec, blobs, x, y, w, h, commands, labs, theme, fonts,
+            extra_right=extra_right, extra_bottom=extra_bottom,
+        )
+        box = _box_3d(x, y, w, h, labs, fonts, extra_right, extra_bottom)
     else:
-        _draw_2d(spec, blobs, x, y, w, h, commands, labs, theme, fonts)
-    _draw_legend(
-        spec, commands, _plot_box_after(spec, x, y, w, h, labs, fonts, is3d),
-        theme, fonts, labs.get("color") or "",
-    )
+        _draw_2d(
+            spec, blobs, x, y, w, h, commands, labs, theme, fonts,
+            extra_right=extra_right, extra_bottom=extra_bottom,
+        )
+        box = _box_2d(spec, x, y, w, h, labs, fonts, extra_right, extra_bottom)
+    if metrics is not None and position != "none":
+        origin = _legend_origin(position, box, metrics, x, y, w, h)
+        _paint_legend(commands, origin, metrics, theme, fonts)
     notes = spec.get("notes") or []
     if notes:
         commands.append((
-            "text", x + 12, y + h - 4, "   ".join(str(n) for n in notes),
+            "text", x + 12, y + h - 4 - extra_bottom, "   ".join(str(n) for n in notes),
             fonts[2], theme.get("muted") or "#898781", "start", "alphabetic", 0, 400,
         ))
 
@@ -693,19 +717,22 @@ def _font_sizes(width: float, base_pt: float | None = None) -> tuple[int, int, i
     return 12, 14, 11
 
 
-def _plot_box_after(spec, x, y, w, h, labs, fonts, is3d):
-    if is3d:
-        return _box_3d(x, y, w, h, labs, fonts)
-    return _box_2d(spec, x, y, w, h, labs, fonts)
-
-
-def _box_3d(x, y, w, h, labs, fonts):
-    margin = 22
+def _box_3d(x, y, w, h, labs, fonts, extra_right=0.0, extra_bottom=0.0):
+    # The fit padding inside this box holds the axis names. The gutter
+    # itself only keeps those names off the canvas edge.
+    margin = 8
     top = margin + (fonts[1] + 8 if labs.get("title") else 0)
-    return (x + margin, y + top, max(8, w - 2 * margin), max(8, h - top - margin))
+    right = margin + extra_right
+    bottom = margin + extra_bottom
+    return (
+        x + margin,
+        y + top,
+        max(8, w - margin - right),
+        max(8, h - top - bottom),
+    )
 
 
-def _box_2d(spec, x, y, w, h, labs, fonts):
+def _box_2d(spec, x, y, w, h, labs, fonts, extra_right=0.0, extra_bottom=0.0):
     tick, title, note = fonts
     yticks = [str(lab) for _t, lab in _ticks(spec.get("scales", {}).get("y") or {})]
     tick_w = max((_text_width(lab, tick) for lab in yticks), default=0)
@@ -717,10 +744,13 @@ def _box_2d(spec, x, y, w, h, labs, fonts):
     bottom = 6 + _line_height(tick) + (4 + _line_height(tick) if x_name else 0) + 8
     if notes:
         bottom += _line_height(note) + 4
+    bottom += extra_bottom
     top = 10 + (title + 6 if labs.get("title") else 0)
-    right = 14
+    right = 14 + extra_right
     left = min(left, w * 0.42)
-    bottom = min(bottom, h * 0.38)
+    # A bottom legend needs more than the usual axis margin.
+    bottom_cap = 0.62 if extra_bottom else 0.38
+    bottom = min(bottom, h * bottom_cap)
     top = min(top, h * 0.32)
     return (
         x + left,
@@ -730,8 +760,11 @@ def _box_2d(spec, x, y, w, h, labs, fonts):
     )
 
 
-def _draw_2d(spec, blobs, x, y, w, h, commands, labs, theme, fonts) -> None:
-    box = _box_2d(spec, x, y, w, h, labs, fonts)
+def _draw_2d(
+    spec, blobs, x, y, w, h, commands, labs, theme, fonts,
+    extra_right=0.0, extra_bottom=0.0,
+) -> None:
+    box = _box_2d(spec, x, y, w, h, labs, fonts, extra_right, extra_bottom)
     scales = spec.get("scales") or {}
     window = _view_window(spec, box[2], box[3])
     surface = theme.get("surface") or "#0b1020"
@@ -970,8 +1003,11 @@ def _seg(commands, a, b, color, alpha) -> None:
     commands.append(("line", a[0], a[1], b[0], b[1], color, 1.25, alpha))
 
 
-def _draw_3d(spec, blobs, x, y, w, h, commands, labs, theme, fonts) -> None:
-    box = _box_3d(x, y, w, h, labs, fonts)
+def _draw_3d(
+    spec, blobs, x, y, w, h, commands, labs, theme, fonts,
+    extra_right=0.0, extra_bottom=0.0,
+) -> None:
+    box = _box_3d(x, y, w, h, labs, fonts, extra_right, extra_bottom)
     scales = spec.get("scales") or {}
     spans = []
     for axis in ("x", "y", "z"):
@@ -980,9 +1016,12 @@ def _draw_3d(spec, blobs, x, y, w, h, commands, labs, theme, fonts) -> None:
     max_span = max(spans + [1e-12])
     aspect = (spec.get("coord") or {}).get("aspect") or "data"
     ext = [1.0, 1.0, 1.0] if aspect == "equal" else [s / max_span for s in spans]
-    project = _projector(ext, box)
+    # Same camera as the viewer. A uniform scale about the projected
+    # centre fills the panel and leaves a centred mark where it was.
+    layout = _axis_layout(fonts[0])
+    inner = _inset_box(box, layout["pad"])
+    project, centre = _fit_projector(_projector(ext, box), ext, inner)
     axis_color = theme.get("axis") or "#2e3a5c"
-    ink2 = theme.get("ink2") or "#c3c2b7"
     ink = theme.get("ink") or "#ffffff"
     gz = bool(spec.get("gz"))
     min_dim = min(box[2], box[3])
@@ -1066,7 +1105,9 @@ def _draw_3d(spec, blobs, x, y, w, h, commands, labs, theme, fonts) -> None:
     for _depth, sx, sy, radius, color, alpha in points:
         commands.append(("circle", sx, sy, radius, color, None, 0, alpha))
 
-    _axis_names_3d(project, ext, labs, commands, ink2, fonts[0])
+    _draw_3d_axes(
+        spec, ext, project, centre, commands, theme, fonts, labs, (x, y, w, h), layout,
+    )
     if labs.get("title"):
         commands.append((
             "text", x + 12, y + 6, labs["title"], fonts[1], ink,
@@ -1124,18 +1165,26 @@ def _append_surface(layer, blobs, gz, world, colors, alpha, theme, project, tria
         triangles.append((depth, [(hit[0], hit[1]) for hit in hits], _hex(rgb), alpha))
 
 
-def _draw_legend(spec, commands, box, theme, fonts, color_label: str = "") -> None:
+def _legend_position(spec):
+    raw = spec.get("legendPosition")
+    if isinstance(raw, (list, tuple)) and len(raw) == 2:
+        try:
+            return (float(raw[0]), float(raw[1]))
+        except (TypeError, ValueError):
+            return "right"
+    if raw in {"right", "bottom", "none"}:
+        return raw
+    return "right"
+
+
+def _legend_metrics(spec, theme, fonts, color_label: str = ""):
+    """Rows and the legend box size, or None when there is nothing to draw."""
     entries = list(spec.get("legend") or [])
     color = spec.get("color") or {}
     size_legend = spec.get("sizeLegend")
     if not entries and color.get("kind") != "num" and not size_legend:
-        return
+        return None
     ink = theme.get("ink") or "#ffffff"
-    ink2 = theme.get("ink2") or "#c3c2b7"
-    surface = theme.get("surface") or "#0b1020"
-    grid = theme.get("grid") or "#1c2742"
-    if _rgb(grid) == _rgb(surface):
-        grid = theme.get("muted") or "#898781"
     tick = fonts[0]
     row_h = _line_height(tick) + 4
     rows = []
@@ -1152,7 +1201,7 @@ def _draw_legend(spec, commands, box, theme, fonts, color_label: str = "") -> No
         for br in size_legend["breaks"]:
             rows.append(("bubble", str(br.get("label") or ""), float(br.get("t") or 0)))
     if not rows:
-        return
+        return None
     text_w = 0
     for row in rows:
         if row[0] in {"title", "size-title"}:
@@ -1170,13 +1219,52 @@ def _draw_legend(spec, commands, box, theme, fonts, color_label: str = "") -> No
             box_h += max(row_h, 8 + int(round(row[2] * 16)))
         else:
             box_h += row_h
-    lx = box[0] + box[2] - box_w - 8
-    ly = box[1] + 8
-    if lx < box[0]:
-        lx = box[0]
-    commands.append(("rect", lx, ly, box_w, box_h, surface, grid, 1, 0.92))
+    return {"rows": rows, "w": box_w, "h": box_h, "row_h": row_h}
+
+
+def _legend_reserve(position, metrics, width: float, height: float) -> tuple[float, float]:
+    if metrics is None or position in {"none"} or isinstance(position, tuple):
+        return 0.0, 0.0
+    if position == "bottom":
+        return 0.0, min(float(metrics["h"]) + 10.0, height * 0.42)
+    # "right", and anything unexpected, stays outside the panel.
+    return min(float(metrics["w"]) + 12.0, width * 0.42), 0.0
+
+
+def _legend_origin(position, box, metrics, x, y, w, h) -> tuple[float, float]:
+    box_w = metrics["w"]
+    box_h = metrics["h"]
+    if position == "bottom":
+        lx = box[0] + max(0.0, (box[2] - box_w) / 2.0)
+        ly = y + h - box_h - 6
+    elif isinstance(position, tuple):
+        px, py = position
+        lx = box[0] + px * max(0.0, box[2] - box_w)
+        ly = box[1] + (1.0 - py) * max(0.0, box[3] - box_h)
+    else:
+        lx = x + w - box_w - 6
+        ly = box[1]
+    lx = min(max(lx, x + 2), x + w - box_w - 2)
+    ly = min(max(ly, y + 2), y + h - box_h - 2)
+    return lx, ly
+
+
+def _paint_legend(commands, origin, metrics, theme, fonts) -> None:
+    ink = theme.get("ink") or "#ffffff"
+    ink2 = theme.get("ink2") or "#c3c2b7"
+    surface = theme.get("surface") or "#0b1020"
+    grid = theme.get("grid") or "#1c2742"
+    if _rgb(grid) == _rgb(surface):
+        grid = theme.get("muted") or "#898781"
+    tick = fonts[0]
+    row_h = metrics["row_h"]
+    lx, ly = origin
+    # Opaque, so a legend inside the panel does not fade the marks under it.
+    commands.append((
+        "rect", lx, ly, metrics["w"], metrics["h"], surface, grid, 1, 1.0,
+    ))
     cursor = ly + 6
-    for row in rows:
+    for row in metrics["rows"]:
         if row[0] in {"title", "size-title"}:
             commands.append(("text", lx + 8, cursor, row[1], tick, ink, "start", "top", 0, 600))
             cursor += row_h
@@ -1211,24 +1299,233 @@ def _draw_ramp(commands, x, y, w, h, ramp) -> None:
         commands.append(("rect", x + i * w / steps, y, w / steps + 0.5, h, color, None, 0, 1.0))
 
 
-def _axis_names_3d(project, ext, labs, commands, color, size) -> None:
-    anchors = [
-        np.array([0.5 * ext[0], -0.28 * ext[1], 0.0]),
-        np.array([-0.28 * ext[0], 0.5 * ext[1], 0.0]),
-        np.array([-0.22 * ext[0], -0.06 * ext[1], 0.62 * ext[2]]),
+# Corner order matches _draw_3d: iz, then iy, then ix. The first edge of
+# each axis is the min edge the viewer labels.
+_AXIS_EDGES = {
+    "x": ((0, 1), (2, 3), (4, 5), (6, 7)),
+    "y": ((0, 2), (1, 3), (4, 6), (5, 7)),
+    "z": ((0, 4), (1, 5), (2, 6), (3, 7)),
+}
+
+
+def _axis_layout(size: float) -> dict:
+    """Pixels between the cube and the axis title, and the pad that reserves them."""
+    line = float(_line_height(size))
+    # Tick text starts just outside the edge. The title clears that whole line.
+    tick_gap = 6.0
+    title_gap = tick_gap + line + 8.0
+    pad = title_gap + line + 4.0
+    return {"line": line, "tick_gap": tick_gap, "title_gap": title_gap, "pad": pad}
+
+
+def _inset_box(box, pad: float):
+    x, y, w, h = box
+    pad = min(max(0.0, float(pad)), w * 0.28, h * 0.28)
+    return (x + pad, y + pad, max(4.0, w - 2.0 * pad), max(4.0, h - 2.0 * pad))
+
+
+def _fit_scale(corners, centre, inner) -> float:
+    cx, cy = centre[0], centre[1]
+    x0, y0, w, h = inner
+    x1, y1 = x0 + w, y0 + h
+    scale = math.inf
+    for hit in corners:
+        if hit is None:
+            continue
+        dx = hit[0] - cx
+        dy = hit[1] - cy
+        if dx > 1e-6:
+            scale = min(scale, (x1 - cx) / dx)
+        elif dx < -1e-6:
+            scale = min(scale, (x0 - cx) / dx)
+        if dy > 1e-6:
+            scale = min(scale, (y1 - cy) / dy)
+        elif dy < -1e-6:
+            scale = min(scale, (y0 - cy) / dy)
+    if not math.isfinite(scale) or scale <= 0:
+        return 1.0
+    return scale
+
+
+def _fit_projector(project, ext, inner):
+    """Scale the projected cube about its centre until it meets `inner`."""
+    centre_hit = project(np.asarray(ext, dtype=np.float64) / 2.0)
+    if centre_hit is None:
+        return project, None
+    corners = [
+        project(np.array([ix, iy, iz], dtype=np.float64))
+        for iz in (0.0, float(ext[2]))
+        for iy in (0.0, float(ext[1]))
+        for ix in (0.0, float(ext[0]))
     ]
-    for axis, anchor in zip(("x", "y", "z"), anchors):
+    scale = _fit_scale(corners, centre_hit, inner)
+    cx, cy = centre_hit[0], centre_hit[1]
+
+    def fitted(point):
+        hit = project(point)
+        if hit is None:
+            return None
+        return (cx + (hit[0] - cx) * scale, cy + (hit[1] - cy) * scale, hit[2])
+
+    return fitted, (cx, cy)
+
+
+def _cube_corners(project, ext):
+    return [
+        project(np.array([ix, iy, iz], dtype=np.float64))
+        for iz in (0.0, float(ext[2]))
+        for iy in (0.0, float(ext[1]))
+        for ix in (0.0, float(ext[0]))
+    ]
+
+
+def _hull_edge_set(points) -> set[tuple[int, int]]:
+    """Index pairs of the convex hull. `points` may contain None."""
+    indexed = [(i, p[0], p[1]) for i, p in enumerate(points) if p is not None]
+    indexed.sort(key=lambda item: (item[1], item[2]))
+    if len(indexed) < 3:
+        return set()
+
+    def cross(o, a, b):
+        return (a[1] - o[1]) * (b[2] - o[2]) - (a[2] - o[2]) * (b[1] - o[1])
+
+    lower: list = []
+    for point in indexed:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper: list = []
+    for point in reversed(indexed):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    hull = [point[0] for point in lower[:-1] + upper[:-1]]
+    edges = set()
+    for i, a in enumerate(hull):
+        b = hull[(i + 1) % len(hull)]
+        edges.add((a, b) if a < b else (b, a))
+    return edges
+
+
+def _corner_xyz(index: int, ext) -> np.ndarray:
+    return np.array([
+        (index & 1) * ext[0],
+        ((index >> 1) & 1) * ext[1],
+        ((index >> 2) & 1) * ext[2],
+    ], dtype=np.float64)
+
+
+def _visible_axis_edge(axis: str, hull, corners, centre):
+    """A silhouette edge parallel to `axis`. Prefer the viewer's min edge."""
+    pairs = _AXIS_EDGES[axis]
+    best = None
+    best_dist = -1.0
+    for pair in pairs:
+        key = pair if pair[0] < pair[1] else (pair[1], pair[0])
+        if key not in hull:
+            continue
+        if pair == pairs[0]:
+            return pair
+        a = corners[pair[0]]
+        b = corners[pair[1]]
+        mx = (a[0] + b[0]) / 2.0 - centre[0]
+        my = (a[1] + b[1]) / 2.0 - centre[1]
+        dist = mx * mx + my * my
+        if dist > best_dist:
+            best_dist = dist
+            best = pair
+    return best if best is not None else pairs[0]
+
+
+def _outward_normal(p0, p1, centre) -> tuple[float, float]:
+    """Screen normal of an edge, pointing away from the cube centre."""
+    dx = p1[0] - p0[0]
+    dy = p1[1] - p0[1]
+    length = math.hypot(dx, dy)
+    if length < 1e-6:
+        return 0.0, 1.0
+    nx, ny = -dy / length, dx / length
+    mx = (p0[0] + p1[0]) / 2.0 - centre[0]
+    my = (p0[1] + p1[1]) / 2.0 - centre[1]
+    if nx * mx + ny * my < 0.0:
+        nx, ny = -nx, -ny
+    return nx, ny
+
+
+def _outside_anchor(nx: float, ny: float) -> tuple[str, str]:
+    """Anchor so the glyphs sit further outside the edge than the anchor point."""
+    if abs(nx) >= abs(ny):
+        return ("start" if nx > 0.0 else "end"), "middle"
+    return "middle", ("top" if ny > 0.0 else "alphabetic")
+
+
+def _clamp_point(px: float, py: float, bounds) -> tuple[float, float]:
+    x, y, w, h = bounds
+    return (
+        min(max(px, x + 3.0), x + w - 3.0),
+        min(max(py, y + 3.0), y + h - 3.0),
+    )
+
+
+def _draw_3d_axes(spec, ext, project, centre, commands, theme, fonts, labs, bounds, layout) -> None:
+    """Tick numbers and axis names just outside the three visible edges."""
+    if centre is None:
+        return
+    muted = theme.get("muted") or "#898781"
+    ink2 = theme.get("ink2") or "#c3c2b7"
+    corners = _cube_corners(project, ext)
+    hull = _hull_edge_set(corners)
+    scales = spec.get("scales") or {}
+    tick_gap = layout["tick_gap"]
+    title_gap = layout["title_gap"]
+    for axis in ("x", "y", "z"):
+        pair = _visible_axis_edge(axis, hull, corners, centre)
+        p0 = corners[pair[0]]
+        p1 = corners[pair[1]]
+        if p0 is None or p1 is None:
+            continue
+        nx, ny = _outward_normal(p0, p1, centre)
+        anchor, baseline = _outside_anchor(nx, ny)
+        scale = scales.get(axis) or {}
+        for value, lab in _ticks(scale):
+            try:
+                u = _unit(scale, value)
+            except (TypeError, ValueError):
+                continue
+            if u < -0.001 or u > 1.001:
+                continue
+            hit = project(_corner_xyz(pair[0], ext) * (1.0 - u) + _corner_xyz(pair[1], ext) * u)
+            if hit is None:
+                continue
+            reach = max(3.0, tick_gap - 2.0)
+            commands.append((
+                "line", hit[0], hit[1], hit[0] + nx * reach, hit[1] + ny * reach,
+                muted, 1, 1.0,
+            ))
+            tx, ty = _clamp_point(hit[0] + nx * tick_gap, hit[1] + ny * tick_gap, bounds)
+            commands.append((
+                "text", tx, ty, str(lab), fonts[0], muted,
+                anchor, baseline, 0, 400,
+            ))
         text = labs.get(axis) or ""
         if not text:
             continue
-        hit = project(anchor)
-        if hit is None:
+        mid = project(_corner_xyz(pair[0], ext) * 0.5 + _corner_xyz(pair[1], ext) * 0.5)
+        if mid is None:
             continue
-        commands.append(("text", hit[0], hit[1], text, size, color, "middle", "middle", 0, 400))
+        lx, ly = _clamp_point(mid[0] + nx * title_gap, mid[1] + ny * title_gap, bounds)
+        commands.append((
+            "text", lx, ly, text, fonts[0], ink2, anchor, baseline, 0, 400,
+        ))
 
 
 def _projector(ext, box):
-    """Perspective camera used by the 3D viewer (fov 60, up = +z)."""
+    """View direction of the 3D viewer, drawn orthographically.
+
+    The eye sits on the same side of the cube as the viewer (fov 60, up
+    = +z). Orthographic scale keeps the projected centre on the centre
+    of ``box``, so fitting the panel does not slide a centred mark.
+    """
     ctr = np.array([ext[0] / 2, ext[1] / 2, ext[2] / 2], dtype=np.float64)
     backward = np.array([0.55, -0.85, 0.5], dtype=np.float64)
     backward /= np.linalg.norm(backward)
@@ -1243,8 +1540,19 @@ def _projector(ext, box):
         norm = float(np.linalg.norm(right))
     right /= norm
     cam_up = np.cross(backward, right)
-    fov_tan = math.tan(math.radians(30.0))
-    aspect = box[2] / max(box[3], 1.0)
+    samples = []
+    for iz in (0.0, float(ext[2])):
+        for iy in (0.0, float(ext[1])):
+            for ix in (0.0, float(ext[0])):
+                rel = np.array([ix, iy, iz], dtype=np.float64) - eye
+                samples.append((float(np.dot(rel, right)), float(np.dot(rel, cam_up))))
+    span = max(
+        max(point[0] for point in samples) - min(point[0] for point in samples),
+        max(point[1] for point in samples) - min(point[1] for point in samples),
+        1e-6,
+    )
+    half = span / 2.0
+    limit = min(box[2], box[3]) / 2.0
 
     def project(point):
         rel = np.asarray(point, dtype=np.float64) - eye
@@ -1254,10 +1562,8 @@ def _projector(ext, box):
         depth = -cam_z
         if depth < 1e-6:
             return None
-        ndc_x = (cam_x / depth) / fov_tan / aspect
-        ndc_y = (cam_y / depth) / fov_tan
-        sx = box[0] + (ndc_x * 0.5 + 0.5) * box[2]
-        sy = box[1] + (-ndc_y * 0.5 + 0.5) * box[3]
+        sx = box[0] + box[2] / 2.0 + (cam_x / half) * limit
+        sy = box[1] + box[3] / 2.0 - (cam_y / half) * limit
         return sx, sy, depth
 
     return project
@@ -1507,6 +1813,7 @@ def _svg_text(
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{shown_w}" height="{shown_h}" '
             f'viewBox="0 0 {width} {height}" overflow="hidden">'
         ),
+        f"<metadata>plot3 {escape(__version__)}</metadata>",
     ]
     for cmd in commands:
         parts.append(_svg_cmd(cmd, family_name))
@@ -1876,18 +2183,97 @@ def _blit(image, ax, ay, local_x, local_y, cols, scale, color, rotate) -> None:
                         image[sy, sx] = color
 
 
-def _png_bytes(rgb: np.ndarray) -> bytes:
+def _png_chunk(tag: bytes, payload: bytes) -> bytes:
+    crc = zlib.crc32(tag + payload) & 0xFFFFFFFF
+    return struct.pack(">I", len(payload)) + tag + payload + struct.pack(">I", crc)
+
+
+def _phys_chunk(dpi: float) -> bytes:
+    """PNG pHYs: pixels per metre, so a 300 dpi file is not read as 72 dpi."""
+    ppm = max(1, int(round(float(dpi) / 0.0254)))
+    return _png_chunk(b"pHYs", struct.pack(">IIB", ppm, ppm, 1))
+
+
+def _with_phys(data: bytes, dpi: float) -> bytes:
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return data
+    phys = _phys_chunk(dpi)
+    pos = 8
+    out = bytearray(data[:8])
+    inserted = False
+    while pos + 8 <= len(data):
+        length = struct.unpack(">I", data[pos:pos + 4])[0]
+        tag = data[pos + 4:pos + 8]
+        chunk_end = pos + 12 + length
+        if chunk_end > len(data):
+            return data
+        if tag != b"pHYs":
+            out += data[pos:chunk_end]
+        if tag == b"IHDR" and not inserted:
+            out += phys
+            inserted = True
+        pos = chunk_end
+        if tag == b"IEND":
+            break
+    return bytes(out)
+
+
+def _png_bytes(rgb: np.ndarray, dpi: float = _CSS_DPI) -> bytes:
     height, width = rgb.shape[:2]
     raw = b"".join(b"\x00" + rgb[y].tobytes() for y in range(height))
-
-    def chunk(tag: bytes, data: bytes) -> bytes:
-        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
-        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
-
     ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
     return (
         b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", ihdr)
-        + chunk(b"IDAT", zlib.compress(raw, 9))
-        + chunk(b"IEND", b"")
+        + _png_chunk(b"IHDR", ihdr)
+        + _phys_chunk(dpi)
+        + _png_chunk(b"IDAT", zlib.compress(raw, 9))
+        + _png_chunk(b"IEND", b"")
     )
+
+
+def _stamp_pdf(data: bytes, version: str) -> bytes:
+    """Append an incremental Info dictionary naming the plot3 version.
+
+    Cairo writes its own Producer entry inside a compressed stream. An
+    incremental update keeps that file valid and adds an uncompressed
+    ``/Creator (plot3 <version>)`` a reader can see.
+    """
+    if not data.startswith(b"%PDF") or b"startxref" not in data:
+        return data
+    start_at = data.rfind(b"startxref")
+    tail = data[start_at + len(b"startxref"):].splitlines()
+    prev = None
+    for line in tail:
+        text = line.strip()
+        if not text:
+            continue
+        if text == b"%%EOF":
+            break
+        try:
+            prev = int(text)
+        except ValueError:
+            return data
+        break
+    if prev is None:
+        return data
+    root = re.search(br"/Root\s+\d+\s+\d+\s+R", data)
+    size = re.search(br"/Size\s+(\d+)", data)
+    if root is None or size is None:
+        return data
+    obj_num = int(size.group(1))
+    if not data.endswith(b"\n"):
+        data += b"\n"
+    info = f"<< /Creator (plot3 {version}) /Producer (plot3 {version}) >>".encode()
+    obj = f"{obj_num} 0 obj\n".encode() + info + b"\nendobj\n"
+    obj_at = len(data)
+    xref_at = obj_at + len(obj)
+    xref = b"xref\n" + f"{obj_num} 1\n".encode() + f"{obj_at:010d} 00000 n \n".encode()
+    trailer = (
+        b"trailer\n<< "
+        + root.group(0)
+        + f" /Size {obj_num + 1} /Prev {prev} /Info {obj_num} 0 R ".encode()
+        + b">>\nstartxref\n"
+        + f"{xref_at}\n".encode()
+        + b"%%EOF\n"
+    )
+    return data + obj + xref + trailer

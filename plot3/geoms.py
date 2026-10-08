@@ -1137,3 +1137,50 @@ def theme_minimal(base_size=None, base_family=None) -> _Theme:
     """White page, light grid, and no panel box."""
     return _theme("minimal", base_size, base_family)
 
+
+class _ThemePatch:
+    """One theme setting that does not change the colour theme."""
+
+    def __init__(self, legend_position):
+        self.legend_position = legend_position
+
+
+def theme(*, legend_position=None) -> _ThemePatch:
+    """Change one part of the theme.
+
+    ``legend_position`` is ``"right"``, ``"bottom"``, ``"none"``, or a
+    pair ``(x, y)`` in 0–1 panel coordinates with ``(0, 0)`` at the
+    bottom left. Static export puts the legend outside on the right
+    unless you set this. ``(x, y)`` places it inside the panel.
+    """
+    return _ThemePatch(_check_legend_position(legend_position))
+
+
+def _check_legend_position(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        name = value.strip().lower()
+        if name not in {"right", "bottom", "none"}:
+            raise ValueError(
+                "legend_position must be 'right', 'bottom', 'none', "
+                "or a pair (x, y) from 0 to 1"
+            )
+        return name
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        try:
+            x = float(value[0])
+            y = float(value[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "legend_position (x, y) uses numbers from 0 to 1"
+            ) from exc
+        if not (
+            math.isfinite(x) and math.isfinite(y) and 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0
+        ):
+            raise ValueError("legend_position (x, y) uses numbers from 0 to 1")
+        return (x, y)
+    raise ValueError(
+        "legend_position must be 'right', 'bottom', 'none', or a pair (x, y)"
+    )
+

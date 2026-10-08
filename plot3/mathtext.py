@@ -169,7 +169,11 @@ def latex_to_pretty(src: str) -> str:
             continue
         if char == "^":
             body, index = _script_body(src, index + 1)
-            out.append(_translate(body, _SUP) or f"^({body})")
+            # ^\circ is the degree sign. Superscripting the ring draws ᶜⁱʳᶜ.
+            if body in {"∘", "°"}:
+                out.append("°")
+            else:
+                out.append(_translate(body, _SUP) or f"^({body})")
             continue
         if char == "_":
             body, index = _script_body(src, index + 1)
@@ -295,7 +299,7 @@ def _binop(node: ast.BinOp, substitute) -> _Piece:
         right = render(node.right, 0, substitute)
         return _Piece(
             f"\\frac{{{left.latex}}}{{{right.latex}}}",
-            f"{_frac(left)}/{_frac(right)}",
+            f"{_call_parens(left)}/{_frac(right)}",
             _MUL,
             "frac",
         )
@@ -564,6 +568,15 @@ def _frac(piece: _Piece) -> str:
     return piece.pretty
 
 
+def _call_parens(piece: _Piece) -> str:
+    """Keep parentheses when a function is divided: sin(x)/x, not sin x/x."""
+    text = _frac(piece)
+    if piece.kind != "call" or "(" in piece.pretty or " " not in piece.pretty:
+        return text
+    head, arg = piece.pretty.split(" ", 1)
+    return f"{head}({arg})"
+
+
 def _name(name: str, substitute: dict[str, float] | None) -> _Piece:
     if substitute and name in substitute:
         return _number(substitute[name])
@@ -621,19 +634,66 @@ def _command_name(src: str, index: int) -> tuple[str, int]:
     return src[index + 1 : cursor], cursor
 
 
+_SYMBOLS = {
+    "pm": "±",
+    "mp": "∓",
+    "times": "×",
+    "cdot": "·",
+    "leq": "≤",
+    "le": "≤",
+    "geq": "≥",
+    "ge": "≥",
+    "neq": "≠",
+    "ne": "≠",
+    "approx": "≈",
+    "circ": "∘",
+    "infty": "∞",
+    "partial": "∂",
+    "degree": "°",
+}
+# Uppercase Greek have no lowercase command of the same spelling.
+_GREEK_UPPER = {
+    "Gamma": "Γ",
+    "Delta": "Δ",
+    "Theta": "Θ",
+    "Lambda": "Λ",
+    "Xi": "Ξ",
+    "Pi": "Π",
+    "Sigma": "Σ",
+    "Upsilon": "Υ",
+    "Phi": "Φ",
+    "Psi": "Ψ",
+    "Omega": "Ω",
+}
+_TEXT_COMMANDS = {
+    "mathrm", "text", "operatorname", "textbf", "textit",
+    "textrm", "mathbf", "mathit", "hbox",
+}
+
+
+def _pretty_over(text: str) -> str:
+    """A fraction part. Add parentheses only when the piece itself is a sum or product."""
+    if text and any(ch in text for ch in "+-−±×/·∘ "):
+        return f"({text})"
+    return text
+
+
 def _command_pretty(name: str, src: str, index: int) -> tuple[str, int]:
     if name in {"left", "right"}:
         return "", index
     if name in {"lvert", "rvert", "vert", "|"}:
         return "|", index
-    if name == "cdot":
-        return "·", index
+    if name in _SYMBOLS:
+        return _SYMBOLS[name], index
     if name in {"quad", ",,", ","}:
         return " ", index
     if name == "frac":
         num, index = _read_group(src, index)
         den, index = _read_group(src, index)
-        return f"({latex_to_pretty(num)})/({latex_to_pretty(den)})", index
+        return (
+            f"{_pretty_over(latex_to_pretty(num))}/{_pretty_over(latex_to_pretty(den))}",
+            index,
+        )
     if name == "sqrt":
         if index < len(src) and src[index] == "[":
             end = src.find("]", index)
@@ -642,10 +702,11 @@ def _command_pretty(name: str, src: str, index: int) -> tuple[str, int]:
         inner = latex_to_pretty(body)
         shown = inner if inner.isalnum() else f"({inner})"
         return "√" + shown, index
-    if name == "operatorname":
+    if name in _TEXT_COMMANDS:
         body, index = _read_group(src, index)
-        return body, index
+        return latex_to_pretty(body), index
     greek = {key: pretty for key, (_latex, pretty) in _GREEK.items()}
+    greek.update(_GREEK_UPPER)
     if name in greek:
         return greek[name], index
     # User LaTeX keeps \log as log. The formula walker maps log() to \ln.

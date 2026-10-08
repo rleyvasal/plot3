@@ -1009,6 +1009,15 @@ def _slider_meta(slider) -> dict:
     return {"nFrames": int(stride), "params": params}
 
 
+def _legend_position_spec(value):
+    """JSON form of theme(legend_position=). The static default is outside right."""
+    if value is None:
+        return "right"
+    if isinstance(value, tuple):
+        return [float(value[0]), float(value[1])]
+    return value
+
+
 def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if not g.layers:
         raise ValueError("add a geom: ggplot(df, aes(...)) + geom_point()")
@@ -2216,6 +2225,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         "scales": {a: scales[a].spec() for a in axes},
         "color": cspec,
         "legend": legend,
+        "legendPosition": _legend_position_spec(getattr(g, "legend_position", None)),
         "sizeLegend": size_legend,
         "transition": transition_meta,
         "slider": slider_meta,

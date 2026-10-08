@@ -8,7 +8,7 @@ import pytest
 from plot3 import aes, geom_function, geom_point, ggplot, labs
 from plot3.build import build_spec
 from plot3.expr import parse_formula
-from plot3.mathtext import split_math
+from plot3.mathtext import latex_to_pretty, split_math
 
 
 # The conversion table. Parentheses follow precedence; nothing is simplified.
@@ -44,6 +44,48 @@ def test_formula_latex_and_pretty(source, latex, pretty):
     assert formula.latex == latex
     assert formula.pretty == pretty
     assert formula._repr_latex_() == f"${latex}$"
+
+
+# Units and operators that papers put in axis labels. latex_to_pretty is
+# what a static export draws in place of KaTeX.
+_LABELS = [
+    (r"\Delta", "Δ"),
+    (r"\Omega", "Ω"),
+    (r"\Gamma", "Γ"),
+    (r"\pm", "±"),
+    (r"\times", "×"),
+    (r"\cdot", "·"),
+    (r"\leq", "≤"),
+    (r"\geq", "≥"),
+    (r"\neq", "≠"),
+    (r"\approx", "≈"),
+    (r"\infty", "∞"),
+    (r"\partial", "∂"),
+    (r"\circ", "∘"),
+    (r"^\circ C", "° C"),
+    (r"25^\circ\mathrm{C}", "25°C"),
+    (r"\mathrm{mg}", "mg"),
+    (r"\text{kg}", "kg"),
+    (r"\operatorname{Re}", "Re"),
+    (r"\frac{1}{x}", "1/x"),
+    (r"\frac{a+b}{c}", "(a+b)/c"),
+    (r"\frac{x + 1}{x - 1}", "(x + 1)/(x - 1)"),
+]
+
+
+@pytest.mark.parametrize("src, pretty", _LABELS)
+def test_latex_labels_keep_symbols(src, pretty):
+    assert latex_to_pretty(src) == pretty
+
+
+def test_divided_function_keeps_parentheses():
+    formula = parse_formula("y = sin(x)/x")
+    assert formula.pretty == "y = sin(x)/x"
+    assert formula.latex == r"y = \frac{\sin x}{x}"
+    # A power on the function name is still the superscript form.
+    assert parse_formula("y = sin(x)^2").pretty == "y = sin² x"
+    # A call with nothing after it stays bare.
+    assert parse_formula("y = log(x)").pretty == "y = ln x"
 
 
 def test_user_function_and_lambda_have_no_tree_to_simplify():

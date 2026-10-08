@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 import struct
 import zlib
 from pathlib import Path
@@ -25,12 +27,15 @@ from plot3 import (
     ggsave,
     labs,
     slider,
+    theme,
     theme_bw,
     theme_classic,
     theme_light,
     theme_minimal,
     transition_time,
 )
+from plot3.__version__ import __version__
+from plot3.build import build_spec
 
 
 def _read_png(path: Path) -> np.ndarray:
@@ -433,6 +438,7 @@ def test_svg_uses_physical_size_family_and_point_size(tmp_path):
     assert 'width="7in"' in svg
     assert 'height="4in"' in svg
     assert 'viewBox="0 0 672 384"' in svg
+    assert f"<metadata>plot3 {__version__}</metadata>" in svg
     assert 'font-family="Arial"' in svg
     # 20 pt → 20 * 96/72 px; title is 1.2× that, axis text is 0.8×.
     assert 'font-size="32"' in svg
@@ -445,8 +451,11 @@ def test_pdf_without_cairosvg_names_the_extra(tmp_path, monkeypatch):
     from plot3 import static
 
     monkeypatch.setattr(static, "_load_cairosvg", lambda: None)
-    with pytest.raises(RuntimeError, match=r"plot3\[export\]"):
+    with pytest.raises(RuntimeError, match=r"plot3\[export\]") as caught:
         ggsave(tmp_path / "fig.pdf", _curve())
+    message = str(caught.value)
+    assert "Cairo" in message
+    assert ".svg" in message
     assert not (tmp_path / "fig.pdf").exists()
 
 
@@ -475,9 +484,247 @@ def test_cairosvg_png_and_pdf_match_the_svg(tmp_path):
     # Antialiased Helvetica has greys. The bitmap fallback has only flat colours.
     title = rgb[8:70, 20:280]
     assert len(np.unique(title.reshape(-1, 3), axis=0)) > 4
-    assert pdf.read_bytes().startswith(b"%PDF")
+    raw = pdf.read_bytes()
+    assert raw.startswith(b"%PDF")
+    assert f"/Creator (plot3 {__version__})".encode() in raw
+    start = raw.rfind(b"startxref")
+    offset = int(raw[start + len(b"startxref"):].split()[0])
+    assert raw[offset:offset + 4] == b"xref"
+    assert _png_phys(png) == (11811, 11811, 1)
     text = svg.read_text(encoding="utf-8")
     assert 'width="3.5in"' in text
     assert 'viewBox="0 0 336 240"' in text
     assert ">Hello</text>" in text
     assert ">y</text>" in text
+
+
+def _png_chunks(path: Path) -> list[tuple[bytes, bytes]]:
+    data = path.read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    pos = 8
+    chunks = []
+    while pos + 8 <= len(data):
+        size = struct.unpack(">I", data[pos:pos + 4])[0]
+        tag = data[pos + 4:pos + 8]
+        payload = data[pos + 8:pos + 8 + size]
+        chunks.append((tag, payload))
+        pos += 12 + size
+        if tag == b"IEND":
+            break
+    return chunks
+
+
+def _png_phys(path: Path) -> tuple[int, int, int]:
+    chunks = _png_chunks(path)
+    phys = [payload for tag, payload in chunks if tag == b"pHYs"]
+    assert len(phys) == 1
+    assert [tag for tag, _payload in chunks[:2]] == [b"IHDR", b"pHYs"]
+    return struct.unpack(">IIB", phys[0])
+
+
+def _svg_texts(svg: str) -> list[tuple[float, float, str]]:
+    return [
+        (float(x), float(y), text)
+        for x, y, text in re.findall(
+            r'<text x="([^"]+)" y="([^"]+)"[^>]*>([^<]*)</text>',
+            svg,
+        )
+    ]
+
+
+def _svg_circles(svg: str) -> list[tuple[float, float]]:
+    return [
+        (float(x), float(y))
+        for x, y in re.findall(r'<circle cx="([^"]+)" cy="([^"]+)"', svg)
+    ]
+
+
+def _scatter():
+    frame = pd.DataFrame({
+        "x": [1.0, 2.0, 3.0],
+        "y": [1.0, 3.0, 2.0],
+        "g": ["a", "b", "a"],
+    })
+    return ggplot(frame, aes(x="x", y="y", color="g")) + geom_point()
+
+
+def test_png_records_pixels_per_metre(tmp_path, monkeypatch):
+    from plot3 import static
+
+    monkeypatch.setattr(static, "_load_cairosvg", lambda: None)
+    fig = _curve() + theme_bw()
+    physical = tmp_path / "journal.png"
+    ggsave(physical, fig, width=2, height=2, units="in", dpi=300)
+    assert _png_phys(physical) == (11811, 11811, 1)
+    assert _read_png(physical).shape == (600, 600, 3)
+
+    pixels = tmp_path / "screen.png"
+    ggsave(pixels, fig, width=200, height=120)
+    # 96 CSS dpi. Word would otherwise treat the file as 72 dpi.
+    assert _png_phys(pixels) == (3780, 3780, 1)
+
+
+def test_legend_sits_outside_unless_placed(tmp_path):
+    right = tmp_path / "right.svg"
+    bottom = tmp_path / "bottom.svg"
+    hidden = tmp_path / "none.svg"
+    inside = tmp_path / "inside.svg"
+    ggsave(right, _scatter(), width=500, height=320)
+    ggsave(bottom, _scatter() + theme(legend_position="bottom"), width=500, height=320)
+    ggsave(hidden, _scatter() + theme(legend_position="none"), width=500, height=320)
+    ggsave(inside, _scatter() + theme(legend_position=(0.1, 0.9)), width=500, height=320)
+
+    right_svg = right.read_text(encoding="utf-8")
+    # The legend box is opaque. Point alpha is separate and still fades marks.
+    boxes = re.findall(
+        r'<rect [^>]*fill="#[0-9A-Fa-f]{6}"[^>]*stroke="#[0-9A-Fa-f]{6}"[^>]*/>',
+        right_svg,
+    )
+    assert boxes
+    assert all("fill-opacity" not in box for box in boxes)
+    circles = _svg_circles(right_svg)
+    labels = [item for item in _svg_texts(right_svg) if item[2] == "a"]
+    assert labels
+    assert min(item[0] for item in labels) > max(cx for cx, _cy in circles)
+
+    bottom_svg = bottom.read_text(encoding="utf-8")
+    axis = [item for item in _svg_texts(bottom_svg) if item[2] == "x"]
+    key = [item for item in _svg_texts(bottom_svg) if item[2] == "a"]
+    assert axis and key
+    assert min(item[1] for item in key) > max(item[1] for item in axis)
+
+    assert ">a</text>" not in hidden.read_text(encoding="utf-8")
+    assert ">b</text>" not in hidden.read_text(encoding="utf-8")
+
+    inside_svg = inside.read_text(encoding="utf-8")
+    placed = [item for item in _svg_texts(inside_svg) if item[2] == "a"]
+    data = _svg_circles(inside_svg)
+    assert placed
+    assert min(item[0] for item in placed) < max(cx for cx, _cy in data)
+    assert min(item[1] for item in placed) < 160
+
+    spec, _payloads = build_spec(_scatter())
+    assert spec["legendPosition"] == "right"
+    moved, _payloads = build_spec(_scatter() + theme(legend_position=(0.1, 0.9)))
+    assert moved["legendPosition"] == [0.1, 0.9]
+    dropped, _payloads = build_spec(_scatter() + theme(legend_position="none"))
+    assert dropped["legendPosition"] == "none"
+
+
+def test_legend_position_keeps_the_colour_theme(tmp_path):
+    fig = _scatter() + theme_bw() + theme(legend_position="bottom")
+    assert fig.theme_name == "bw"
+    assert fig.legend_position == "bottom"
+    path = tmp_path / "bw.svg"
+    ggsave(path, fig, width=500, height=320)
+    svg = path.read_text(encoding="utf-8")
+    assert 'stroke="#333333"' in svg
+    assert 'stroke="#2e3a5c"' not in svg
+    key = [item for item in _svg_texts(svg) if item[2] == "a"]
+    axis = [item for item in _svg_texts(svg) if item[2] == "x"]
+    assert min(item[1] for item in key) > max(item[1] for item in axis)
+
+
+def test_legend_position_rejects_unknown_values():
+    with pytest.raises(ValueError, match="legend_position"):
+        theme(legend_position="left")
+    with pytest.raises(ValueError, match="0 to 1"):
+        theme(legend_position=(1.2, 0.0))
+    with pytest.raises(ValueError, match="legend_position"):
+        theme(legend_position=0)
+
+
+def test_static_labels_keep_symbols_and_function_parentheses(tmp_path):
+    fig = (
+        ggplot()
+        + geom_function("y = sin(x)/x", xlim=(0.2, 8), n=12)
+        + labs(x=r"$\Delta$ ($^\circ$C)", y=r"$\mathrm{mg}$")
+    )
+    path = tmp_path / "labels.svg"
+    ggsave(path, fig, width=480, height=320)
+    svg = path.read_text(encoding="utf-8")
+    assert ">y = sin(x)/x</text>" in svg
+    assert "sin x/x" not in svg
+    assert ">Δ (°C)</text>" in svg
+    assert ">mg</text>" in svg
+
+
+def _point_in_poly(px: float, py: float, poly: list[tuple[float, float]]) -> bool:
+    inside = False
+    j = len(poly) - 1
+    for i, (x1, y1) in enumerate(poly):
+        x0, y0 = poly[j]
+        if (y1 > py) != (y0 > py):
+            cross = (x0 - x1) * (py - y1) / ((y0 - y1) or 1e-9) + x1
+            if px < cross:
+                inside = not inside
+        j = i
+    return inside
+
+
+def _cube_hull(svg: str) -> list[tuple[float, float]]:
+    """Convex hull of the long cube edges. Tick marks are the short lines."""
+    points = []
+    for x1, y1, x2, y2 in re.findall(
+        r'<line x1="([^"]+)" y1="([^"]+)" x2="([^"]+)" y2="([^"]+)"',
+        svg,
+    ):
+        a = (float(x1), float(y1))
+        b = (float(x2), float(y2))
+        if math.hypot(b[0] - a[0], b[1] - a[1]) < 40:
+            continue
+        points.extend((a, b))
+    ordered = sorted(set(points))
+    if len(ordered) < 3:
+        return ordered
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower: list[tuple[float, float]] = []
+    for point in ordered:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper: list[tuple[float, float]] = []
+    for point in reversed(ordered):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    return lower[:-1] + upper[:-1]
+
+
+def test_3d_box_fills_the_panel_and_labels_sit_outside(tmp_path):
+    fig = ggplot() + geom_function("z = sin(x) cos(y)", n=8) + theme_bw()
+    path = tmp_path / "surface.svg"
+    ggsave(path, fig, width=400, height=400)
+    svg = path.read_text(encoding="utf-8")
+    hull = _cube_hull(svg)
+    assert len(hull) >= 4
+    xs = [point[0] for point in hull]
+    ys = [point[1] for point in hull]
+    # The old camera left the cube near 40% of the canvas. The long side
+    # now fills the panel; the short side is this view's aspect.
+    long_side, short_side = sorted(
+        (max(xs) - min(xs), max(ys) - min(ys)), reverse=True,
+    )
+    assert long_side > 0.64 * 400
+    assert short_side > 0.55 * 400
+    labels = {text: (x, y) for x, y, text in _svg_texts(svg) if text in {"x", "y", "z"}}
+    assert set(labels) == {"x", "y", "z"}
+    for name, (lx, ly) in labels.items():
+        assert not _point_in_poly(lx, ly, hull), name
+
+
+def test_3d_export_draws_tick_numbers(tmp_path):
+    fig = ggplot() + geom_function("z = sin(x) cos(y)", n=6)
+    path = tmp_path / "surface.svg"
+    ggsave(path, fig, width=480, height=360)
+    svg = path.read_text(encoding="utf-8")
+    # x and y share the outer ticks; z is the short edge.
+    assert svg.count(">-10</text>") >= 2
+    assert ">-0.5</text>" in svg
+    assert ">0.5</text>" in svg
+    assert ">x</text>" in svg
+    assert ">y</text>" in svg
+    assert ">z</text>" in svg

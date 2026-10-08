@@ -37,6 +37,7 @@ REQUIRED = {
     "scale_y_log10",
     "transition_time",
     "transition_states",
+    "theme",
     "theme_bw",
     "theme_classic",
     "theme_dark",
