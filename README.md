@@ -91,8 +91,10 @@ Plain `.py` files use strings, as above.
 ```python
 # Distributions
 ggplot(trial, aes(x="response", fill="sex")) + geom_histogram(bins=20)            # stacked by group
+(ggplot(trial, aes(x="response", y="after_stat(density)"))                         # density scale
+ + geom_histogram(bins=20) + geom_density())
 ggplot(trial, aes(x="response", fill="arm")) + geom_density(alpha=0.4)
-ggplot(trial, aes(x="arm", y="response")) + geom_boxplot() + geom_jitter(width=0.15, height=0)
+ggplot(trial, aes(x="arm", y="response")) + geom_boxplot(outliers=False) + geom_jitter(width=0.15, height=0)
 ggplot(trial, aes(x="arm", y="response", fill="arm")) + geom_violin()
 ggplot(trial, aes(x="response", colour="arm")) + stat_ecdf()
 ggplot(trial, aes(sample="response")) + geom_qq() + geom_qq_line()
@@ -386,13 +388,18 @@ tree) is shortened to twice its width so it does not become a thin column;
 
 - Python needs quotes outside notebooks: `aes(x="wt")`. In Jupyter and
   SolveIt, `aes(x=wt)` works.
-- `labs(x="")` removes a title (ggplot2's `labs(x = NULL)`).
+- `labs(x=None)` (or `labs(x="")`) removes a title, as ggplot2's `labs(x = NULL)`.
 - `fill` colours filled shapes; points and lines use `colour`, as in ggplot2.
 - Categories sort alphabetically (numbers numerically); use
   `pd.Categorical` or `scale_x_discrete(limits=)` for your own order.
 - Text `size` is in millimetres, as in ggplot2; `geom_point(size=)` is in
   pixels in 2D.
 - Saved files default to `theme_bw`, the interactive viewer to `theme_dark`.
+  On light themes, a layer with no colour of its own is drawn as ggplot2
+  draws it: black points and lines, grey bars, white boxes and violins. The
+  dark viewer uses its own blue instead.
+- Building a figure prints nothing. `PLOT3_VERBOSE=1` prints each figure's
+  size in KB, for embedding in slides or pages with a size cap.
 
 ## Development
 

@@ -29,9 +29,25 @@ under **Changed**.
 - `geom_rug(sides=, length=)`, with group colours, under `coord_flip` too.
 - `ggtitle()`, `xlab()`, `ylab()`, `guides(colour="none")` (and `fill`,
   `size`, `shape`, `linetype`), and `theme_void()`.
+- Histograms on the density scale: `aes(y="after_stat(density)")` (also
+  `"..density.."`), per group when grouped.
+- `geom_boxplot(outliers=False)` and `outlier_shape=None` hide outlier points.
+- An unknown parameter warns, with the closest known one:
+  *Ignoring unknown parameter in geom_point(): colr (did you mean color?)*.
 
 ### Changed
 
+- Axes get about five round ticks, as ggplot2's: 0, 2, 4, 6, 8 for 0 to
+  9, not every unit. Labels stay distinct for large numbers (1000000000001,
+  not "1e+12" five times), and thinned labels keep round values.
+- On light themes (saved files), layers with no colour of their own are
+  black, bars grey35, and boxes and violins white with a dark outline, as in
+  ggplot2. The dark viewer keeps its blue.
+- `labs(x=None)` removes a title, as `labs(x = NULL)` does in R.
+- `facet_wrap` lays panels out as ggplot2 does: 3 in a row, 4 in 2 x 2, 5 or
+  6 in 2 rows of 3.
+- A missing column names the closest match and lists the data's columns.
+- Building a figure prints nothing; `PLOT3_VERBOSE=1` prints sizes.
 - 3D surfaces from `geom_function` are coloured by height (viridis) with a
   colour bar, unless you set a colour.
 - Saved files draw continuous colour bars vertically, labelled with round
@@ -59,6 +75,10 @@ under **Changed**.
 - The viewer drew per-point colours (colour gradients, height colours) paler
   than their colour bar; colours now match it exactly.
 - The viewer's size legend overlapped the colour bar's numbers.
+- Faceted viewer figures showed only colour squares in the legend: shapes,
+  line types, colour bars, and size legends now appear.
+- Infinite values were dropped silently; they now get a note, *Removed 1 row
+  containing non-finite values*.
 - The viewer drew its 2D grid over the data, hiding whisker stems on
   category lines; the grid is now behind the data. Box outlines in the
   viewer were 1 px and missing their right, top, and bottom sides.

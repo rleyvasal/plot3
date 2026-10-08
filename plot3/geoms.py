@@ -129,9 +129,32 @@ class aes(dict):
                 self[k] = _as_column_name(v)
 
 
+def _warn_unknown(geom, params: dict) -> None:
+    """ggplot2's "Ignoring unknown parameters", with a guess at the intended one."""
+    import difflib
+    import inspect
+    import warnings
+
+    known = {"mapping", "color", "colour", "alpha", "data"}
+    for klass in type(geom).__mro__:
+        init = klass.__dict__.get("__init__")
+        if init is not None:
+            known.update(
+                name for name, par in inspect.signature(init).parameters.items()
+                if par.kind in (par.KEYWORD_ONLY, par.POSITIONAL_OR_KEYWORD)
+            )
+    name = type(geom).__name__
+    for key in params:
+        guess = difflib.get_close_matches(key, sorted(known - {"self", "mapping"}), n=1)
+        hint = f" (did you mean {guess[0]}?)" if guess else ""
+        warnings.warn(f"Ignoring unknown parameter in {name}(): {key}{hint}", stacklevel=4)
+
+
 class _Geom:
     kind = ""
     sort_x = False
+    # geom_function takes formula coefficients (a=2) as keywords.
+    _takes_any_keyword = False
 
     def __init__(self, mapping: aes | None = None, *, color=None, colour=None,
                  alpha=None, data=None, **params):
@@ -141,6 +164,8 @@ class _Geom:
         # A layer's own rows (ggplot2's geom_rect(data = periods, ...)).
         self.layer_data = data
         self.params = params
+        if params and not self._takes_any_keyword and type(self).__name__ != "_Geom":
+            _warn_unknown(self, params)
 
 
 class geom_point(_Geom):
@@ -533,6 +558,9 @@ class geom_function(_Geom):
     side where the inequality holds. ``where(x < 0, 0, x^2)`` and a LaTeX
     ``cases`` environment are piecewise.
     """
+
+    # Formula coefficients (a=2, b=-3) arrive as keywords.
+    _takes_any_keyword = True
 
     kind = "function"
 
@@ -1399,9 +1427,14 @@ class geom_boxplot(_Geom):
     coef:
         Whisker fence multiplier on IQR (default 1.5). Set ``0`` to extend
         whiskers to the data min/max with no outliers.
+    outliers:
+        ``False`` draws no outlier points, as when jittered points already
+        show every row. ``outlier_shape=None`` (ggplot2's
+        ``outlier.shape = NA``) does the same.
     """
 
     kind = "boxplot"
+    _UNSET = object()
 
     def __init__(
         self,
@@ -1410,12 +1443,15 @@ class geom_boxplot(_Geom):
         width=0.75,
         outlier_size=3.0,
         coef=1.5,
+        outliers=True,
+        outlier_shape=_UNSET,
         **kw,
     ):
         super().__init__(mapping, **kw)
         self.width = float(width)
         self.outlier_size = float(outlier_size)
         self.coef = float(coef)
+        self.outliers = bool(outliers) and outlier_shape is not None
 
 
 class geom_density(_Geom):
@@ -1478,7 +1514,8 @@ class facet_wrap:
     facets:
         Column name, or a formula-like string ``"~col"`` / ``". ~ col"``.
     ncol, nrow:
-        Panel grid size. If both omitted, ``ncol`` is chosen near ``sqrt(n)``.
+        Panel grid size. If both are omitted, the grid is ggplot2's: 3 panels
+        in a row, 4 in 2 x 2, 5 or 6 in 2 rows of 3, 7 to 9 in 3 x 3.
     scales:
         ``"fixed"`` (shared domains across panels) or ``"free"`` (per-panel).
     """
@@ -1544,32 +1581,36 @@ class facet_grid:
         self.scales = scales
 
 
+_UNSET = object()
+
+
 class labs(dict):
     """Titles. ``colour`` (or ``fill``) names the colour legend.
 
     ``subtitle`` sits under the title, ``caption`` at the bottom right (a
     data source, say), and ``tag`` at the top left ("A", "B" for the panels
-    of a figure).
+    of a figure). ``None`` removes a title, as ggplot2's ``NULL`` does:
+    ``labs(x=None)`` draws no x axis title.
     """
 
-    def __init__(self, title=None, x=None, y=None, z=None, color=None,
-                 colour=None, size=None, fill=None, subtitle=None,
-                 caption=None, tag=None):
+    def __init__(self, title=_UNSET, x=_UNSET, y=_UNSET, z=_UNSET, color=_UNSET,
+                 colour=_UNSET, size=_UNSET, fill=_UNSET, subtitle=_UNSET,
+                 caption=_UNSET, tag=_UNSET):
         super().__init__()
-        legend = color if color is not None else colour if colour is not None else fill
+        legend = color if color is not _UNSET else colour if colour is not _UNSET else fill
         for k, v in (("title", title), ("x", x), ("y", y), ("z", z),
                      ("color", legend),
                      ("size", size),
                      ("subtitle", subtitle),
                      ("caption", caption),
                      ("tag", tag)):
-            if v is not None:
-                self[k] = v
+            if v is not _UNSET:
+                self[k] = "" if v is None else v
 
 
 def ggtitle(label, subtitle=None) -> labs:
     """The plot title (and subtitle): ``labs(title=, subtitle=)``."""
-    return labs(title=label, subtitle=subtitle)
+    return labs(title=label) if subtitle is None else labs(title=label, subtitle=subtitle)
 
 
 def xlab(label) -> labs:

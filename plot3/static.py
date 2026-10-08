@@ -865,7 +865,17 @@ def _thin_y_ticks(ticks, scale, height: float, tick: float):
     step = 1
     while gap * step < 1.6 * tick and step < len(ticks):
         step += 1
-    return ticks[::step]
+    if step == 1:
+        return ticks
+    # Keep the round ones (0, 10, 20), not whichever tick happens to be first.
+    width = abs(float(ticks[1][0]) - float(ticks[0][0])) * step
+    offset = 0
+    for o in range(step):
+        ratio = float(ticks[o][0]) / width if width else 0.5
+        if abs(ratio - round(ratio)) < 1e-6:
+            offset = o
+            break
+    return ticks[offset::step]
 
 
 def _x_label_drop(spec, tick: float) -> float:
@@ -1265,8 +1275,13 @@ def _draw_layer_2d(layer, spec, blobs, gz, px, commands) -> None:
             color = _hex(colors[start])
             tris = _poly_triangles(xs, ys, start, count, px)
             if tris:
-                # One mask, so shared edges do not darken the fill.
-                commands.append(("polymask", tris, color, alpha))
+                # One mask, so shared edges do not darken the fill. A violin
+                # with no colour of its own is white inside, as in ggplot2.
+                if layer.get("plainFill"):
+                    surface = _hex(_rgb((spec.get("theme") or {}).get("surface") or "#ffffff"))
+                    commands.append(("polymask", tris, surface, 1.0))
+                else:
+                    commands.append(("polymask", tris, color, alpha))
             curve = [px(float(xs[i]), float(ys[i])) for i in range(start, start + count)]
             commands.append(("polyline", curve, color, width, min(1.0, alpha + 0.3)))
         return
@@ -1315,6 +1330,8 @@ def _draw_boxes(layer, blobs, gz, n, colors, alpha, px, commands, spec) -> None:
     fill_alpha = min(1.0, alpha * 0.35)
     # aes(fill=): a filled box with a dark outline, whiskers, and median.
     filled = bool(layer.get("fillMapped"))
+    plain = bool(layer.get("plainFill"))
+    surface = _hex(_rgb((spec.get("theme") or {}).get("surface") or "#ffffff"))
     line_ink = _hex(_rgb((spec.get("theme") or {}).get("ink2") or "#333333"))
     for i in range(n):
         color = _hex(colors[i])
@@ -1330,10 +1347,14 @@ def _draw_boxes(layer, blobs, gz, n, colors, alpha, px, commands, spec) -> None:
             abs(corners[1][1] - corners[0][1]),
         )
         stroke = line_ink if filled else color
-        commands.append((
-            "rect", rect[0], rect[1], rect[2], rect[3], color, color, 1,
-            min(1.0, alpha * 0.9) if filled else fill_alpha,
-        ))
+        if plain:
+            # No colour of its own: white inside, as ggplot2 draws it.
+            commands.append(("rect", rect[0], rect[1], rect[2], rect[3], surface, None, 0, 1.0))
+        else:
+            commands.append((
+                "rect", rect[0], rect[1], rect[2], rect[3], color, color, 1,
+                min(1.0, alpha * 0.9) if filled else fill_alpha,
+            ))
         commands.append(("rect", rect[0], rect[1], rect[2], rect[3], None, stroke, 1, alpha))
         _seg(commands, px(x, float(ymin[i])), px(x, float(lower[i])), stroke, alpha)
         _seg(commands, px(x, float(upper[i])), px(x, float(ymax[i])), stroke, alpha)

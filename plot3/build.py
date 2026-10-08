@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 import copy
+import os
 
 from plot3.encode import encode_codes, encode_norm, pack_u16, pack_u32, pack_u8
 from plot3.mathtext import split_math
@@ -26,6 +27,7 @@ from plot3.scales import ordered_levels, Scale, col_values, fmt_num, resolution
 
 from plot3.stats3d import isosurface_levels, regular_grid_mesh
 from plot3.table import (
+    ColumnNotFound,
     category_labels,
     count_by,
     filter_equal,
@@ -134,7 +136,37 @@ def _as_discrete_x(table, xcol: str):
     return out
 
 
-def _grouped_histogram(geom, data, xcol, group_col, edges, centers, closed):
+_HIST_STATS = {
+    "count": "count", "after_stat(count)": "count", "..count..": "count", "stat(count)": "count",
+    "density": "density", "after_stat(density)": "density", "..density..": "density",
+    "stat(density)": "density",
+}
+
+
+def _hist_stat(mapping: dict) -> str:
+    """aes(y=after_stat(density)) for a histogram on the density scale."""
+    y = mapping.get("y")
+    if y is None:
+        return "count"
+    key = str(y).replace(" ", "")
+    if key not in _HIST_STATS:
+        raise ValueError(
+            f"geom_histogram(aes(y={y!r})): a histogram's y is computed. Use "
+            'aes(y="after_stat(density)") for the density scale, or leave y out for counts'
+        )
+    return _HIST_STATS[key]
+
+
+def _density_scale(counts: np.ndarray, edges: np.ndarray) -> np.ndarray:
+    """Counts as a density: each bar's area is its share of the rows."""
+    total = float(np.sum(counts))
+    widths = np.diff(np.asarray(edges, dtype=np.float64))
+    if total <= 0:
+        return np.zeros_like(counts, dtype=np.float64)
+    return np.asarray(counts, dtype=np.float64) / (total * widths)
+
+
+def _grouped_histogram(geom, data, xcol, group_col, edges, centers, closed, stat="count"):
     """One histogram per group on shared bins, stacked like ggplot2.
 
     Returns None for a continuous colour, which is not a grouping.
@@ -153,6 +185,8 @@ def _grouped_histogram(geom, data, xcol, group_col, edges, centers, closed):
             counts = _hist_counts_left_closed(values, edges)
         else:
             counts, _ = np.histogram(values, bins=edges)
+        if stat == "density":
+            counts = _density_scale(counts, edges)  # each group integrates to 1
         for center, count in zip(centers, counts):
             rows.append({"__x": float(center), "__y": float(count), group_col: level})
     table = pd.DataFrame(rows)
@@ -161,7 +195,7 @@ def _grouped_histogram(geom, data, xcol, group_col, edges, centers, closed):
     proxy.width = 1.0  # bars touch, as in a histogram
     proxy.position = getattr(geom, "position", "stack")
     out = stat2d.positioned_bars(proxy, {"x": "__x", "y": "__y", "color": group_col}, table)
-    out._axis_labels = {"x": xcol, "y": "count"}
+    out._axis_labels = {"x": xcol, "y": stat}
     return out
 
 
@@ -541,6 +575,7 @@ def expand_stat_geom(
         if "x" not in mapping:
             raise ValueError("geom_histogram() requires aes(x=)")
         xcol = mapping["x"]
+        stat = _hist_stat(mapping)
         values = numeric_array(data, xcol, dropna=True)
         binwidth = getattr(geom, "binwidth", None)
         bins = getattr(geom, "bins", None)
@@ -580,10 +615,12 @@ def expand_stat_geom(
             group_col = mapping.get("color")
             if group_col and group_col != xcol and has_column(data, group_col):
                 grouped = _grouped_histogram(
-                    geom, data, xcol, group_col, edges, centers, closed
+                    geom, data, xcol, group_col, edges, centers, closed, stat
                 )
                 if grouped is not None:
                     return grouped
+            if stat == "density":
+                counts = _density_scale(counts, edges)
             frame = pd.DataFrame(
                 {"x": centers, "y": counts.astype(np.float64)}
             )
@@ -600,7 +637,7 @@ def expand_stat_geom(
         out.const_color = geom.const_color
         out.alpha = geom.alpha
         out._bar_width_data = abs_width  # absolute data units (= binwidth)
-        out._axis_labels = {"x": xcol, "y": "count"}
+        out._axis_labels = {"x": xcol, "y": stat}
         # Expand continuous domain to full bin edges (not just centres).
         out._x_domain = (edge_lo, edge_hi)
         return out
@@ -664,7 +701,10 @@ def expand_stat_geom(
         out.const_color = geom.const_color
         out.alpha = geom.alpha
         out._stat_y_cols = ("ymin", "lower", "middle", "upper", "ymax")
-        out._outlier_frame = pd.DataFrame(outlier_rows)
+        # geom_boxplot(outliers=False) or outlier_shape=None (ggplot2's
+        # outlier.shape = NA): no outlier points, for boxes under jitter.
+        hide = not getattr(geom, "outliers", True)
+        out._outlier_frame = pd.DataFrame([] if hide else outlier_rows)
         out._y_name = ycol
         raw = {**dict(base_mapping), **dict(geom.mapping)}
         out._fill_mapped = "fill" in raw and "color" not in raw
@@ -919,7 +959,8 @@ def _axis_label(g, base_map: dict, resolved, axis: str, is3d: bool) -> str:
         return str(pscale.name)
     mapped = base_map.get(axis)
     if mapped:
-        return mapped
+        # aes(y=after_stat(density)) is titled "density", as in ggplot2.
+        return _HIST_STATS.get(str(mapped).replace(" ", ""), mapped)
     # A layer's own aes(y="v") names the axis before a computed layer's
     # suggestion (a ribbon's ymin, a smoother's y).
     for geom, mapping in resolved:
@@ -2194,9 +2235,25 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         if transition is not None and getattr(transition, "column", None):
             cols.append(transition.column)
         sub = materialize_columns(frame, list(dict.fromkeys(cols)))
+        # Inf and -Inf have no place on an axis: drop them and say so.
+        position_cols = [m[a] for a in axes if a in m and m[a] in sub.columns]
+        infinite = np.zeros(len(sub), dtype=bool)
+        for col in dict.fromkeys(position_cols):
+            if pd.api.types.is_numeric_dtype(sub[col]) and not pd.api.types.is_bool_dtype(sub[col]):
+                infinite |= np.isinf(sub[col].to_numpy(dtype=np.float64, na_value=np.nan))
+        if infinite.any():
+            count = int(infinite.sum())
+            sub = sub.loc[~infinite]
+            missing_notes.append(
+                f"Removed {count} {'row' if count == 1 else 'rows'} containing "
+                f"non-finite values ({_layer_name(geom)})"
+            )
+            frame_rows_dropped = count
+        else:
+            frame_rows_dropped = 0
         if getattr(geom, "data_override", None) is None and frame is not None:
             # ggplot2 says when rows are dropped; plot3 used to do it silently.
-            removed = n_rows(frame) - len(sub)
+            removed = n_rows(frame) - len(sub) - frame_rows_dropped
             if removed > 0:
                 word = "row" if removed == 1 else "rows"
                 missing_notes.append(
@@ -2615,6 +2672,17 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 or (theme["ink"] if getattr(geom, "_ink_default", False) else None)
             ),
         }
+
+        if spec_l["constColor"] is None and not vals.get("color") and not is3d:
+            # No colour of its own: black marks and grey35 bars on a light
+            # theme, as ggplot2 draws them.
+            spec_l["constColor"] = _hex_or_none(
+                theme.get("bar") if geom.kind in {"col"} else theme.get("mark")
+            )
+            is_violin = getattr(geom, "_violin_levels", None) is not None
+            if (geom.kind == "box" or is_violin) and theme.get("mark") == "#000000":
+                # ggplot2's boxes and violins: white inside, a dark outline.
+                spec_l["plainFill"] = True
 
         def _encode_channel(name: str, values: np.ndarray, axis: str):
             sc = scales[axis]
@@ -3216,8 +3284,16 @@ def _panel_grid(n: int, ncol: int | None, nrow: int | None) -> tuple[int, int]:
         return int(ncol), int(math.ceil(n / ncol))
     if nrow is not None:
         return int(math.ceil(n / nrow)), int(nrow)
-    ncol = int(math.ceil(math.sqrt(n)))
-    return ncol, int(math.ceil(n / ncol))
+    # ggplot2's wrap_dims (R's n2mfrow, turned): 3 panels in one row, 4 in
+    # 2 x 2, 5 or 6 in 2 rows of 3, up to 12 in rows of 4.
+    if n <= 3:
+        return max(1, n), 1
+    if n <= 6:
+        return (n + 1) // 2, 2
+    if n <= 12:
+        return (n + 2) // 3, 3
+    rows = int(math.ceil(math.sqrt(n)))
+    return int(math.ceil(n / rows)), rows
 
 
 def _level_text(level) -> str:
@@ -3263,22 +3339,77 @@ def _facet_colour_levels(g: ggplot) -> list[str] | None:
     return None
 
 
-def _facet_legend_html(spec: dict, theme: dict) -> str:
-    """One colour legend for a faceted HTML figure."""
+_LEGEND_GLYPH = {"circle": "●", "triangle": "▲", "square": "■", "diamond": "◆",
+                 "plus": "+", "cross": "×"}
+
+
+def _facet_key_html(entry: dict, colour: str) -> str:
+    """The key in front of a facet legend label: square, symbol, or line."""
     import html as _htmlesc
 
-    entries = spec.get("legend") or []
-    if not entries:
-        return ""
+    colour = _htmlesc.escape(str(colour))
+    if entry.get("shape"):
+        glyph = _LEGEND_GLYPH.get(str(entry["shape"]), "●")
+        return (f"<span class='sw' style='background:none;width:auto;color:{colour};"
+                f"font-size:11px;line-height:9px'>{glyph}</span>")
+    if entry.get("dash") is not None:
+        dash = entry.get("dash") or []
+        da = f" stroke-dasharray='{' '.join(str(d * 1.6) for d in dash)}'" if dash else ""
+        return (f"<svg width='14' height='9' style='margin-right:4px;vertical-align:middle'>"
+                f"<line x1='0' y1='4.5' x2='14' y2='4.5' stroke='{colour}' stroke-width='1.6'{da}/></svg>")
+    return f"<span class='sw' style='background:{colour}'></span>"
+
+
+def _facet_legend_html(spec: dict, theme: dict) -> str:
+    """The legends of a faceted HTML figure, drawn once beside the panels:
+    colour (keys with shapes or dashes), a colour bar, shape, line type,
+    and size, as one panel draws them."""
+    import html as _htmlesc
+
     esc = _htmlesc.escape
-    title = str((spec.get("labs") or {}).get("color") or "")
-    rows = "".join(
-        f"<div><span class='sw' style='background:{esc(str(e.get('color')))}'></span>"
-        f"{esc(str(e.get('label')))}</div>"
-        for e in entries
-    )
-    head = f"<b style='color:{theme['ink']}'>{esc(title)}</b>" if title else ""
-    return f"<div id='flegend'>{head}{rows}</div>"
+    ink = theme["ink"]
+    blocks = []
+    labs = spec.get("labs") or {}
+    title = str(labs.get("color") or "")
+    head = f"<b style='color:{ink}'>{esc(title)}</b>" if title else ""
+    entries = spec.get("legend") or []
+    color = spec.get("color") or {}
+    if entries:
+        rows = "".join(
+            f"<div>{_facet_key_html(e, e.get('color'))}{esc(str(e.get('label')))}</div>"
+            for e in entries
+        )
+        blocks.append(head + rows)
+    elif color.get("kind") == "num" and color.get("guide") is not False and color.get("ramp"):
+        stops = ",".join(esc(str(c)) for c in color["ramp"])
+        lo, hi = float(color.get("lo", 0.0)), float(color.get("hi", 1.0))
+        blocks.append(
+            f"{head}<div style='height:8px;width:110px;border-radius:4px;margin-top:3px;"
+            f"background:linear-gradient(90deg,{stops})'></div>"
+            f"<div style='display:flex;justify-content:space-between'><span>{lo:.3g}</span>"
+            f"<span>{hi:.3g}</span></div>"
+        )
+    for key in ("shapeLegend", "linetypeLegend"):
+        legend = spec.get(key)
+        if not legend:
+            continue
+        rows = "".join(
+            f"<div>{_facet_key_html(e, ink)}{esc(str(e.get('label')))}</div>"
+            for e in legend.get("entries") or []
+        )
+        blocks.append(f"<b style='color:{ink}'>{esc(str(legend.get('label') or ''))}</b>{rows}")
+    size = spec.get("sizeLegend")
+    if size and size.get("breaks"):
+        rows = "".join(
+            f"<div><span style='display:inline-block;vertical-align:middle;margin-right:6px;"
+            f"border-radius:50%;background:{theme['ink2']};width:{max(6, round(b.get('t', 0) * 26))}px;"
+            f"height:{max(6, round(b.get('t', 0) * 26))}px'></span>{esc(str(b.get('label')))}</div>"
+            for b in size["breaks"]
+        )
+        blocks.append(f"<b style='color:{ink}'>{esc(str(size.get('label') or 'size'))}</b>{rows}")
+    if not blocks:
+        return ""
+    return "<div id='flegend'>" + "<div style='height:6px'></div>".join(blocks) + "</div>"
 
 
 def facet_cells(g: ggplot) -> dict:
@@ -3312,7 +3443,7 @@ def facet_cells(g: ggplot) -> dict:
     if not isinstance(facet, _facet_grid):
         column = facet.variable
         if not has_column(g.data, column):
-            raise KeyError(f"facet column not in DataFrame: {column!r}")
+            raise ColumnNotFound([column], g.data)
         levels = _facet_levels(g.data, column)
         if not levels:
             raise ValueError("facet_wrap() found no panel levels")
@@ -3331,7 +3462,7 @@ def facet_cells(g: ggplot) -> dict:
 
     for column in (facet.rows, facet.cols):
         if column is not None and not has_column(g.data, column):
-            raise KeyError(f"facet column not in DataFrame: {column!r}")
+            raise ColumnNotFound([column], g.data)
     row_levels = _facet_levels(g.data, facet.rows) if facet.rows else [None]
     col_levels = _facet_levels(g.data, facet.cols) if facet.cols else [None]
     nrow, ncol = len(row_levels), len(col_levels)
@@ -3516,11 +3647,11 @@ html,body{{margin:0;height:100%;background:{theme["surface"]};color:{theme["ink"
 <div id="main"><div id="grid">{"".join(cells)}</div><div id="xtitle">{esc(shared_x)}</div></div>
 {legend_html}</div>{caption}
 </div></body></html>"""
-    kind = "facet_grid" if layout.get("kind") == "grid" else "facet_wrap"
-    print(
-        f"plot3: {kind} {count} panel(s) in {nrow}x{ncol} "
-        f"~{total_kb:,} KB portable HTML"
-    )
-    if total_kb > 1500:
-        print("plot3: warning — faceted figure may exceed sslive's ~1.8 MB cap")
+    # Sizes are for whoever embeds the HTML (a slide's ~1.8 MB cap, say):
+    # PLOT3_VERBOSE=1 prints them, and a notebook cell stays just the plot.
+    if os.environ.get("PLOT3_VERBOSE", "").strip() == "1":
+        kind = "facet_grid" if layout.get("kind") == "grid" else "facet_wrap"
+        print(f"plot3: {kind} {count} panel(s) in {nrow}x{ncol} ~{total_kb:,} KB portable HTML")
+        if total_kb > 1500:
+            print("plot3: the faceted figure is over 1.5 MB of HTML")
     return doc

@@ -151,8 +151,8 @@ def render_payload(
     )
     if log:
         kb = len(doc) // 1024
-        # The size line is the one worth seeing unprompted. The row count is
-        # opt-in so a notebook cell is just the plot.
+        # Sizes are opt-in (PLOT3_VERBOSE=1), so a notebook cell is just
+        # the plot.
         if os.environ.get("PLOT3_VERBOSE", "").strip() == "1":
             rows = sum(int(sp.get("n", 0)) for sp in spec.get("layers", []))
             n_layers = len(spec.get("layers", []))
@@ -160,10 +160,8 @@ def render_payload(
                 f"plot3: {n_layers} layer(s), {rows:,} rows -> {kb:,} KB "
                 f"portable HTML{' (3D)' if spec.get('is3d') else ''}"
             )
-        if kb > 1500:
-            print(
-                "plot3: warning — figure may exceed sslive's ~1.8 MB in-slide cap"
-            )
+            if kb > 1500:
+                print("plot3: the figure is over 1.5 MB of HTML")
     return doc
 
 

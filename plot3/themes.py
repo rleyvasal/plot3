@@ -82,3 +82,12 @@ _THEMES = {
     ),
 }
 
+# What a layer with no colour of its own is drawn in. ggplot2 draws points,
+# lines, and outlines black and bars grey35; the dark viewer theme keeps
+# its own blue, which black would not show on.
+for _name, _theme in _THEMES.items():
+    _light = _theme["surface"].lower() not in {"#0b1020", "#000000"}
+    _theme.setdefault("mark", "#000000" if _light else ("#ffffff" if _name == "lidar" else _theme["cat"][0]))
+    _theme.setdefault("bar", "#595959" if _light else _theme["cat"][0])
+
+

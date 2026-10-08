@@ -135,10 +135,12 @@ def test_png_has_size_background_and_marks(tmp_path):
     ggsave(str(path), fig, width=640, height=400)
     rgb = _read_png(path)
     assert rgb.shape == (400, 640, 3)
-    # Saved files default to theme_bw: a white page and its blue.
+    # Saved files default to theme_bw: a white page, and points with no
+    # colour of their own in black, as ggplot2 draws them.
     assert tuple(rgb[0, 0]) == (0xFF, 0xFF, 0xFF)
     assert len(np.unique(rgb.reshape(-1, 3), axis=0)) > 4
-    assert np.any(np.all(rgb == (0x2A, 0x78, 0xD6), axis=-1))
+    assert np.any(np.all(rgb == (0, 0, 0), axis=-1))
+    assert not np.any(np.all(rgb == (0x2A, 0x78, 0xD6), axis=-1))
     # A theme you add wins over that default.
     dark = tmp_path / "dark.png"
     ggsave(str(dark), fig + theme_dark(), width=640, height=400)

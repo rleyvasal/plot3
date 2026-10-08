@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from plot3.table import ColumnNotFound
+
 
 def regular_grid_mesh(
     df: pd.DataFrame,
@@ -19,7 +21,7 @@ def regular_grid_mesh(
     """
     for name, col in (("x", xcol), ("y", ycol), ("z", zcol)):
         if col not in df.columns:
-            raise KeyError(f"column(s) not in DataFrame: {[col]}")
+            raise ColumnNotFound([col], df)
         if not pd.api.types.is_numeric_dtype(df[col]):
             raise ValueError(f"geom_surface() {name}={col!r} must be numeric")
 

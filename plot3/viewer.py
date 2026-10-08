@@ -427,6 +427,17 @@ function fmt(v) {
   if (a >= 1e6 || a < 1e-4) return v.toPrecision(3);
   return String(+v.toFixed(6));
 }
+// Tick labels that stay apart: 1000000000001, not five "1.00e+12".
+function fmtTicks(vals) {
+  let labels = vals.map(fmt);
+  if (new Set(labels).size === labels.length) return labels;
+  if (vals.every(v => Number.isInteger(v) && Math.abs(v) < 1e15)) return vals.map(v => String(v));
+  for (let d = 4; d <= 15; d++) {
+    labels = vals.map(v => String(+v.toPrecision(d)));
+    if (new Set(labels).size === labels.length) return labels;
+  }
+  return labels;
+}
 // numeric colour: normalized ramp position -> data value (inverse transform)
 function cval(t) {
   const tr = S.color.trans || 'linear';
@@ -446,78 +457,59 @@ function fmtAxis(ax, v) {                     // v in data units
   return fmt(v);
 }
 
-// nice numeric ticks (JS side for pan/zoom). Same rule as scales.nice_ticks:
-// about six labels, at least four, and the nice number nearest each end.
-function nearestMultiple(value, step) {
-  const k = value / step;
-  const down = Math.floor(k + 1e-10);
-  const up = Math.ceil(k - 1e-10);
-  if (Math.abs(k - down) < Math.abs(up - k) - 1e-10) return down * step;
-  return up * step;
-}
-function ticksOnStep(lo, hi, step) {
-  let start = nearestMultiple(lo, step);
-  let end = nearestMultiple(hi, step);
-  if (end < start) { const swap = start; start = end; end = swap; }
-  const count = Math.round((end - start) / step);
-  if (count < 0 || count > 40) return null;
-  const origin = Math.round(start / step);
-  const out = [];
-  for (let i = 0; i <= count; i++) {
-    let t = (origin + i) * step;
-    if (Math.abs(t) < Math.abs(step) * 1e-8) t = 0;
-    else t = +t.toPrecision(12);
-    out.push(t);
-  }
-  return out;
-}
+// nice numeric ticks (JS side for pan/zoom), the same rule as scales.nice_ticks.
 function niceTicks(lo, hi, n) {
+  // About n ticks on a 1-2-2.5-5 grid inside the range, as ggplot2 (and
+  // plot3's Python side) choose them: 0, 2, 4, 6, 8 for 0 to 9.2.
   if (!(hi > lo) || !isFinite(lo) || !isFinite(hi)) return [lo];
-  const span = hi - lo;
-  const target = Math.max(5, n || 6);
-  const raw = span / Math.max(1, target - 1);
-  const exp = Math.floor(Math.log10(Math.max(raw, 1e-12)));
-  const steps = [];
+  const span = hi - lo, target = Math.max(3, n || 5), pad = 0.05 * span;
+  const exp = Math.floor(Math.log10(Math.max(span / Math.max(1, target - 1), 1e-300)));
+  let best = null, bestScore = Infinity, bestStep = -1;
   for (let shift = -1; shift <= 1; shift++) {
     const base = Math.pow(10, exp + shift);
     for (const mult of [1, 2, 2.5, 5]) {
       const step = mult * base;
-      if (step > 0 && steps.indexOf(step) < 0) steps.push(step);
+      const first = Math.ceil((lo - pad) / step - 1e-9);
+      const last = Math.floor((hi + pad) / step + 1e-9);
+      const count = last - first + 1;
+      if (count < 2 || count > 40) continue;
+      let score = Math.abs(count - target);
+      if (count < 4) score += 3;
+      if (count > target + 2) score += 2 * (count - target - 2);
+      score += 2 * (Math.max(0, first * step - lo) + Math.max(0, hi - last * step)) / span;
+      if (mult === 2.5) score += 0.25;
+      if (score < bestScore - 1e-9 || (Math.abs(score - bestScore) <= 1e-9 && step > bestStep)) {
+        const digits = Math.max(0, 3 - Math.floor(Math.log10(step)));
+        best = [];
+        for (let k = first; k <= last; k++) {
+          const tick = k * step;
+          best.push(Math.abs(tick) < step * 1e-8 ? 0 : +tick.toFixed(Math.min(digits, 20)));
+        }
+        bestScore = score; bestStep = step;
+      }
     }
   }
-  let best = null, bestScore = Infinity, bestStep = -1;
-  for (const step of steps) {
-    const ticks = ticksOnStep(lo, hi, step);
-    if (!ticks || ticks.length < 4) continue;
-    let overLo = 0, overHi = 0;
-    if (ticks[0] < lo) overLo = (lo - ticks[0]) / span;
-    if (ticks[ticks.length - 1] > hi) overHi = (ticks[ticks.length - 1] - hi) / span;
-    if (overLo > 0.05 || overHi > 0.05) continue;
-    const extra = overLo + overHi;
-    let score = Math.abs(ticks.length - 6);
-    if (ticks.length < 5) score += 3;
-    if (ticks.length > 9) score += (ticks.length - 9) * 2;
-    score += extra * 2;
-    if (score < bestScore - 1e-9 || (Math.abs(score - bestScore) <= 1e-9 && step > bestStep)) {
-      best = ticks; bestScore = score; bestStep = step;
-    }
-  }
-  if (best) return best;
-  const mag = Math.pow(10, Math.floor(Math.log10(Math.max(span / Math.max(1, n || 6), 1e-12))));
-  let step = 10 * mag;
-  for (const mult of [1, 2, 5, 10]) if ((span / Math.max(1, n || 6)) <= mult * mag) { step = mult * mag; break; }
-  return ticksOnStep(lo, hi, step) || [lo, hi];
+  return best || [lo, hi];
 }
 // ticks for any scale over a visible data range -> [[pos_data, label], ...]
 function thin(vis, maxN) {
+  // Every k-th tick, evenly spaced, on round values (0, 10, 20) when the
+  // ticks allow: never a lone last tick at an odd distance.
   if (vis.length <= maxN) return vis;
-  const keep = Math.max(2, maxN);
-  const step = Math.ceil((vis.length - 1) / (keep - 1));
-  const out = [];
-  for (let i = 0; i < vis.length - 1; i += step) out.push(vis[i]);
-  const last = vis[vis.length - 1];
-  if (out[out.length - 1] !== last) out.push(last);
-  return out;
+  const numeric = vis.length > 1 && typeof vis[0][0] === 'number' && typeof vis[1][0] === 'number';
+  for (let k = 2; k <= vis.length; k++) {
+    if (Math.ceil(vis.length / k) > Math.max(2, maxN)) continue;
+    let offset = 0;
+    if (numeric) {
+      const step = Math.abs(vis[1][0] - vis[0][0]) * k;
+      for (let o = 0; o < k; o++) {
+        const r = vis[o][0] / step;
+        if (step > 0 && Math.abs(r - Math.round(r)) < 1e-6) { offset = o; break; }
+      }
+    }
+    return vis.filter((_, i) => i >= offset && (i - offset) % k === 0);
+  }
+  return vis.slice(0, 1);
 }
 function ticksFor(ax, lo, hi) {
   const sc = S.scales[ax];
@@ -539,7 +531,8 @@ function ticksFor(ax, lo, hi) {
     return thin(vis, 10);
   }
   if (sc.trans === 'log10') return logTicks(lo, hi);
-  return niceTicks(lo, hi, 6).map(t => [t, fmt(t)]);
+  const vals = niceTicks(lo, hi, 5);
+  return vals.map((v, i) => [v, fmtTicks(vals)[i]]);
 }
 function logTicks(lo, hi) {
   if (!(hi > lo)) return [[lo, fmt(Math.pow(10, lo))]];
@@ -1659,10 +1652,11 @@ if (!S.is3d) {
         const ymax = L.ymax.data[i];
         const r = cols[i*3], gch = cols[i*3+1], b = cols[i*3+2];
         const x0 = x - hw, x1 = x + hw;
-        // box body
+        // box body (white inside when the box has no colour of its own)
         const tri = [x0,lower,0, x1,lower,0, x1,upper,0, x0,lower,0, x1,upper,0, x0,upper,0];
         for (let k = 0; k < 18; k++) pos[p++] = tri[k];
-        for (let k = 0; k < 6; k++) { col[c++]=r; col[c++]=gch; col[c++]=b; }
+        const [fr, fg, fb] = L.plainFill ? hex2rgb(T.surface) : [r, gch, b];
+        for (let k = 0; k < 6; k++) { col[c++]=fr; col[c++]=fg; col[c++]=fb; }
         // whisker stem + caps + median, and the box outline
         const [lr, lg2, lb] = filled ? inkRGB : [r, gch, b];
         pushSeg(x, ymin, x, lower, lr, lg2, lb);
@@ -1680,7 +1674,7 @@ if (!S.is3d) {
       bg.setAttribute('color', new THREE.BufferAttribute(col, 3));
       scene.add(new THREE.Mesh(bg, new THREE.MeshBasicMaterial({
         vertexColors: true, transparent: true,
-        opacity: filled ? Math.min(1, (L.alpha || 0.9) * 0.9) : Math.min(1, (L.alpha||0.9)*0.35),
+        opacity: L.plainFill ? 1 : filled ? Math.min(1, (L.alpha || 0.9) * 0.9) : Math.min(1, (L.alpha||0.9)*0.35),
         side: THREE.DoubleSide, depthWrite: false })));
       // Fat lines: WebGL draws plain lines 1 px wide whatever is asked.
       const lg = new LineSegmentsGeometry();
@@ -1758,6 +1752,8 @@ if (!S.is3d) {
             : Math.max(0, cnt - 2);
           const pos = new Float32Array(triCount * 9);
           const col = new Float32Array(triCount * 9);
+          // A violin with no colour of its own is white inside (ggplot2).
+          const [pr, pg, pb] = L.plainFill ? hex2rgb(T.surface) : [r, gch, b];
           let p = 0, c = 0;
           function pushTri(iA, iB, iC) {
             const tri = [
@@ -1766,7 +1762,7 @@ if (!S.is3d) {
               L.x.data[iC], L.y.data[iC], 0,
             ];
             for (let k = 0; k < 9; k++) pos[p++] = tri[k];
-            for (let k = 0; k < 3; k++) { col[c++]=r; col[c++]=gch; col[c++]=b; }
+            for (let k = 0; k < 3; k++) { col[c++]=pr; col[c++]=pg; col[c++]=pb; }
           }
           if (paired) {
             for (let i = 0; i < half - 1; i++) {
@@ -1783,7 +1779,7 @@ if (!S.is3d) {
           g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
           g.setAttribute('color', new THREE.BufferAttribute(col, 3));
           const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
-            vertexColors: true, transparent: true, opacity: L.alpha || 0.45,
+            vertexColors: true, transparent: true, opacity: L.plainFill ? 1 : (L.alpha || 0.45),
             side: THREE.DoubleSide, depthWrite: false }));
           scene.add(mesh);
           if (isCat) regCat(L.color.data[s0] % S.color.cats.length, mesh);

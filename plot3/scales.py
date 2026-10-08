@@ -87,49 +87,53 @@ def _classic_ticks(lo: float, hi: float, n: int) -> list[float]:
     return found or [lo, hi]
 
 
-def nice_ticks(lo: float, hi: float, n: int = 6) -> list[float]:
-    """About ``n`` ticks on a 1-2-2.5-5 grid, at least four when the span allows.
+def nice_ticks(lo: float, hi: float, n: int = 5) -> list[float]:
+    """About ``n`` ticks on a 1-2-2.5-5 grid inside the range, as ggplot2's
+    extended breaks: 0, 2, 4, 6, 8 for 0 to 9.2, not every unit.
 
-    The nice number nearest each end is included, so a sample maximum of
-    0.9997 still gets a tick at 1.
+    Ticks may sit up to 5% of the span past either end (the view's margin),
+    so a sample maximum of 0.9997 still gets a tick at 1. Among steps with
+    about ``n`` ticks, the one whose ticks reach nearest both ends wins;
+    2.5 steps count as a little less round than 1, 2, and 5.
     """
     if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
         return [lo]
     span = hi - lo
-    target = max(5, n)
+    target = max(3, int(n))
+    pad = 0.05 * span
     raw = span / max(1, target - 1)
-    exp = math.floor(math.log10(max(raw, 1e-12)))
-    steps: list[float] = []
+    exp = math.floor(math.log10(max(raw, 1e-300)))
+    best: list[float] | None = None
+    best_score = math.inf
+    best_step = -1.0
     for shift in (-1, 0, 1):
         base = 10.0 ** (exp + shift)
         for mult in (1, 2, 2.5, 5):
             step = mult * base
-            if step > 0 and step not in steps:
-                steps.append(step)
-    best: list[float] | None = None
-    best_score = math.inf
-    best_step = -1.0
-    for step in steps:
-        ticks = _ticks_on_step(lo, hi, step)
-        if not ticks or len(ticks) < 4:
-            continue
-        # A tick past either end has to sit inside the 3% view pad, or the
-        # axis draws it and then clips it. 5% of the span is that pad.
-        over_lo = (lo - ticks[0]) / span if ticks[0] < lo else 0.0
-        over_hi = (ticks[-1] - hi) / span if ticks[-1] > hi else 0.0
-        if over_lo > 0.05 or over_hi > 0.05:
-            continue
-        extra = over_lo + over_hi
-        score = abs(len(ticks) - 6)
-        if len(ticks) < 5:
-            score += 3
-        if len(ticks) > 9:
-            score += (len(ticks) - 9) * 2
-        score += extra * 2
-        if score < best_score - 1e-9 or (abs(score - best_score) <= 1e-9 and step > best_step):
-            best = ticks
-            best_score = score
-            best_step = step
+            first = math.ceil((lo - pad) / step - 1e-9)
+            last = math.floor((hi + pad) / step + 1e-9)
+            count = last - first + 1
+            if count < 2 or count > 40:
+                continue
+            score = float(abs(count - target))
+            if count < 4:
+                score += 3.0
+            if count > target + 2:
+                score += 2.0 * (count - target - 2)
+            gap = max(0.0, first * step - lo) + max(0.0, hi - last * step)
+            score += 2.0 * gap / span
+            if mult == 2.5:
+                score += 0.25
+            if score < best_score - 1e-9 or (abs(score - best_score) <= 1e-9 and step > best_step):
+                # Round to the step, not to significant figures, so ticks
+                # near 1e12 stay apart.
+                digits = max(0, 3 - math.floor(math.log10(step)))
+                best = []
+                for k in range(first, last + 1):
+                    tick = k * step
+                    best.append(0.0 if abs(tick) < abs(step) * 1e-8 else round(tick, digits))
+                best_score = score
+                best_step = step
     if best:
         return best
     return _classic_ticks(lo, hi, n)
@@ -143,6 +147,20 @@ def fmt_num(v: float) -> str:
         return f"{v:.3g}"
     s = f"{v:.6f}".rstrip("0").rstrip(".")
     return s
+
+
+def fmt_ticks(values) -> list[str]:
+    """Tick labels that stay apart: 1000000000001, not five "1e+12"."""
+    labels = [fmt_num(v) for v in values]
+    if len(set(labels)) == len(labels):
+        return labels
+    if all(float(v).is_integer() and abs(v) < 1e15 for v in values):
+        return [str(int(v)) for v in values]
+    for digits in range(4, 16):
+        labels = [f"{v:.{digits}g}" for v in values]
+        if len(set(labels)) == len(labels):
+            return labels
+    return labels
 
 
 def log_ticks(lo: float, hi: float) -> list[list]:
@@ -247,7 +265,8 @@ class Scale:
         elif self.trans == "log10":
             d["ticks"] = log_ticks(lo, hi)
         else:
-            d["ticks"] = [[t, fmt_num(t)] for t in nice_ticks(lo, hi)]
+            ticks = nice_ticks(lo, hi)
+            d["ticks"] = [list(pair) for pair in zip(ticks, fmt_ticks(ticks))]
         custom = getattr(self, "custom", None)
         if custom is not None:
             _apply_custom(d, self, custom, lo, hi)

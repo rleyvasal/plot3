@@ -258,6 +258,42 @@ def n_rows(data: Any) -> int:
     return int(len(data))
 
 
+class ColumnNotFound(KeyError):
+    """A column named in ``aes()`` (or a facet) that the data does not have.
+
+    The message lists the data's columns and the nearest match, so a typo
+    reads as one.
+    """
+
+    def __init__(self, missing, data: Any = None):
+        import difflib
+
+        self.missing = [str(m) for m in missing]
+        try:
+            names = [str(c) for c in get_columns(data)] if data is not None else []
+        except Exception:
+            names = []
+        parts = []
+        for name in self.missing:
+            text = f"No column {name!r} in the data."
+            guess = difflib.get_close_matches(name, names, n=1)
+            if guess:
+                text += f" Did you mean {guess[0]!r}?"
+            elif any(ch in name for ch in " +-*/()"):
+                text += (
+                    " aes() takes column names: add it as a column first, "
+                    "for example df.assign(lo=df['mean'] - df['se'])."
+                )
+            parts.append(text)
+        if names:
+            shown = ", ".join(names[:20]) + (", …" if len(names) > 20 else "")
+            parts.append(f"The columns are: {shown}.")
+        super().__init__(" ".join(parts))
+
+    def __str__(self) -> str:
+        return str(self.args[0])
+
+
 def has_column(data: Any, name: str) -> bool:
     name = str(name)
     if detect_backend(data) == "array":
@@ -337,7 +373,7 @@ def select_cols(data: Any, cols: list[str]):
     cols = [str(c) for c in cols]
     missing = [c for c in cols if not has_column(data, c)]
     if missing:
-        raise KeyError(f"column(s) not in DataFrame: {missing}")
+        raise ColumnNotFound(missing, data)
     backend = detect_backend(data)
     if backend == "pandas":
         return data.loc[:, list(cols)]
@@ -395,7 +431,7 @@ def count_by(data: Any, x: str):
     """
     x = str(x)
     if not has_column(data, x):
-        raise KeyError(f"column(s) not in DataFrame: {[x]}")
+        raise ColumnNotFound([x], data)
     backend = detect_backend(data)
     if backend == "pandas":
         return (
@@ -461,7 +497,7 @@ def materialize_columns(data: Any, cols: list[str]) -> pd.DataFrame:
     cols = list(dict.fromkeys(str(c) for c in cols))
     missing = [c for c in cols if not has_column(data, c)]
     if missing:
-        raise KeyError(f"column(s) not in DataFrame: {missing}")
+        raise ColumnNotFound(missing, data)
     backend = detect_backend(data)
     if backend == "pandas":
         return data.loc[:, cols].dropna()
@@ -499,7 +535,7 @@ def unique_levels(data: Any, col: str) -> list[Any]:
     """Discrete levels in order of appearance (for facets / violin)."""
     col = str(col)
     if not has_column(data, col):
-        raise KeyError(f"column(s) not in DataFrame: {[col]}")
+        raise ColumnNotFound([col], data)
     backend = detect_backend(data)
     if backend == "pandas":
         s = data[col]
@@ -592,7 +628,7 @@ def numeric_array(data: Any, col: str, *, dropna: bool = True) -> np.ndarray:
     """
     col = str(col)
     if not has_column(data, col):
-        raise KeyError(f"column(s) not in DataFrame: {[col]}")
+        raise ColumnNotFound([col], data)
     backend = detect_backend(data)
     if backend == "pandas":
         arr = pd.to_numeric(data[col], errors="coerce").to_numpy(dtype=np.float64)
@@ -648,7 +684,7 @@ def group_pieces(
         return [((), data)]
     missing = [c for c in group_cols if not has_column(data, c)]
     if missing:
-        raise KeyError(f"column(s) not in DataFrame: {missing}")
+        raise ColumnNotFound(missing, data)
     backend = detect_backend(data)
     if backend == "pandas":
         out: list[tuple[tuple[Any, ...], Any]] = []
@@ -705,7 +741,7 @@ def category_labels(data: Any, col: str) -> list[str]:
     """
     col = str(col)
     if not has_column(data, col):
-        raise KeyError(f"column(s) not in DataFrame: {[col]}")
+        raise ColumnNotFound([col], data)
     backend = detect_backend(data)
     from plot3.scales import ordered_levels
 
@@ -734,4 +770,4 @@ def require_columns(data: Any, cols: list[str]) -> None:
     cols = [str(c) for c in cols]
     missing = [c for c in cols if not has_column(data, c)]
     if missing:
-        raise KeyError(f"column(s) not in DataFrame: {missing}")
+        raise ColumnNotFound(missing, data)
