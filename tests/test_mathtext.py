@@ -148,14 +148,24 @@ def test_single_function_formula_is_the_title():
     assert spec["math"] is True
 
 
-def test_user_title_keeps_the_legend():
+def test_user_title_hides_a_single_curve_legend():
+    # One unmapped curve under a title of your own: ggplot2 draws no legend.
     spec, _ = build_spec(
         ggplot()
         + geom_function("y = x^2", xlim=(0, 1), n=4)
         + labs(title="Mine")
     )
     assert spec["labs"]["title"] == "Mine"
-    assert spec["legend"][0]["latex"] == r"y = x^{2}"
+    assert spec["legend"] is None
+
+
+def test_label_keeps_a_single_curve_in_the_legend():
+    spec, _ = build_spec(
+        ggplot()
+        + geom_function("y = x^2", xlim=(0, 1), n=4, label=r"$y = x^2$")
+        + labs(title="Mine")
+    )
+    assert spec["labs"]["title"] == "Mine"
     assert spec["legend"][0]["label"] == "y = x²"
     assert "^{" not in spec["legend"][0]["label"]
 
@@ -166,12 +176,11 @@ def test_several_functions_keep_distinct_legend_entries():
         figure = figure + geom_function("y = a x^2", a=value, xlim=(-1, 1), n=4)
     spec, _ = build_spec(figure)
     assert spec["labs"]["title"] == ""
-    # Symbols stay in the formula; the values follow, so entries differ.
-    assert [entry["latex"] for entry in spec["legend"]] == [
-        r"y = ax^{2} \quad (a = 1)",
-        r"y = ax^{2} \quad (a = 2)",
-        r"y = ax^{2} \quad (a = 3)",
-    ]
+    # One shared formula: it becomes the legend title, rows list the values.
+    assert spec["labs"]["color"] == "y = ax²"
+    assert spec["labsMath"]["color"][0]["latex"] == r"y = ax^{2}"
+    assert [entry["label"] for entry in spec["legend"]] == ["a = 1", "a = 2", "a = 3"]
+    assert [entry["latex"] for entry in spec["legend"]] == ["a = 1", "a = 2", "a = 3"]
     assert spec["layers"][0]["tip"]["latex"] == r"y = ax^{2} \quad (a = 1)"
 
 
@@ -235,10 +244,27 @@ def test_clip_note_uses_the_variable_name_and_a_unicode_minus():
     assert surface["notes"][0].startswith("t clipped to [−")
     assert "pass zlim= to change" in surface["notes"][0]
 
-    # exp(x*y) is never negative: only the top is clipped.
+    # exp(x*y) is steep but finite: nothing is clipped.
     positive, _ = build_spec(
         ggplot() + geom_function("t = exp(x*y)", n=21, xlim=(-3, 3), ylim=(-3, 3))
     )
-    assert positive["notes"]
-    low = positive["notes"][0].split("[", 1)[1].split(",", 1)[0]
-    assert not low.startswith(("−", "-"))
+    assert positive["notes"] == []
+
+
+def test_spaced_exponents_become_superscripts():
+    from plot3.expr import parse_formula
+
+    beta = parse_formula("y = x^(a-1) (1-x)^(b-1) / K", {"a": 2, "b": 5, "K": 1})
+    assert beta.pretty == "y = xᵃ⁻¹(1 − x)ᵇ⁻¹/K"
+    assert "^" not in beta.pretty
+    # q has no raised form: one symbol keeps a bare caret, a product keeps parentheses.
+    assert parse_formula("y = x^q", {"q": 2}).pretty == "y = x^q"
+    assert parse_formula("y = exp(q x)", {"q": 2}).pretty == "y = e^(qx)"
+
+
+def test_different_formulas_keep_their_own_legend_rows():
+    spec, _ = build_spec(
+        ggplot() + geom_function("y = sin(x)") + geom_function("y = cos(x)")
+    )
+    assert [entry["label"] for entry in spec["legend"]] == ["y = sin x", "y = cos x"]
+    assert spec["labs"]["color"] == ""

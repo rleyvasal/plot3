@@ -728,3 +728,73 @@ def test_3d_export_draws_tick_numbers(tmp_path):
     assert ">x</text>" in svg
     assert ">y</text>" in svg
     assert ">z</text>" in svg
+
+
+def test_clip_notes_are_printed_not_drawn(tmp_path, capsys):
+    figure = ggplot() + geom_function("y = 1/x")
+    path = tmp_path / "pole.svg"
+    ggsave(str(path), figure)
+    svg = path.read_text()
+    assert "clipped" not in svg
+    out = capsys.readouterr().out
+    assert "y clipped to [" in out
+    assert "notes=True" in out
+
+
+def test_clip_notes_can_be_drawn_on_request(tmp_path):
+    figure = ggplot() + geom_function("y = 1/x")
+    path = tmp_path / "pole_notes.svg"
+    ggsave(str(path), figure, notes=True)
+    assert "y clipped to [" in path.read_text()
+
+
+def _legend_labels(svg: str) -> list[str]:
+    return re.findall(r">(a = [^<]*)<", svg)
+
+
+def test_legend_keeps_every_entry_in_a_small_figure(tmp_path):
+    # Four curves of one formula at journal column width: none may be dropped
+    # or cut to "...".
+    figure = ggplot() + theme_bw()
+    for a, b, k in [(0.5, 0.5, 3.142), (2, 2, 0.1667), (2, 5, 0.03333), (5, 1, 0.2)]:
+        figure = figure + geom_function(
+            "y = x^(a-1) (1-x)^(b-1) / K", a=a, b=b, K=k, xlim=(0, 1)
+        )
+    path = tmp_path / "beta.svg"
+    ggsave(str(path), figure, width=3.5, height=2.6, units="in")
+    labels = _legend_labels(path.read_text())
+    assert len(labels) == 4
+    assert not any(label.endswith("...") for label in labels)
+
+
+def test_bottom_legend_puts_short_entries_side_by_side(tmp_path):
+    df = pd.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3], "g": ["ctrl", "drug A", "drug B"]})
+    figure = (
+        ggplot(df, aes(x="x", y="y", colour="g"))
+        + geom_point()
+        + theme(legend_position="bottom")
+    )
+    path = tmp_path / "bottom.svg"
+    ggsave(str(path), figure, width=3.5, height=2.6, units="in")
+    svg = path.read_text()
+    ys = {
+        label: float(m.group(1))
+        for label in ("ctrl", "drug A", "drug B")
+        for m in [re.search(r'<text[^>]* y="([-\d.]+)"[^>]*>' + label + "<", svg)]
+    }
+    assert len(set(ys.values())) == 1  # one row
+
+
+def test_real_font_metrics_are_used_for_svg_layout():
+    from plot3 import static
+
+    label = "a = 0.5, b = 0.5, K = 3.142"
+    bitmap = static._text_width(label, 11)
+    token = static._REAL_FONT.set(True)
+    try:
+        real = static._text_width(label, 11)
+    finally:
+        static._REAL_FONT.reset(token)
+    # Helvetica is about half as wide as the 5x7 bitmap font.
+    assert real < 0.6 * bitmap
+    assert 120 <= real <= 145

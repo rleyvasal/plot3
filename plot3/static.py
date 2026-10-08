@@ -15,6 +15,7 @@ last frame of a transition, the low end of a slider).
 from __future__ import annotations
 
 import base64
+import contextvars
 import gzip
 import io
 import math
@@ -183,8 +184,13 @@ def save_static(
     dpi: float | None = None,
     family: str | None = None,
     fontsize: float | None = None,
+    notes: bool = False,
 ) -> str:
     """Write ``fig`` to a ``.png``, ``.svg``, or ``.pdf`` file.
+
+    Notes such as ``y clipped to [...]`` are for whoever makes the plot,
+    not for readers of a paper. They are printed, not drawn, unless
+    ``notes=True``.
 
     Bare ``width`` and ``height`` are pixels. ``units="in"`` (also
     ``"cm"`` and ``"mm"``) with ``dpi`` (default 300) sets a physical
@@ -201,7 +207,17 @@ def save_static(
     layout_w, layout_h = size["layout"]
     base_pt = _resolve_base_pt(fig, fontsize)
     family_name = _resolve_family(fig, family)
-    commands = _figure_commands(fig, layout_w, layout_h, base_pt)
+    dropped: list[str] = []
+    # Measure text the way it will be drawn. SVG and PDF always use real
+    # fonts; a PNG does too when Cairo is available, else the bitmap font.
+    real = suffix in {".svg", ".pdf"} or _load_cairosvg() is not None
+    token = _REAL_FONT.set(real)
+    try:
+        commands = _figure_commands(
+            fig, layout_w, layout_h, base_pt, notes=notes, dropped=dropped
+        )
+    finally:
+        _REAL_FONT.reset(token)
     svg = _svg_text(
         commands,
         layout_w,
@@ -222,6 +238,8 @@ def save_static(
         data = _stamp_pdf(data, __version__)
     path.write_bytes(data)
     print(f"plot3: saved {path} ({len(data) // 1024} KB)")
+    for note in dict.fromkeys(dropped):
+        print(f"plot3: {note} (not drawn; notes=True adds it to the file)")
     if fallback:
         print(
             "plot3: PNG used the built-in font. "
@@ -499,8 +517,23 @@ def _css_px(value, default: int) -> int:
     return int(round(min(number, _MAX_PX)))
 
 
-def _figure_commands(fig, width: int, height: int, base_pt: float | None = None) -> list:
+def _figure_commands(
+    fig,
+    width: int,
+    height: int,
+    base_pt: float | None = None,
+    *,
+    notes: bool = True,
+    dropped: list[str] | None = None,
+) -> list:
     panels, grid, parent_title = _panels(fig)
+    if not notes:
+        kept = []
+        for spec, blobs in panels:
+            if dropped is not None:
+                dropped.extend(str(n) for n in spec.get("notes") or [])
+            kept.append((dict(spec, notes=[]), blobs))
+        panels = kept
     theme = panels[0][0].get("theme") or {}
     surface = theme.get("surface") or "#0b1020"
     ink = theme.get("ink") or "#ffffff"
@@ -619,6 +652,7 @@ def _draw_spec(spec, blobs, x, y, w, h, commands, *, border: bool, base_pt: floa
     max_w, max_h = _legend_budget(position, w, h, left)
     metrics = _legend_metrics(
         spec, theme, fonts, labs.get("color") or "", max_box=(max_w, max_h),
+        columns=position == "bottom",
     )
     extra_right, extra_bottom = _legend_reserve(position, metrics, w, h, left)
     if is3d:
@@ -638,7 +672,7 @@ def _draw_spec(spec, blobs, x, y, w, h, commands, *, border: bool, base_pt: floa
         _paint_legend(commands, origin, metrics, theme, fonts)
     note_lines = _note_lines(spec.get("notes") or [], fonts[2], w)
     if note_lines:
-        line_h = _line_height(fonts[2]) + 2
+        line_h = _note_line_height(fonts[2])
         # One caption per line, stacked upward so a second curve does not
         # run off the right edge. The axis margin reserved this space.
         baseline = y + h - 4 - extra_bottom
@@ -753,7 +787,7 @@ def _box_2d(spec, x, y, w, h, labs, fonts, extra_right=0.0, extra_bottom=0.0):
     bottom = 6 + _line_height(tick) + (4 + _line_height(tick) if x_name else 0) + 8
     note_lines = _note_lines(spec.get("notes") or [], note, w)
     if note_lines:
-        bottom += len(note_lines) * (_line_height(note) + 2) + 4
+        bottom += len(note_lines) * _note_line_height(note) + 4
     bottom += extra_bottom
     top = 10 + (title + 6 if labs.get("title") else 0)
     right = 14 + extra_right
@@ -762,7 +796,7 @@ def _box_2d(spec, x, y, w, h, labs, fonts, extra_right=0.0, extra_bottom=0.0):
     if w - left - right < min_panel:
         right = max(8.0, w - left - min_panel)
     # A bottom legend needs more than the usual axis margin.
-    bottom_cap = 0.62 if extra_bottom else 0.38
+    bottom_cap = 0.75 if extra_bottom else 0.38
     bottom = min(bottom, h * bottom_cap)
     top = min(top, h * 0.32)
     return (
@@ -1466,10 +1500,13 @@ def _legend_position(spec):
     return "right"
 
 
-def _legend_metrics(spec, theme, fonts, color_label: str = "", max_box=None):
+def _legend_metrics(
+    spec, theme, fonts, color_label: str = "", max_box=None, *, columns: bool = False
+):
     """Rows and the legend box size, or None when there is nothing to draw.
 
     Labels wrap to ``max_box`` so the box cannot be wider than the figure.
+    ``columns`` (a legend under the panel) puts short entries side by side.
     """
     entries = list(spec.get("legend") or [])
     color = spec.get("color") or {}
@@ -1481,6 +1518,10 @@ def _legend_metrics(spec, theme, fonts, color_label: str = "", max_box=None):
     row_h = _line_height(tick) + 4
     max_w = None if max_box is None else float(max_box[0])
     max_h = None if max_box is None else float(max_box[1])
+    if columns and entries and not size_legend and max_w is not None:
+        grid = _legend_grid(entries, color_label, tick, row_h, max_w, ink)
+        if grid is not None:
+            return grid
     label_w = None if max_w is None else max(16.0, max_w - 16.0 - 18.0)
     title_w = None if max_w is None else max(16.0, max_w - 16.0)
     max_lines = 8
@@ -1496,6 +1537,13 @@ def _legend_metrics(spec, theme, fonts, color_label: str = "", max_box=None):
             rows.append(("cont", extra))
         title_count = len(parts) if parts else 1
     labels = [str(entry.get("label") or "") for entry in entries]
+    if max_h is not None and row_h:
+        # Never drop an entry: a missing row hides a curve. The box may grow
+        # past its budget by one line per entry; _legend_reserve makes room.
+        needed = 8 + row_h * (title_count + len(labels))
+        if needed > max_h:
+            max_h = float(needed)
+            max_lines = max(max_lines, title_count + len(labels))
     budget = max_lines - title_count if max_h is not None else max(max_lines, len(labels) or 1)
     plans = _plan_entry_lines(labels, tick, label_w or 10_000, budget)
     for entry, parts in zip(entries, plans):
@@ -1543,11 +1591,47 @@ def _legend_metrics(spec, theme, fonts, color_label: str = "", max_box=None):
     return {"rows": kept, "w": box_w, "h": box_h, "row_h": row_h}
 
 
+def _legend_grid(entries, title: str, tick: float, row_h: float, max_w: float, ink: str):
+    """Entries in columns under the panel, or None when two do not fit side by side.
+
+    Every entry is kept: a bottom legend that drops rows hides a curve.
+    """
+    labels = [str(entry.get("label") or "") for entry in entries]
+    swatch, gap, pad = 18.0, 14.0, 16.0
+    col_w = max(_text_width(label, tick) for label in labels) + swatch
+    ncols = int((max_w - pad + gap) // (col_w + gap))
+    ncols = min(ncols, len(labels))
+    if ncols < 2:
+        return None
+    nrows = -(-len(labels) // ncols)
+    rows = []
+    if title:
+        rows.append(("title", title))
+    cells = [
+        ("swatch", label, entry.get("color") or ink)
+        for label, entry in zip(labels, entries)
+    ]
+    body_w = ncols * col_w + (ncols - 1) * gap
+    box_w = min(max_w, max(body_w, _text_width(title, tick) if title else 0.0) + pad)
+    box_h = 8.0 + row_h * ((1 if title else 0) + nrows)
+    return {
+        "rows": rows,
+        "cells": cells,
+        "ncols": ncols,
+        "col_w": col_w + gap,
+        "w": box_w,
+        "h": box_h,
+        "row_h": row_h,
+    }
+
+
 def _legend_reserve(position, metrics, width: float, height: float, left: float = 0.0) -> tuple[float, float]:
     if metrics is None or position in {"none"} or isinstance(position, tuple):
         return 0.0, 0.0
     if position == "bottom":
-        return 0.0, min(float(metrics["h"]) + 10.0, height * 0.36)
+        # Usually a third of the figure; more only when every entry needs it.
+        cap = max(height * 0.36, min(float(metrics["h"]) + 10.0, height * 0.55))
+        return 0.0, min(float(metrics["h"]) + 10.0, cap)
     # Leave the panel at least ~46% of the figure, after the y-axis gutter.
     room = width - left - max(64.0, width * 0.46)
     return min(float(metrics["w"]) + 12.0, max(0.0, room)), 0.0
@@ -1617,6 +1701,14 @@ def _paint_legend(commands, origin, metrics, theme, fonts) -> None:
                 "text", lx + 8 + diameter + 6, cursor, row[1], tick, ink2, "start", "top", 0, 400,
             ))
             cursor += max(row_h, diameter + 3)
+    cells = metrics.get("cells") or []
+    ncols = int(metrics.get("ncols") or 1)
+    for index, (_kind, label, color_hex) in enumerate(cells):
+        row, col = divmod(index, ncols)
+        cx = lx + 8 + col * float(metrics["col_w"])
+        cy = cursor + row * row_h
+        commands.append(("rect", cx, cy + 2, 9, 9, color_hex, None, 0, 1.0))
+        commands.append(("text", cx + 14, cy, label, tick, ink2, "start", "top", 0, 400))
 
 
 def _draw_ramp(commands, x, y, w, h, ramp) -> None:
@@ -2081,6 +2173,12 @@ def _line_height(size: float) -> int:
     return 7 * _scale_for(size)
 
 
+def _note_line_height(size: float) -> float:
+    # Real fonts need about 1.25 em; the bitmap height alone lets two
+    # stacked notes touch.
+    return max(_line_height(size) + 2, 1.25 * float(size))
+
+
 def _glyph_for(ch: str):
     if ch in _FONT:
         return _FONT[ch], "normal"
@@ -2114,7 +2212,48 @@ def _pieces(text: str, scale: int):
     return out
 
 
+# Helvetica advance widths (AFM, 1/1000 em). Arial matches them. Used when
+# the file is drawn with real fonts (SVG, PDF, Cairo PNG); the bitmap
+# fallback keeps its own wider metrics below.
+_HELVETICA = {
+    " ": 278, "!": 278, '"': 355, "#": 556, "$": 556, "%": 889, "&": 667,
+    "'": 191, "(": 333, ")": 333, "*": 389, "+": 584, ",": 278, "-": 333,
+    ".": 278, "/": 278, ":": 278, ";": 278, "<": 584, "=": 584, ">": 584,
+    "?": 556, "@": 1015, "[": 278, "\\": 278, "]": 278, "^": 469, "_": 556,
+    "`": 333, "{": 334, "|": 260, "}": 334, "~": 584,
+    "A": 667, "B": 667, "C": 722, "D": 722, "E": 667, "F": 611, "G": 778,
+    "H": 722, "I": 278, "J": 500, "K": 667, "L": 556, "M": 833, "N": 722,
+    "O": 778, "P": 667, "Q": 778, "R": 722, "S": 667, "T": 611, "U": 722,
+    "V": 667, "W": 944, "X": 667, "Y": 667, "Z": 611,
+    "a": 556, "b": 556, "c": 500, "d": 556, "e": 556, "f": 278, "g": 556,
+    "h": 556, "i": 222, "j": 222, "k": 500, "l": 222, "m": 833, "n": 556,
+    "o": 556, "p": 556, "q": 556, "r": 333, "s": 500, "t": 278, "u": 556,
+    "v": 500, "w": 722, "x": 500, "y": 500, "z": 500,
+    "−": 584, "±": 584, "×": 584, "÷": 584, "·": 278, "°": 400, "…": 1000,
+    "≤": 584, "≥": 584, "≠": 584, "≈": 584, "∞": 713, "∫": 274, "√": 549,
+}
+_RAISED = set("⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₕₖₗₘₙₚₛₜᵃᵇᶜᵈᵉᶠᵍʰʲᵏˡᵐᵒᵖʳˢᵗᵘᵛʷˣʸᶻᵢⱼᵣᵤᵥ")
+_REAL_FONT = contextvars.ContextVar("plot3_real_font", default=False)
+
+
+def _real_width(text: str, size: float) -> int:
+    units = 0
+    for ch in text.replace("\n", " "):
+        if ch in _HELVETICA:
+            units += _HELVETICA[ch]
+        elif ch in _RAISED:
+            units += 380
+        elif ch.isdigit():
+            units += 556
+        else:
+            units += 600  # Greek and other symbols: a little wider than a letter
+    # A few percent of headroom: the real font may be Arial or a fallback.
+    return int(math.ceil(units * float(size) / 1000.0 * 1.04))
+
+
 def _text_width(text: str, size: float) -> int:
+    if _REAL_FONT.get():
+        return _real_width(text, size)
     scale = _scale_for(size)
     pieces = _pieces(text, scale)
     if not pieces:

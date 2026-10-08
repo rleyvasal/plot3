@@ -1018,6 +1018,75 @@ def _legend_position_spec(value):
     return value
 
 
+
+def _value_part(full: str, base: str, sep: str) -> str | None:
+    """``a = 2, b = 5`` from a caption ``<base><sep>(a = 2, b = 5)``."""
+    head = f"{base}{sep}("
+    if base and full.startswith(head) and full.endswith(")"):
+        return full[len(head):-1]
+    return None
+
+
+def _formula_legend(legend, formula_geoms, has_title: bool):
+    """Tidy the legend rows that function curves add.
+
+    * One curve under a title of your own: the title already names it, so
+      the curve gets no row (ggplot2 draws no legend for an unmapped layer).
+    * Several curves of one formula (a loop over ``a``): the formula moves
+      to the legend title and each row lists only its values.
+
+    Returns ``(legend, (pretty, latex) | None)``.
+    """
+    if not legend:
+        return legend, None
+    primary = [
+        entry for entry in legend
+        if entry.get("formula")
+        and getattr(entry.get("_geom"), "_formula_primary", False)
+        and not getattr(entry.get("_geom"), "_legend_math", None)
+    ]
+    if not primary:
+        return legend, None
+    if has_title and len(formula_geoms) == 1:
+        kept = [entry for entry in legend if not any(entry is p for p in primary)]
+        return kept or None, None
+    if len(primary) < 2 or len(primary) != len(formula_geoms):
+        return legend, None
+    geoms = [entry["_geom"] for entry in primary]
+    bases = {str(getattr(geom, "_title_label", "") or "") for geom in geoms}
+    if len(bases) != 1:
+        return legend, None
+    base = bases.pop()
+    base_latex = str(getattr(geoms[0], "_title_latex", "") or "")
+    rows = []
+    for geom in geoms:
+        pretty = _value_part(str(getattr(geom, "_tip_pretty", "") or ""), base, "  ")
+        latex = _value_part(
+            str(getattr(geom, "_tip_latex", "") or ""), base_latex, " \\quad "
+        )
+        if pretty is None:
+            return legend, None
+        rows.append((pretty, latex))
+    for entry, (pretty, latex) in zip(primary, rows):
+        entry["label"] = pretty
+        entry.pop("math", None)
+        if latex:
+            entry["latex"] = latex
+        else:
+            entry.pop("latex", None)
+    return legend, (base, base_latex)
+
+
+def _legend_title_label(current: str, legend_title, labs_math: dict) -> str:
+    """Use a shared formula as the legend title unless labs(colour=) is set."""
+    if current or not legend_title:
+        return current
+    pretty, latex = legend_title
+    if latex:
+        labs_math["color"] = [{"text": pretty, "latex": latex}]
+    return pretty
+
+
 def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     if not g.layers:
         raise ValueError("add a geom: ggplot(df, aes(...)) + geom_point()")
@@ -2117,6 +2186,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             entry = {"label": str(label), "color": geom.const_color}
             if getattr(geom, "_is_formula", False):
                 entry["formula"] = True
+                entry["_geom"] = geom
                 segments = getattr(geom, "_legend_math", None)
                 latex = getattr(geom, "_legend_latex", None)
                 if segments:
@@ -2171,9 +2241,11 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 legend = None
     else:
         title = _take("title", raw_title)
+    legend, legend_title = _formula_legend(legend, formula_geoms, bool(str(raw_title).strip()))
     if legend:
         for entry in legend:
             entry.pop("formula", None)
+            entry.pop("_geom", None)
     notes: list[str] = []
     for geom, _mapped in resolved:
         for note in getattr(geom, "_notes", None) or ():
@@ -2221,7 +2293,11 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             "x": _take("x", _axis_label(g, base_map, resolved, "x", is3d)),
             "y": _take("y", _axis_label(g, base_map, resolved, "y", is3d)),
             "z": _take("z", _axis_label(g, base_map, resolved, "z", is3d)) if is3d else "",
-            "color": _take("color", g.labs.get("color", base_map.get("color", ""))),
+            "color": _legend_title_label(
+                _take("color", g.labs.get("color", base_map.get("color", ""))),
+                legend_title,
+                labs_math,
+            ),
         },
         "labsMath": labs_math or None,
         "math": bool(

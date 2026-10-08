@@ -8,7 +8,8 @@ with ``data_override`` already filled — the same path bar and density stats us
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Any
+from functools import partial
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -276,7 +277,8 @@ def _expand_curve(geom: _Geom, formula: Formula, axes: _Axes, domains: dict) -> 
     view_lim = _limit_pair(getattr(geom, view_axis + "lim", None), view_axis + "lim")
     view_name = axes.x if view_axis == "x" else axes.y
     kept_s, kept_v, lock, index, note = _clip_series(
-        samples, values, view_lim, view_axis, view_name
+        samples, values, view_lim, view_axis, view_name,
+        probe=_curve_probe(formula, axes, samples),
     )
     if axes.computed == "x":
         xs, ys = kept_v, kept_s
@@ -351,6 +353,7 @@ def _clip_series(
     view_lim: tuple[float, float] | None,
     view_axis: str,
     note_name: str | None = None,
+    probe: Callable[..., bool] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, tuple[float, float] | None, np.ndarray, str | None]:
     finite = np.isfinite(samples) & np.isfinite(values)
     if not np.any(finite):
@@ -361,7 +364,7 @@ def _clip_series(
         keep = finite & (values >= lo) & (values <= hi)
         lock: tuple[float, float] | None = (lo, hi)
     else:
-        lo, hi, blew_up = _robust_window(values[finite])
+        lo, hi, blew_up = _robust_window(np.where(finite, values, np.nan), probe)
         # A pole is a thin spike. A piecewise curve (flat, then a parabola)
         # puts a large share of its samples outside that window; keep them.
         outside = finite & ((values < lo) | (values > hi))
@@ -454,26 +457,144 @@ def _stamp_formula(out, geom, formula: Formula) -> None:
     out._formula_primary = True
 
 
-def _robust_window(values: np.ndarray) -> tuple[float, float, bool]:
+def _robust_window(
+    values: np.ndarray, probe: Callable[..., bool] | None = None
+) -> tuple[float, float, bool]:
     """Return ``(lo, hi, blew_up)`` around the bulk of ``values``.
 
     Only a side that actually leaves the bulk is pulled in. A density that
     stays non-negative keeps its own minimum instead of a negative fence.
+
+    ``probe(index, value, sign, centre)`` confirms that the extreme at
+    ``values[index]`` really grows without bound (see ``_keeps_growing``).
+    Without it, anything past the fence counts as a blow-up.
     """
-    med = float(np.median(values))
-    mad = float(np.median(np.abs(values - med)))
+    values = np.asarray(values, dtype=np.float64)
+    where = np.flatnonzero(np.isfinite(values))
+    finite = values[where]
+    med = float(np.median(finite))
+    mad = float(np.median(np.abs(finite - med)))
     scale = max(mad * 1.4826, 1e-9)
     fence_lo = med - 8.0 * scale
     fence_hi = med + 8.0 * scale
-    full_lo = float(np.min(values))
-    full_hi = float(np.max(values))
+    full_lo = float(np.min(finite))
+    full_hi = float(np.max(finite))
     blew_lo = full_lo < fence_lo - 1e-8
     blew_hi = full_hi > fence_hi + 1e-8
+    # A steep but finite curve (Beta(5, 1) = 5x^4 near x = 1) also leaves
+    # the fence. Keep its true extreme unless zooming in shows a pole.
+    if probe is not None:
+        if blew_hi:
+            index = int(where[int(np.argmax(finite))])
+            blew_hi = probe(index, full_hi, 1.0, med)
+        if blew_lo:
+            index = int(where[int(np.argmin(finite))])
+            blew_lo = probe(index, full_lo, -1.0, med)
     lo = fence_lo if blew_lo else full_lo
     hi = fence_hi if blew_hi else full_hi
     if hi <= lo:
         hi = lo + 1.0
     return lo, hi, blew_lo or blew_hi
+
+
+_ZOOM_POINTS = 41
+_ZOOM_LEVELS = 2
+_ZOOM_GROWTH = 1.5
+_ZOOM_HUGE = 1e6
+
+
+def _keeps_growing(
+    evaluate: Callable[..., np.ndarray],
+    box: list[tuple[float, float]],
+    start: float,
+    sign: float,
+    centre: float,
+) -> bool:
+    """True when the extreme inside ``box`` grows on every zoom.
+
+    ``box`` holds one ``(lo, hi)`` interval per axis, the neighbours of the
+    extreme sample. ``evaluate(*axes)`` returns an array whose axis ``k``
+    follows ``box[k]``. A pole (``1/x``, ``tan x``) moves further from the
+    bulk each time the samples close in on it. A finite maximum, at an edge
+    or in a narrow peak between samples, settles after the first zoom.
+    """
+    distance = sign * (start - centre)
+    if distance <= 0.0:
+        return True
+    first = distance
+    for _level in range(_ZOOM_LEVELS):
+        axes = [np.linspace(lo, hi, _ZOOM_POINTS) for lo, hi in box]
+        try:
+            with np.errstate(all="ignore"):
+                toward = sign * np.asarray(evaluate(*axes), dtype=np.float64)
+        except Exception:
+            return True  # cannot tell; keep the old behaviour
+        if np.any(np.isposinf(toward)):
+            return True  # landed on the pole itself
+        ok = np.isfinite(toward)
+        if not np.any(ok):
+            return True
+        flat = np.where(ok, toward, -np.inf)
+        best = int(np.argmax(flat))
+        reached = float(flat.reshape(-1)[best]) - sign * centre
+        ratio = reached / distance
+        if ratio < 0.5:
+            # The sampled extreme vanished when resampled: a rounding spike
+            # beside a singularity (x*y/(x^2 - y^2) on the diagonal).
+            return True
+        if reached > first * _ZOOM_HUGE:
+            # Float precision stops the next zoom from closing in further.
+            return True
+        position = np.unravel_index(best, flat.shape)
+        if ratio < _ZOOM_GROWTH:
+            # Settled. A true maximum is continuous: the zoom points right
+            # beside it are nearly as high. An isolated point is rounding
+            # noise at a singularity, which should still be clipped.
+            near = tuple(
+                slice(max(int(i) - 1, 0), int(i) + 2) for i in position
+            )
+            around = flat[near].copy()
+            around[tuple(int(i) - s.start for i, s in zip(position, near))] = -np.inf
+            beside = float(np.max(around)) - sign * centre
+            return bool(beside < 0.5 * reached)
+        distance = reached
+        box = [
+            (
+                float(axis[max(int(i) - 1, 0)]),
+                float(axis[min(int(i) + 1, _ZOOM_POINTS - 1)]),
+            )
+            for axis, i in zip(axes, position)
+        ]
+    return True
+
+
+def _neighbours(axis: np.ndarray, i: int) -> tuple[float, float]:
+    return float(axis[max(i - 1, 0)]), float(axis[min(i + 1, axis.size - 1)])
+
+
+def _curve_probe(formula: Formula, axes: _Axes, samples: np.ndarray):
+    def evaluate(xs: np.ndarray) -> np.ndarray:
+        return _curve_values(formula, axes, xs)
+
+    def probe(index: int, value: float, sign: float, centre: float) -> bool:
+        box = [_neighbours(samples, index)]
+        return _keeps_growing(evaluate, box, value, sign, centre)
+
+    return probe
+
+
+def _surface_probe(formula: Formula, axes: _Axes, xs: np.ndarray, ys: np.ndarray):
+    """Probe for a flat index into a ``(len(ys), len(xs))`` grid."""
+
+    def evaluate(x_axis: np.ndarray, y_axis: np.ndarray) -> np.ndarray:
+        return _surface_values(formula, axes, x_axis, y_axis).T
+
+    def probe(index: int, value: float, sign: float, centre: float) -> bool:
+        row, col = divmod(index, xs.size)
+        box = [_neighbours(xs, col), _neighbours(ys, row)]
+        return _keeps_growing(evaluate, box, value, sign, centre)
+
+    return probe
 
 
 def _expand_surface(
@@ -496,7 +617,8 @@ def _expand_surface(
         count,
     )
     zz, lock, note = _clip_grid(
-        zz, _limit_pair(geom.zlim, "zlim"), axes.z or "z"
+        zz, _limit_pair(geom.zlim, "zlim"), axes.z or "z",
+        probe=_surface_probe(formula, axes, xs, ys),
     )
     xx, yy = np.meshgrid(xs, ys)
     frame = pd.DataFrame(
@@ -570,6 +692,7 @@ def _clip_grid(
     zz: np.ndarray,
     zlim: tuple[float, float] | None,
     note_name: str = "z",
+    probe: Callable[..., bool] | None = None,
 ) -> tuple[np.ndarray, tuple[float, float] | None, str | None]:
     finite = zz[np.isfinite(zz)]
     if finite.size == 0:
@@ -578,7 +701,7 @@ def _clip_grid(
         lo, hi = zlim
         clipped = np.clip(np.where(np.isfinite(zz), zz, lo), lo, hi)
         return clipped, (lo, hi), None
-    lo, hi, blew_up = _robust_window(finite)
+    lo, hi, blew_up = _robust_window(zz.ravel(), probe)
     if not blew_up:
         filled = np.where(np.isfinite(zz), zz, float(np.median(finite)))
         return filled, None, None
@@ -745,6 +868,7 @@ def _static_col(source: Any) -> int:
 
 def _shared_frame_window(
     mat: np.ndarray,
+    probe: Callable[..., bool] | None = None,
 ) -> tuple[float, float, bool]:
     """One clip window from every frame, without letting quiet frames shrink it.
 
@@ -760,11 +884,12 @@ def _shared_frame_window(
     any_blow = False
     any_healthy = False
     for col in range(mat.shape[1]):
-        values = mat[:, col]
-        values = values[np.isfinite(values)]
+        column = mat[:, col]
+        values = column[np.isfinite(column)]
         if values.size == 0:
             continue
-        lo, hi, blew_up = _robust_window(values)
+        frame_probe = None if probe is None else partial(probe, col)
+        lo, hi, blew_up = _robust_window(column, frame_probe)
         if blew_up:
             any_blow = True
             robust_lo = min(robust_lo, lo)
@@ -790,6 +915,7 @@ def _clip_matrix(
     view_lim: tuple[float, float] | None,
     view_axis: str,
     note_name: str | None,
+    probe: Callable[..., bool] | None = None,
 ) -> tuple[np.ndarray, tuple[float, float] | None, str | None]:
     """One window for every frame. Vertices stay; poles are clipped, not dropped."""
     finite = mat[np.isfinite(mat)]
@@ -799,7 +925,7 @@ def _clip_matrix(
         lo, hi = view_lim
         filled = np.where(np.isfinite(mat), mat, lo)
         return np.clip(filled, lo, hi), (lo, hi), None
-    lo, hi, blew_up = _shared_frame_window(mat)
+    lo, hi, blew_up = _shared_frame_window(mat, probe)
     if blew_up:
         filled = np.where(np.isfinite(mat), mat, lo)
         return (
@@ -852,7 +978,11 @@ def _expand_curve_anim(geom, formula, axes, domains, transition) -> _Geom:
     view_axis = "x" if axes.computed == "x" else "y"
     view_lim = _limit_pair(getattr(geom, view_axis + "lim", None), view_axis + "lim")
     view_name = axes.x if view_axis == "x" else axes.y
-    mat, lock, note = _clip_matrix(mat, view_lim, view_axis, view_name)
+    def frame_probe(col: int, index: int, value: float, sign: float, centre: float) -> bool:
+        with _bound_params(formula, steps[col]):
+            return _curve_probe(formula, axes, samples)(index, value, sign, centre)
+
+    mat, lock, note = _clip_matrix(mat, view_lim, view_axis, view_name, frame_probe)
     n_frames = mat.shape[1]
     repeated = np.repeat(samples[:, None], n_frames, axis=1)
     if axes.computed == "x":
@@ -925,7 +1055,11 @@ def _expand_surface_anim(geom, formula, axes, domains, transition) -> _Geom:
         stack = grids(xs, ys)
     zlim = _limit_pair(geom.zlim, "zlim")
     flat = stack.reshape(-1, stack.shape[-1])
-    z_mat, lock, note = _clip_matrix(flat, zlim, "z", axes.z or "z")
+    def frame_probe(col: int, index: int, value: float, sign: float, centre: float) -> bool:
+        with _bound_params(formula, steps[col]):
+            return _surface_probe(formula, axes, xs, ys)(index, value, sign, centre)
+
+    z_mat, lock, note = _clip_matrix(flat, zlim, "z", axes.z or "z", frame_probe)
     xx, yy = np.meshgrid(xs, ys)
     n_frames = z_mat.shape[1]
     shown = _static_col(transition)

@@ -433,6 +433,7 @@ class ggplot:
         dpi: float | None = None,
         family: str | None = None,
         fontsize: float | None = None,
+        notes: bool = False,
     ) -> str:
         """Write this figure.
 
@@ -456,6 +457,7 @@ class ggplot:
                 dpi=dpi,
                 family=family,
                 fontsize=fontsize,
+                notes=notes,
             )
         path = str(path)
         doc = self.html()
@@ -594,6 +596,7 @@ def ggsave(
     dpi: float | None = None,
     family: str | None = None,
     fontsize: float | None = None,
+    notes: bool = False,
 ) -> str:
     """Save ``plot``.
 
@@ -613,6 +616,9 @@ def ggsave(
     (default 300). ``family`` and ``fontsize`` override the theme font for
     this file. ``fontsize`` is in points. ``$...$`` labels are saved as
     Unicode, the same text the SVG draws.
+
+    Notes such as ``y clipped to [...]`` are printed, not drawn: they are
+    for you, not for readers of the figure. ``notes=True`` draws them.
     """
     if isinstance(filename, ggplot) and plot is not None and not isinstance(plot, ggplot):
         filename, plot = plot, filename  # tolerate swapped args
@@ -626,4 +632,5 @@ def ggsave(
         dpi=dpi,
         family=family,
         fontsize=fontsize,
+        notes=notes,
     )

@@ -174,7 +174,7 @@ def latex_to_pretty(src: str) -> str:
             if body in {"∘", "°"}:
                 out.append("°")
             else:
-                out.append(_translate(body, _SUP) or f"^({body})")
+                out.append(_raised(body))
             continue
         if char == "_":
             body, index = _script_body(src, index + 1)
@@ -346,8 +346,7 @@ def _binop(node: ast.BinOp, substitute) -> _Piece:
             )
         base = render(node.left, _POW + 1, substitute)
         exp = render(node.right, 0, substitute)
-        sup = _translate(exp.pretty, _SUP)
-        pretty = base.pretty + (sup if sup else f"^({exp.pretty})")
+        pretty = base.pretty + _raised(exp.pretty)
         return _Piece(f"{base.latex}^{{{exp.latex}}}", pretty, _POW, "pow")
     if isinstance(node.op, ast.Div):
         left = render(node.left, 0, substitute)
@@ -530,10 +529,9 @@ def _exp(arg_node, substitute) -> _Piece:
             _ATOM,
             "call",
         )
-    sup = _translate(arg.pretty, _SUP)
     return _Piece(
         f"e^{{{arg.latex}}}",
-        "e" + (sup if sup else f"^({arg.pretty})"),
+        "e" + _raised(arg.pretty),
         _ATOM,
         "pow",
     )
@@ -588,7 +586,7 @@ def _op_call(name, args, substitute, power=None) -> _Piece:
         suffix_l, suffix_p = f"\\left({inner_l}\\right)", f"({inner_p})"
     if power is not None:
         exp = render(power, 0, substitute)
-        sup = _translate(exp.pretty, _SUP) or f"^({exp.pretty})"
+        sup = _raised(exp.pretty)
         return _Piece(
             f"{latex_op}^{{{exp.latex}}}{suffix_l}",
             f"{pretty_op}{sup}{suffix_p}",
@@ -676,7 +674,20 @@ def _number(value: float) -> _Piece:
     return _Piece(text, pretty, prec, "num")
 
 
+def _raised(text: str) -> str:
+    """Exponent in plain text: ``²``, ``ᵃ⁻¹``, or ``^q`` when no raised form exists."""
+    sup = _translate(text, _SUP)
+    if sup:
+        return sup
+    if text and (len(text) == 1 or text.isdigit()):
+        return f"^{text}"  # one symbol: x^q; e^qx would be ambiguous
+    return f"^({text})"
+
+
 def _translate(text: str, table) -> str | None:
+    # Spacing around operators has no raised form; drop it so x^(a − 1)
+    # becomes xᵃ⁻¹ instead of falling back to a caret.
+    text = text.replace(" ", "") if text else text
     # maketrans keys are code points, not characters.
     if not text or any(ord(char) not in table for char in text):
         return None

@@ -17,6 +17,7 @@ from plot3 import (
     geom_point,
     ggplot,
     labs,
+    transition_time,
 )
 from plot3.build import build_spec, expand_stat_geom
 from plot3.masking import (
@@ -450,3 +451,66 @@ def test_sympy_duck_type():
     out = _layer(sympy.sin(x), xlim=(0, np.pi), n=5)
     xs = out.data_override["x"].to_numpy()
     assert np.allclose(out.data_override["y"], np.sin(xs), atol=1e-6)
+
+
+def _range(figure, axis):
+    spec, _ = build_spec(figure)
+    return spec["notes"], spec["scales"][axis]["lo"], spec["scales"][axis]["hi"]
+
+
+@pytest.mark.parametrize(
+    "formula, kwargs, top",
+    [
+        # Beta(5, 1) = 5x^4: steep at x = 1 but its maximum is 5.
+        ("y = 5 x^4", {"xlim": (0, 1)}, 5.0),
+        ("y = x^4", {}, 1e4),
+        ("y = exp(x)", {}, math.exp(10)),
+    ],
+)
+def test_steep_but_finite_curves_are_not_clipped(formula, kwargs, top):
+    notes, _lo, hi = _range(ggplot() + geom_function(formula, **kwargs), "y")
+    assert notes == []
+    assert hi == pytest.approx(top, rel=1e-6)
+
+
+@pytest.mark.parametrize(
+    "formula, kwargs",
+    [
+        ("y = 1/x", {}),
+        ("y = 1/x^2", {}),
+        ("y = tan(x)", {}),
+        # Beta(0.5, 0.5) is infinite at both edges.
+        ("y = 1/(pi sqrt(x (1 - x)))", {"xlim": (0, 1)}),
+    ],
+)
+def test_poles_are_still_clipped(formula, kwargs):
+    notes, _lo, _hi = _range(ggplot() + geom_function(formula, **kwargs), "y")
+    assert notes and notes[0].startswith("y clipped to [")
+
+
+def test_surface_rounding_spike_beside_a_singularity_is_clipped():
+    # x^2 - y^2 rounds to ~1e-16 near the diagonal and gives 3.6e15.
+    notes, lo, hi = _range(
+        ggplot()
+        + geom_function("t = x*y/(x^2 - y^2)", n=21, xlim=(-3, 3), ylim=(-3, 3)),
+        "z",
+    )
+    assert notes
+    assert hi < 100 and lo > -100
+
+
+def test_surface_pole_at_a_grid_point_is_clipped():
+    notes, _lo, hi = _range(
+        ggplot()
+        + geom_function("t = 1/(x^2 + y^2)", n=21, xlim=(-3, 3), ylim=(-3, 3)),
+        "z",
+    )
+    assert notes
+    assert hi < 11
+
+
+def test_animated_steep_curve_is_not_clipped():
+    spec, _ = build_spec(
+        ggplot() + geom_function("y = a x^4") + transition_time(a=(0.5, 2))
+    )
+    assert spec["notes"] == []
