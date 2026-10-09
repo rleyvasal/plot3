@@ -135,9 +135,18 @@ def _bind_swept_symbols(geom, formula: Formula, ranges: dict) -> Formula:
     params = dict(getattr(geom, "params", None) or {})
     for name in swept:
         params[name] = float(ranges[name][0])
+    from dataclasses import replace
+
     from plot3.expr import parse_formula
 
-    return parse_formula(source, params, defer_missing=True)
+    bound = parse_formula(source, params, defer_missing=True)
+    # Labels keep the swept symbol: the stand-in value would read "(t = 0)"
+    # in the legend and tooltip on every frame.
+    texts = (
+        "label", "latex", "pretty", "legend_latex", "legend_pretty",
+        "caption_latex", "caption_pretty",
+    )
+    return replace(bound, **{name: getattr(formula, name) for name in texts})
 
 
 def _reject_curve_extras(geom, addons) -> None:

@@ -12,6 +12,9 @@ under **Changed**.
   sideways or changes size as its value changes: digits have a fixed width,
   the label keeps one size for the whole animation, and it sits in a box as
   wide as its widest value.
+- A formula animated with `transition_time(t = ...)` no longer shows the first
+  frame's value in its legend and tooltip (`y = sin(x − t)  (t = 0)`) while
+  the animation plays.
 
 ## 0.4.1 — 2026-10-08
 

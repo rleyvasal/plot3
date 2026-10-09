@@ -652,3 +652,22 @@ def test_frame_label_stays_in_place_while_it_changes():
     assert "steadyFrameLabel(yearEl, nF)" in doc
     # The size is chosen once per animation, not per frame.
     assert "lab.length > 8" not in doc
+
+
+def test_swept_parameter_is_not_frozen_into_labels():
+    """transition_time(t=...) must not label curves with the first frame's t."""
+    import json
+
+    from plot3 import geom_function, ggplot, transition_time
+    from plot3.build import build_spec
+
+    spec = json.dumps(
+        build_spec(
+            ggplot()
+            + geom_function("y = sin(x - t)")
+            + geom_function("y = a cos(x - t)", a=2)
+            + transition_time(t=(0, 6.28))
+        )
+    )
+    assert "t = 0" not in spec
+    assert "(a = 2)" in spec  # fixed coefficients still show their value
