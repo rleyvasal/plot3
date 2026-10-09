@@ -343,12 +343,27 @@ ggplot() + geom_function("y = sin(x - t)") + transition_time(t=(0, 6.28))   # tr
 ggplot() + geom_function("y = dbeta(x, a, b)") + slider(a=(0.5, 5), b=(0.5, 5))
 ```
 
-Data animations follow `gganimate`:
+Data animations follow `gganimate`. With a table shaped like gapminder
+(made-up numbers here; the real data is
+`pl.read_csv("https://raw.githubusercontent.com/kirenz/datasets/master/gapminder.csv")`):
 
-```python notest
-(ggplot(gapminder, aes(x="gdp", y="life", size="pop", colour="continent", group="country"))
+```python
+countries = {"Brazil": "Americas", "China": "Asia", "Egypt": "Africa",
+             "France": "Europe", "India": "Asia", "Mexico": "Americas"}
+gapminder = pd.DataFrame([
+    {"country": country, "continent": continent, "year": year,
+     "gdpPercap": 800 * (1.03 + 0.01 * i) ** (year - 1952),
+     "lifeExp": 45 + 0.35 * (year - 1952) + 2 * i,
+     "pop": 2e7 * (1.02 + 0.002 * i) ** (year - 1952)}
+    for i, (country, continent) in enumerate(countries.items())
+    for year in range(1952, 2008, 5)
+])
+
+(ggplot(gapminder, aes(x="gdpPercap", y="lifeExp", size="pop", colour="continent", group="country"))
  + geom_point() + scale_x_log10() + transition_time("year") + labs(title="{frame_time}"))
 ```
+
+`{frame_time}` in a title shows the current year as the animation plays.
 
 The viewer interpolates between frames in the browser, with play, pause,
 scrubbing, speed, and video recording.
@@ -404,7 +419,9 @@ tree) is shortened to twice its width so it does not become a thin column;
 - **SolveIt** draws figures inline and hides their HTML from the model's
   context (`autohide(False)` to opt out).
 - **VS Code notebooks** block WebGL in output cells, so plot3 opens figures
-  in your browser (`PLOT3_DISPLAY=browser|iframe` to force a mode).
+  in your browser (`PLOT3_DISPLAY=browser|iframe` to force a mode). The page
+  is written to `.plot3_preview/latest.html` in the notebook's folder, or to
+  the system temp folder when that folder is read-only.
 - **CRAFT / `%gpu`**: the same `ggplot(...)` code runs on the remote kernel;
   stats run where the data lives and only a compact payload comes back.
 

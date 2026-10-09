@@ -114,3 +114,29 @@ def test_freeze_faceted_raises(cars):
     fig = ggplot(cars, aes(x="wt", y="mpg")) + geom_point() + facet_wrap("cyl")
     with pytest.raises(ValueError, match="facet"):
         fig.freeze()
+
+
+def test_browser_preview_falls_back_when_the_folder_is_read_only(tmp_path, monkeypatch):
+    """A kernel started in a read-only folder ("/" in VS Code) still shows plots."""
+    import importlib
+    import os
+    import tempfile
+
+    gg = importlib.import_module("plot3.ggplot")
+
+    if os.name == "nt" or os.geteuid() == 0:
+        pytest.skip("needs a folder the test user cannot write to")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o555)
+    monkeypatch.chdir(locked)
+    monkeypatch.setattr(gg.webbrowser, "open", lambda *_a, **_k: None)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
+    (tmp_path / "tmp").mkdir()
+    fig = ggplot({"x": [1, 2], "y": [3, 4]}, aes(x="x", y="y")) + geom_point()
+    try:
+        out = fig.show(browser=True)
+    finally:
+        locked.chmod(0o755)
+    assert out == (tmp_path / "tmp" / "plot3_preview" / "latest.html").resolve()
+    assert out.read_text(encoding="utf-8").startswith("<!")

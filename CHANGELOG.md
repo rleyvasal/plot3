@@ -4,6 +4,17 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- Showing a figure from a notebook whose kernel runs in a read-only folder
+  (VS Code starts notebooks outside a workspace in `/`) failed with
+  `OSError: Read-only file system: '/.plot3_preview'`. The browser preview
+  now falls back to the system temp folder.
+- The README's gapminder animation runs as written, with gapminder's column
+  names.
+
 ## 0.4.0 — 2026-10-08
 
 ggplot2's everyday grammar, its defaults, and lidar scenes: R code ports

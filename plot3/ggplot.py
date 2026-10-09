@@ -8,6 +8,7 @@ from plot3 import scaling as _scaling
 import html as _htmlesc
 import os
 import sys
+import tempfile
 import webbrowser
 from pathlib import Path
 
@@ -545,7 +546,13 @@ class ggplot:
     ) -> Path:
         if path is None:
             out_dir = Path.cwd() / ".plot3_preview"
-            out_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                # A kernel started in "/" or another read-only folder (VS
+                # Code does this for notebooks outside a workspace).
+                out_dir = Path(tempfile.gettempdir()) / "plot3_preview"
+                out_dir.mkdir(parents=True, exist_ok=True)
             path = out_dir / "latest.html"
         else:
             path = Path(path)
