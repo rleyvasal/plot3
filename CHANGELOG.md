@@ -4,7 +4,9 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.4.1 — 2026-10-08
+
+A fix for showing figures from VS Code notebooks.
 
 ### Fixed
 
