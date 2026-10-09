@@ -4,6 +4,15 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- The big frame label in animations (`t = 1.53`, the year) no longer shifts
+  sideways or changes size as its value changes: digits have a fixed width,
+  the label keeps one size for the whole animation, and it sits in a box as
+  wide as its widest value.
+
 ## 0.4.1 — 2026-10-08
 
 A fix for showing figures from VS Code notebooks.

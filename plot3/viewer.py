@@ -16,7 +16,8 @@ body{display:flex;flex-direction:column}
 #canvas-host{position:absolute;z-index:1}
 #year{display:none;position:absolute;left:50%;top:46%;transform:translate(-50%,-50%);
   z-index:0;font-weight:700;line-height:1;letter-spacing:-0.04em;opacity:0.13;
-  pointer-events:none;user-select:none}
+  pointer-events:none;user-select:none;font-variant-numeric:tabular-nums;
+  white-space:nowrap;text-align:right}
 #axes{position:absolute;inset:0;pointer-events:none;z-index:2}
 #grid{position:absolute;inset:0;pointer-events:none;z-index:0}
 #legend{position:absolute;right:10px;top:36px;z-index:4;padding:6px 9px;
@@ -1214,6 +1215,27 @@ function fmtParam(v) {
   if (a >= 1e6 || (a > 0 && a < 1e-3)) return v.toExponential(2);
   return v.toFixed(2);
 }
+// The big frame label must not move while it changes: pick one font size
+// for the whole animation and a box as wide as its widest label (in em, so
+// it scales with the window); digits are tabular and right-aligned in it.
+function steadyFrameLabel(el, nF) {
+  const count = Math.min(Math.max(nF, 1), 240);
+  const labels = new Set();
+  for (let i = 0; i < count; i++) {
+    labels.add(frameText(count <= 1 ? 0 : i * (nF - 1) / (count - 1)));
+  }
+  let longest = 0;
+  for (const lab of labels) longest = Math.max(longest, lab.length);
+  el.style.fontSize = longest > 8 ? '56px' : 'min(22vw, 148px)';
+  el.style.width = 'auto';
+  const size = parseFloat(getComputedStyle(el).fontSize) || 1;
+  let widest = 0;
+  for (const lab of labels) {
+    el.textContent = lab;
+    widest = Math.max(widest, el.getBoundingClientRect().width);
+  }
+  el.style.width = (widest / size + 0.05).toFixed(3) + 'em';
+}
 function frameText(t) {
   const tr = S.transition;
   if (tr.params && tr.params.length) {
@@ -1349,6 +1371,7 @@ function installPlayer(renderFrame) {
   btn.style.border = '1px solid ' + T.axis;
   yearEl.style.display = 'block';
   yearEl.style.color = T.ink;
+  steadyFrameLabel(yearEl, nF);
   const titleTemplate = (S.labs && S.labs.title) || '';
   let shownLab = null;
   function syncChrome() {
@@ -1356,7 +1379,6 @@ function installPlayer(renderFrame) {
     frameLabel = lab;
     readout.textContent = lab;
     yearEl.textContent = lab;
-    yearEl.style.fontSize = lab.length > 8 ? '56px' : 'min(22vw, 148px)';
     range.value = (nF <= 1) ? '1000' : String(Math.round(playT / (nF - 1) * 1000));
     btn.textContent = playing ? 'Pause' : 'Play';
     btn.setAttribute('aria-label', playing ? 'Pause' : 'Play');

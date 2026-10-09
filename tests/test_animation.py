@@ -639,3 +639,16 @@ def test_slider_refuses_a_grid_that_is_too_large():
             + geom_function("z = a sin(x) cos(y)")
             + slider(a=(0, 1), k=(1, 2), steps=25)
         )
+
+
+def test_frame_label_stays_in_place_while_it_changes():
+    """The big frame label uses one size, a fixed box, and tabular digits."""
+    from plot3 import geom_function, ggplot, transition_time
+
+    doc = (
+        ggplot() + geom_function("y = sin(x - t)") + transition_time(t=(-5, 12))
+    ).html()
+    assert "font-variant-numeric:tabular-nums" in doc.split("#year{", 1)[1].split("}", 1)[0]
+    assert "steadyFrameLabel(yearEl, nF)" in doc
+    # The size is chosen once per animation, not per frame.
+    assert "lab.length > 8" not in doc
