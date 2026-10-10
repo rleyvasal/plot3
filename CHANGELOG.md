@@ -4,6 +4,44 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.5.0 — 2026-10-09
+
+Cleaner maths and 3D figures, and a README that shows them.
+
+### Fixed
+
+- `geom_isosurface` draws closed, smooth surfaces. It used to emit a loose
+  tile per voxel face, which showed as scattered specks in the viewer and
+  in saved files. The mesh now comes from marching tetrahedra, with shared
+  vertices and outward-facing triangles.
+- `geom_vector_field(stream=True)` draws evenly spaced streamlines with an
+  arrowhead each. Closed orbits close once instead of wrapping over
+  themselves, and lines no longer pile up.
+- Implicit curves with a cusp (`(x^2 + y^2 - 1)^3 = x^2 y^3`, `y^2 = x^3`)
+  no longer stop short of the cusp, and a curve leaving through the top of
+  the window is no longer joined to one at the bottom by a stray line.
+- Saved 3D figures keep a long axis title (`labs(z="elevation")`) on the
+  canvas, making room beside the cube for it.
+- Implicit curves sit on the true curve where the equation has a repeated
+  root (the sides of the heart at y = 0 were off by half a grid cell, which
+  showed as kinks). Each crossing is now solved on the function itself.
+- `geom_isosurface` colours each surface by its level (0.2, 0.45, …) under
+  a "level" legend, not by its position in the list (0, 1, 2).
+- Saved figures with equal aspect (`coord_equal`, implicit curves) tick the
+  whole visible axis, as the viewer does, instead of bunching the data's
+  ticks in a strip.
+
+### Changed
+
+- `scale_x_log10()` and `scale_y_log10()` take `name`, `limits`, `breaks`,
+  and `labels`, as `scale_x_continuous` does.
+- A surface or implicit curve can sweep a third letter without a stand-in
+  value: `geom_function("z = sin(x - t)") + transition_time(t=(0, 6.28))`
+  and `geom_function("x^2 + y^2 = r^2") + slider(r=(0.5, 2))` work as
+  written. A letter nothing sweeps still asks for a value.
+- The README leads with equation plots, animation, and 3D, with images of
+  each; the full ggplot2-side reference moved to `docs/reference.md`.
+
 ## 0.4.2 — 2026-10-08
 
 Steadier animation labels.
