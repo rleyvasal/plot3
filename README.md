@@ -233,6 +233,17 @@ In notebooks, bare column names work as in R: `aes(x=dose, y=response)`.
 - **Jupyter / SolveIt**: bare column names and backticks work in `aes()`,
   `facet_wrap()`, and `facet_grid()` (`aes(x=`First Name`)`). Toggle with
   `enable_r_style()` / `disable_r_style()`. `.py` files keep quoted strings.
+- **Layers on their own lines**, as in R, with no parentheses:
+
+  ```text
+  ggplot(gapminder, aes(x=gdpPercap, y=lifeExp, colour=continent))
+  + geom_point(alpha=0.7)       # comments are fine
+  + scale_x_log10()
+  ```
+
+  A line starting with `+` and a plot3 function continues the plot above
+  it. Import plot3 in an earlier cell: IPython reads a whole cell before
+  running any of it. `.py` files keep the outer parentheses.
 - **SolveIt** draws figures inline and hides their HTML from the model's
   context (`autohide(False)` to opt out).
 - **VS Code notebooks** block WebGL in output cells, so plot3 opens figures

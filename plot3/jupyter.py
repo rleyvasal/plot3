@@ -22,6 +22,7 @@ from plot3.masking import (
     is_mask_transformer,
     is_tidy3_backtick_transformer,
     plot3_backtick_transform,
+    plot3_layer_transform,
 )
 
 # R-style bare-name / backtick masking for aes() / facet_wrap().
@@ -463,6 +464,28 @@ def run_plot3_from_magic(line: str = ""):
 # ═════════════════════════════════════════════════════════════════════════════
 
 
+def enable_layer_lines(ipython: Any | None = None) -> bool:
+    """Let ``+ geom_point()`` lines continue the ggplot above them in a cell.
+
+    ``ggplot(df, aes(...))`` then ``+ geom_point()`` on the next lines, with
+    no parentheses, as in R. Only a ``+`` followed by a plot3 name joins, so
+    ordinary Python is never rewritten.
+    """
+    if ipython is None:
+        try:
+            ipython = get_ipython() if get_ipython is not None else None
+        except Exception:
+            ipython = None
+    transformers = getattr(ipython, "input_transformers_cleanup", None)
+    if not isinstance(transformers, list):
+        return False
+    transformers[:] = [
+        t for t in transformers if getattr(t, "__name__", "") != "plot3_layer_transform"
+    ]
+    transformers.append(plot3_layer_transform)
+    return True
+
+
 def register_plot3(*, quiet=True, r_style: bool = True) -> bool:
     if get_ipython is None:
         return False
@@ -495,6 +518,12 @@ def register_plot3(*, quiet=True, r_style: bool = True) -> bool:
             ns[name] = getattr(plot3_pkg, name)
     except Exception:
         pass
+    # ggplot(...) then "+ geom_point()" lines, without parentheses
+    try:
+        enable_layer_lines(ip)
+    except Exception as e:
+        if not quiet:
+            print(f"plot3: multi-line layers not enabled: {e}")
     # R-style bare names / backticks in aes() (ggplot2 parity with tidy3)
     if r_style:
         try:

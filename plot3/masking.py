@@ -179,6 +179,138 @@ def plot3_backtick_transform(lines: list[str]) -> list[str]:
     return parts or [out]
 
 
+_OPENERS = frozenset("([{")
+_CLOSERS = frozenset(")]}")
+_SKIP_TOKENS = frozenset({
+    tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT,
+    tokenize.DEDENT, tokenize.ENCODING, tokenize.ENDMARKER,
+})
+
+
+def _plot3_names() -> set[str]:
+    try:
+        import plot3
+
+        return {str(name) for name in getattr(plot3, "__all__", ())}
+    except Exception:
+        return set()
+
+
+def _logical_lines(text: str) -> list[list[tokenize.TokenInfo]] | None:
+    """Token lists, one per logical line; ``None`` if *text* cannot tokenize."""
+    lines: list[list[tokenize.TokenInfo]] = []
+    current: list[tokenize.TokenInfo] = []
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            if token.type in _SKIP_TOKENS:
+                if token.type == tokenize.NEWLINE and current:
+                    lines.append(current)
+                    current = []
+                continue
+            current.append(token)
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return None
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _value_start(tokens: list[tokenize.TokenInfo]) -> tuple[int, int]:
+    """Where the expression starts: after a top-level ``=``, else the start."""
+    depth = 0
+    for index, token in enumerate(tokens):
+        if token.string in _OPENERS:
+            depth += 1
+        elif token.string in _CLOSERS:
+            depth -= 1
+        elif depth == 0 and token.type == tokenize.OP and token.string == "=":
+            if index + 1 < len(tokens):
+                return tokens[index + 1].start
+    return tokens[0].start
+
+
+def join_layer_lines(source: str) -> str | None:
+    """Join ``+`` lines that add plot3 layers to the statement above them.
+
+    In a notebook, ``ggplot(df, aes(...))`` followed by lines that start
+    with ``+ geom_point()`` reads like R, but to Python each ``+`` line is
+    a statement of its own (unary plus, or an IndentationError when
+    indented). A line whose first token is ``+`` followed by a plot3 name
+    continues the top-level statement above it, across comments and blank
+    lines; the expression gets parentheses on the lines as typed, so error
+    line numbers still match. Returns ``None`` when nothing needs joining,
+    or when the result would not parse. Pipes (``>>``) are tidy3's.
+    """
+    if not source or "+" not in source:
+        return None
+    raw = source.split("\n")
+    if not any(line.lstrip().startswith("+") for line in raw):
+        return None
+    names = _plot3_names()
+    # Indented "+ geom_point()" lines must not trip the tokenizer.
+    shift = [len(line) - len(line.lstrip()) if line.lstrip().startswith("+") else 0 for line in raw]
+    analysed = "\n".join(line[n:] for line, n in zip(raw, shift))
+    logical = _logical_lines(analysed)
+    if not logical:
+        return None
+
+    def is_layer(tokens: list[tokenize.TokenInfo]) -> bool:
+        return (
+            len(tokens) > 1
+            and tokens[0].type == tokenize.OP
+            and tokens[0].string == "+"
+            and tokens[1].type == tokenize.NAME
+            and tokens[1].string in names
+        )
+
+    groups: list[list[list[tokenize.TokenInfo]]] = []
+    for tokens in logical:
+        previous = groups[-1] if groups else None
+        head = previous[0][0] if previous else None
+        if (
+            previous is not None
+            and is_layer(tokens)
+            and head.start[1] == 0
+            and head.type != tokenize.OP
+            and head.string not in {"if", "for", "while", "with", "def", "class", "try", "elif", "else", "except", "finally", "return", "import", "from"}
+        ):
+            previous.append(tokens)
+        else:
+            groups.append([tokens])
+
+    edits: list[tuple[int, int, str]] = []
+    for group in groups:
+        if len(group) < 2:
+            continue
+        opening = _value_start(group[0])
+        closing = group[-1][-1].end
+        edits.append((opening[0], opening[1] + shift[opening[0] - 1], "("))
+        edits.append((closing[0], closing[1] + shift[closing[0] - 1], ")"))
+    if not edits:
+        return None
+    lines = list(raw)
+    for row, col, piece in sorted(edits, reverse=True):
+        line = lines[row - 1]
+        lines[row - 1] = line[:col] + piece + line[col:]
+    rewritten = "\n".join(lines)
+    try:
+        ast.parse(rewrite_backticks(rewritten))
+    except SyntaxError:
+        return None
+    return rewritten
+
+
+def plot3_layer_transform(lines: list[str]) -> list[str]:
+    """IPython input transformer: ``+`` lines continue a ggplot (see join_layer_lines)."""
+    if not lines:
+        return lines
+    source = "".join(lines)
+    out = join_layer_lines(source)
+    if out is None:
+        return lines
+    return out.splitlines(keepends=True)
+
+
 def _is_bt_call(node: ast.AST) -> bool:
     return (
         isinstance(node, ast.Call)

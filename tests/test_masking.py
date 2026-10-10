@@ -197,3 +197,44 @@ def test_aes_expression_over_columns_passes_whole():
     # Notebook variables and modules keep the old behaviour.
     assert apply_masking("aes(x=np.log(x))", known=known) == "aes(x=np.log('x'))"
     assert apply_masking("aes(x=wt)", known=known) == "aes(x='wt')"
+
+
+def test_plus_lines_continue_a_ggplot():
+    # ggplot(...) then "+ geom_point()" lines, as in R: to Python each "+"
+    # line is its own statement (unary plus, or an IndentationError).
+    import ast
+
+    from plot3.masking import join_layer_lines
+
+    cell = (
+        'ggplot(df, aes(x="a", y="b"))\n'
+        ' + geom_point(alpha=0.7)\n'
+        ' + scale_x_log10()'
+    )
+    joined = join_layer_lines(cell)
+    assert joined == (
+        '(ggplot(df, aes(x="a", y="b"))\n'
+        ' + geom_point(alpha=0.7)\n'
+        ' + scale_x_log10())'
+    )
+    tree = ast.parse(joined)
+    assert len(tree.body) == 1
+
+    # An assignment, with comments and a blank line between layers.
+    cell = 'p = ggplot(df)   # base\n# layers\n+ geom_point()  # points\n\n+ theme_bw()\np'
+    joined = join_layer_lines(cell)
+    assert joined.startswith("p = (ggplot(df)") and "+ theme_bw())" in joined
+    assert len(ast.parse(joined).body) == 2
+
+    # patchwork: a composition takes "+ plot_layout(...)" lines too.
+    assert join_layer_lines("fig = (a | b)\n+ plot_layout(widths=[3, 2])").startswith("fig = ((a | b)")
+
+
+def test_plus_lines_leave_other_python_alone():
+    from plot3.masking import join_layer_lines
+
+    assert join_layer_lines("x = 1\n+2") is None                      # unary plus
+    assert join_layer_lines("y = 1\n+ foo(2)") is None                # not a plot3 name
+    assert join_layer_lines("df\n>> ggplot()\n+ geom_point()") is None  # tidy3's pipe
+    assert join_layer_lines("for i in r:\n    p = ggplot(df)\n    + geom_point()") is None
+    assert join_layer_lines("p = ggplot(df) + geom_point()") is None  # already one line

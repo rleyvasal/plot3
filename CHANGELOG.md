@@ -4,6 +4,17 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Added
+
+- In notebooks, a plot's layers can go on their own lines with no
+  parentheses, as in R: `ggplot(df, aes(...))` then `+ geom_point()` and
+  `+ scale_x_log10()` on the lines below, indented or not, with comments
+  between. Only a `+` followed by a plot3 function joins, so other Python
+  (`y = +x`) is never rewritten. `join_layer_lines()` does the same for
+  tools that export notebooks.
+
 ## 0.6.5 — 2026-10-10
 
 Labelled paths for clicked bubbles in animations.
