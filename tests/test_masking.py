@@ -183,3 +183,17 @@ def test_facet_wrap_masked_end_to_end(cars):
     fig = ggplot(cars, aes(x="wt", y="mpg")) + geom_point() + fac
     html = fig._repr_html_()
     assert "iframe" in html or "three" in html.lower() or len(html) > 100
+
+
+def test_aes_expression_over_columns_passes_whole():
+    # aes(colour = factor(cyl)) in a notebook: aes() reads "factor(cyl)";
+    # quoting each name (factor("cyl")) would break it.
+    from plot3.masking import apply_masking, default_known_names
+
+    known = default_known_names({"np", "scale"})
+    assert apply_masking("aes(colour=factor(cyl))", known=known) == "aes(colour='factor(cyl)')"
+    assert apply_masking("aes(x=log10(pop), y=lifeExp)", known=known) == "aes(x='log10(pop)', y='lifeExp')"
+    assert apply_masking("aes(colour=cyl > 4)", known=known) == "aes(colour='cyl > 4')"
+    # Notebook variables and modules keep the old behaviour.
+    assert apply_masking("aes(x=np.log(x))", known=known) == "aes(x=np.log('x'))"
+    assert apply_masking("aes(x=wt)", known=known) == "aes(x='wt')"

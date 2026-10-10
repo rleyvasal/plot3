@@ -263,6 +263,30 @@ class Plot3MaskTransformer(ast.NodeTransformer):
     def _mask_selector(self, node: ast.AST) -> ast.AST:
         return MaskSelectors(self._known()).visit(node)
 
+    def _mask_aes_value(self, node: ast.AST) -> ast.AST:
+        """``colour = factor(cyl)`` → ``colour = "factor(cyl)"``.
+
+        aes() reads expressions over columns as strings (``"log10(pop)"``,
+        ``"dose > 5"``). An expression whose bare names are all columns is
+        passed whole; quoting each name (``factor("cyl")``) breaks it.
+        Expressions over notebook variables or modules are left alone.
+        """
+        if isinstance(node, (ast.Name, ast.Constant)) or _is_bt_call(node):
+            return self._mask_selector(node)
+        known = self._known()
+        called = {
+            id(call.func) for call in ast.walk(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        }
+        names = [
+            item for item in ast.walk(node)
+            if isinstance(item, ast.Name) and id(item) not in called
+        ]
+        backticks = any(_is_bt_call(item) for item in ast.walk(node))
+        if names and not backticks and all(item.id not in known for item in names):
+            return ast.copy_location(ast.Constant(value=ast.unparse(node)), node)
+        return self._mask_selector(node)
+
     def visit_Call(self, node: ast.Call) -> ast.AST:
         # Always recurse so nested aes(...) inside geom_point(aes(...)) is seen.
         if not isinstance(node.func, ast.Name):
@@ -276,9 +300,9 @@ class Plot3MaskTransformer(ast.NodeTransformer):
 
         if name == "aes":
             # All positional + keyword values are column selectors.
-            node.args = [self._mask_selector(a) for a in node.args]
+            node.args = [self._mask_aes_value(a) for a in node.args]
             node.keywords = [
-                ast.keyword(arg=kw.arg, value=self._mask_selector(kw.value))
+                ast.keyword(arg=kw.arg, value=self._mask_aes_value(kw.value))
                 for kw in node.keywords
             ]
             return node
