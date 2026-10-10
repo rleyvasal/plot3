@@ -4,6 +4,18 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- `pip install plot3` is the whole install for notebooks, pandas, and
+  Polars. The `jupyter`, `polars`, `fast`, and `export` extras are gone:
+  notebooks and Polars users already have IPython and Polars, and
+  contourpy saved only milliseconds on large contour grids.
+- PDF and real-font PNG need cairosvg, now offered as the `pdf` extra
+  (`pip install "plot3[pdf]"`) or directly (`pip install cairosvg`).
+  Messages name the package to install instead of an extra.
+
 ## 0.6.2 — 2026-10-09
 
 Categorical colour order in every geom, and frameless ggplot2 legends.

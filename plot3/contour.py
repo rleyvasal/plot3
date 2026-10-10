@@ -115,7 +115,7 @@ def _backend_name() -> str:
         if _load_contourpy() is None:
             raise ValueError(
                 "PLOT3_CONTOUR_BACKEND=contourpy but contourpy>=1.0 is not "
-                "installed. Install it with: pip install plot3[fast]"
+                "installed. Install it with: pip install contourpy"
             )
         return "contourpy"
     if _load_contourpy() is None:
@@ -346,7 +346,7 @@ def _contour_contourpy(
     if contourpy is None:
         raise ValueError(
             "PLOT3_CONTOUR_BACKEND=contourpy but contourpy>=1.0 is not "
-            "installed. Install it with: pip install plot3[fast]"
+            "installed. Install it with: pip install contourpy"
         )
     masked = np.ma.masked_invalid(np.asarray(field, dtype=np.float64))
     generator = contourpy.contour_generator(

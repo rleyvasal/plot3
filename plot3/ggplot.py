@@ -517,7 +517,7 @@ class ggplot:
         suffix writes the standalone HTML viewer. ``width`` and ``height``
         are pixels unless ``units`` is ``"in"``, ``"cm"``, or ``"mm"``.
         ``dpi`` is the PNG resolution for a physical size (default 300).
-        PDF needs ``plot3[export]`` and the Cairo C library. ``.svg``
+        PDF needs cairosvg and the Cairo C library. ``.svg``
         needs neither.
         """
         suffix = Path(path).suffix.lower()
@@ -683,8 +683,8 @@ def ggsave(
     """Save ``plot``.
 
     ``ggsave("fig.png", p)`` and ``ggsave("fig.svg", p)`` write a static
-    image. ``ggsave("fig.pdf", p)`` writes a PDF when ``plot3[export]`` is
-    installed. That extra also needs the Cairo C library; ``.svg`` writes
+    image. ``ggsave("fig.pdf", p)`` writes a PDF when cairosvg is
+    installed (``plot3[pdf]``). It also needs the Cairo C library; ``.svg`` writes
     the same drawing with no extra dependencies. Any other suffix,
     including ``.html``, writes the standalone viewer. The plot and the
     filename can be passed in either order.

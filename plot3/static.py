@@ -2,7 +2,7 @@
 
 PNG, SVG, and PDF replay one list of drawing commands. SVG is text.
 PNG and PDF are that same SVG rendered by cairosvg when the optional
-``plot3[export]`` extra is installed, so the three files share one
+``plot3[pdf]`` extra (cairosvg) is installed, so the three files share one
 drawing and one font. That extra needs the Cairo C library as well as
 the Python package (``libcairo2``, or the GTK runtime on Windows).
 Without cairosvg, PNG falls back to a zlib RGB file and a built-in
@@ -42,7 +42,7 @@ _UNIT_INCH = {
 }
 _EXPORT_HINT = (
     "ggsave() needs the Cairo C library to write PDF with a journal font. "
-    "Install the Python extra with: pip install 'plot3[export]'. "
+    "Install it with: pip install cairosvg. "
     "Windows and minimal Linux images also need the Cairo library itself "
     "(for example the libcairo2 package, or the GTK runtime). "
     "ggsave('fig.svg', plot) writes the same drawing with no extra dependencies."
@@ -196,8 +196,8 @@ def save_static(
     ``"cm"`` and ``"mm"``) with ``dpi`` (default 300) sets a physical
     page. Layout stays in CSS pixels (96 per inch) so type keeps its
     size, and cairosvg rasterizes that SVG at ``dpi``. PDF and a
-    journal-font PNG need the Cairo C library (``pip install
-    'plot3[export]'``). ``.svg`` needs nothing extra.
+    journal-font PNG need cairosvg and the Cairo C library (``pip install
+    cairosvg``). ``.svg`` needs nothing extra.
     """
     path = Path(path)
     suffix = path.suffix.lower()
@@ -251,7 +251,7 @@ def save_static(
     if fallback:
         print(
             "plot3: PNG used the built-in font. "
-            "pip install 'plot3[export]' for Helvetica."
+            "pip install cairosvg for Helvetica."
         )
     return str(path)
 

@@ -265,7 +265,7 @@ def test_version_floor_and_backend_selection(monkeypatch):
     assert _backend_name() == "numpy"
     monkeypatch.setenv("PLOT3_CONTOUR_BACKEND", "contourpy")
     _reset_contour_backend()
-    with pytest.raises(ValueError, match=r"plot3\[fast\]"):
+    with pytest.raises(ValueError, match=r"pip install contourpy"):
         _contour_lines(np.linspace(-1, 1, 4), np.linspace(-1, 1, 4), np.zeros((4, 4)), 0.0)
 
     fake = types.ModuleType("contourpy")

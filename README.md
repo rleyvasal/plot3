@@ -24,7 +24,7 @@ in the notebook and save as journal-ready PNG, SVG, or PDF.
 </table>
 
 ```bash
-pip install "plot3[jupyter,export]"
+pip install plot3
 ```
 
 Contents: [Plot an equation](#plot-an-equation) ·
@@ -246,27 +246,35 @@ In notebooks, bare column names work as in R: `aes(x=dose, y=response)`.
 ## Install
 
 ```bash
-pip install "plot3[jupyter,export]"
+pip install plot3
 ```
 
 Python 3.10 or newer; NumPy and pandas are the only required packages.
+Notebooks, pandas, and Polars tables work with no extras.
 
-| Extra | Adds |
-|---|---|
-| `export` | `cairosvg`: PNG with real fonts and PDF. Needs the Cairo C library (`brew install cairo`, `apt install libcairo2`). SVG needs nothing. |
-| `fast` | `contourpy`: faster implicit-curve contours (matplotlib users have it) |
-| `jupyter` | IPython integration (bare column names, `%plot3`) |
-| `polars` | Polars tables |
+For PDF, and PNG with real fonts, add cairosvg and the Cairo library. SVG
+needs neither.
+
+```bash
+pip install cairosvg
+```
+
+```bash
+brew install cairo
+```
+
+(`apt install libcairo2` on Debian and Ubuntu.) `pip install "plot3[pdf]"`
+installs plot3 and cairosvg together.
 
 The latest unreleased code installs from GitHub with
-`pip install "plot3[jupyter,export] @ git+https://github.com/rleyvasal/plot3"`.
+`pip install "plot3 @ git+https://github.com/rleyvasal/plot3"`.
 
 ## Development
 
 ```bash
 git clone https://github.com/rleyvasal/plot3 && cd plot3
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev,jupyter,export]"
+pip install -e ".[dev]"
 pytest -q                       # includes every example in this README and docs/reference.md
 python examples/showcase_2d.py  # 2D gallery in the browser
 python examples/showcase_3d.py  # 3D gallery

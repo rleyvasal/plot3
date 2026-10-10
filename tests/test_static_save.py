@@ -438,7 +438,7 @@ def test_inches_and_dpi_set_the_png_page(tmp_path, monkeypatch, capsys):
     rgb = _read_png(path)
     assert rgb.shape == (1200, 2100, 3)
     assert tuple(rgb[0, 0]) == (255, 255, 255)
-    assert "plot3[export]" in capsys.readouterr().out
+    assert "pip install cairosvg" in capsys.readouterr().out
 
     cm = tmp_path / "cm.png"
     ggsave(cm, fig, width=2.54, height=2.54, units="cm", dpi=100)
@@ -466,7 +466,7 @@ def test_pdf_without_cairosvg_names_the_extra(tmp_path, monkeypatch):
     from plot3 import static
 
     monkeypatch.setattr(static, "_load_cairosvg", lambda: None)
-    with pytest.raises(RuntimeError, match=r"plot3\[export\]") as caught:
+    with pytest.raises(RuntimeError, match=r"pip install cairosvg") as caught:
         ggsave(tmp_path / "fig.pdf", _curve())
     message = str(caught.value)
     assert "Cairo" in message
