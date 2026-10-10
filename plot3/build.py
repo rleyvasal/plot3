@@ -440,6 +440,22 @@ def _apply_fill(mapping: dict, kind: str) -> dict:
     return out
 
 
+def _layer_mapping(base_mapping, geom) -> dict:
+    """The plot's mapping with the layer's own on top, fill resolved per side.
+
+    A set colour (``geom_point(colour="black")`` under ``aes(colour=g)``)
+    replaces the inherited colour mapping for that layer, as in ggplot2, so
+    the layer neither recolours nor needs the column. Filled layers keep
+    it: there ``colour=`` is the outline.
+    """
+    kind = getattr(geom, "kind", None)
+    mapping = _apply_fill(dict(base_mapping), kind)
+    if getattr(geom, "const_color", None) is not None and kind not in _FILL_KINDS:
+        mapping.pop("color", None)
+    mapping.update(_apply_fill(dict(geom.mapping), kind))
+    return mapping
+
+
 _REF_KINDS = frozenset({"hline", "vline", "abline"})
 _MM_TO_PX = 96.0 / 25.4
 
@@ -571,8 +587,7 @@ def expand_stat_geom(
         layers = expand_vector_field(geom, transition, slider)
         return layers[0] if len(layers) == 1 else layers
     # Resolve fill per mapping, so a layer's own colour beats a base fill.
-    mapping = _apply_fill(dict(base_mapping), geom.kind)
-    mapping.update(_apply_fill(dict(geom.mapping), geom.kind))
+    mapping = _layer_mapping(base_mapping, geom)
     if geom.kind == "box3d":
         from plot3.stats3d import box3d_layers
 
@@ -1964,8 +1979,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         if getattr(geom, "_replace_mapping", False):
             m = dict(geom.mapping)
         else:
-            m = _apply_fill(dict(g.mapping), geom.kind)
-            m.update(_apply_fill(dict(geom.mapping), geom.kind))
+            m = _layer_mapping(g.mapping, geom)
         if "x" not in m or "y" not in m:
             raise ValueError("aes(x=, y=) are required (bar/histogram/density supply y)")
         if geom.kind == "surface" and "z" not in m:

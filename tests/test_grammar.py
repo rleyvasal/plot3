@@ -97,3 +97,27 @@ def test_scale_colour_viridis_on_points(cloud):
 def test_unknown_add_raises(cars):
     with pytest.raises(TypeError, match="cannot add"):
         _ = ggplot(cars, aes(x="wt", y="mpg")) + 123
+
+
+def test_set_colour_replaces_inherited_colour_mapping():
+    # ggplot2: geom_point(colour = "black") under aes(colour = g) draws black,
+    # and the layer's own data need not have g.
+    import pandas as pd
+
+    from plot3 import aes, geom_boxplot, geom_point, ggplot
+    from plot3.build import build_spec
+
+    df = pd.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3], "g": ["a", "b", "c"]})
+    centre = pd.DataFrame({"x": [2], "y": [2]})
+    spec, _ = build_spec(
+        ggplot(df, aes(x="x", y="y", colour="g")) + geom_point()
+        + geom_point(data=centre, colour="black", shape="cross")
+    )
+    assert spec["layers"][0].get("color") is not None
+    assert spec["layers"][1].get("color") is None
+    assert spec["layers"][1]["constColor"] == "#000000"
+    # A filled layer keeps its mapped fill under a set outline colour.
+    spec, _ = build_spec(
+        ggplot(df, aes(x="g", y="y", fill="g")) + geom_boxplot(colour="black")
+    )
+    assert spec["layers"][0].get("color") is not None
