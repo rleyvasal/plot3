@@ -762,7 +762,7 @@ def expand_stat_geom(
                 if len(group_cols) > 1:
                     out_row[colour_col] = key_tuple[1]
                 outlier_rows.append(out_row)
-        frame = pd.DataFrame(rows)
+        frame = _keep_categories(pd.DataFrame(rows), data, [colour_col])
         box_width = float(getattr(geom, "width", 0.75))
         dodge_levels = None
         if len(group_cols) > 1 and not frame.empty:
@@ -920,7 +920,7 @@ def expand_stat_geom(
                 elif colour_col == xcol:
                     row[colour_col] = x_key
                 rows.append(row)
-        frame = pd.DataFrame(rows)
+        frame = _keep_categories(pd.DataFrame(rows), data, [colour_col])
         if frame.empty:
             frame = pd.DataFrame(columns=["x", "y", "group"])
         # Force categorical x scale labels via a helper frame for domains:
@@ -1421,6 +1421,48 @@ def _legend_position_spec(value):
         return [float(value[0]), float(value[1])]
     return value
 
+
+
+def _categorical_order(g, resolved, levels) -> list:
+    """Colour levels in the order of a categorical colour column, as ggplot2.
+
+    Stats (density, histogram, smooth, summaries) rebuild their data, so
+    their levels arrive sorted as text. When the plot's colour column is a
+    ``pd.Categorical``, its categories set the order (and so the colours);
+    levels it does not list keep their place after them.
+    """
+    data = getattr(g, "data", None)
+    if data is None:
+        return list(levels)
+    columns = dict.fromkeys(m.get("color") for _geom, m in resolved if isinstance(m.get("color"), str))
+    for column in columns:
+        if not has_column(data, column):
+            continue
+        source = materialize_columns(data, [column])[column]
+        if not isinstance(source.dtype, pd.CategoricalDtype):
+            continue
+        wanted = [str(c) for c in source.cat.categories]
+        present = [str(level) for level in levels]
+        first = [c for c in wanted if c in present]
+        return first + [level for level in present if level not in first]
+    return list(levels)
+
+
+def _keep_categories(frame: pd.DataFrame, data, columns) -> pd.DataFrame:
+    """Give a stat's output columns the category order of the source column.
+
+    Box and violin stats build their output from plain rows, which turns
+    ``pd.Categorical(..., categories=["placebo", "low", "high"])`` into
+    text, sorted alphabetically: the fill colours then disagree with the
+    points of the same column in another panel or layer.
+    """
+    for column in dict.fromkeys(c for c in columns if c):
+        if column not in frame.columns or not has_column(data, column):
+            continue
+        source = materialize_columns(data, [column])[column]
+        if isinstance(source.dtype, pd.CategoricalDtype):
+            frame[column] = pd.Categorical(frame[column], categories=list(source.cat.categories))
+    return frame
 
 
 def _forced_levels(g, ccats) -> list:
@@ -2826,6 +2868,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     # viridis_d scale, else the theme's colours extended past eight groups.
     cat_colours: list[str] = []
     if color_scale is not None and color_scale[0] == "cat":
+        color_scale[1] = _categorical_order(g, resolved, color_scale[1])
         user_scale = getattr(g, "colour_scale", None)
         if user_scale is not None and user_scale.kind == "continuous":
             raise ValueError(

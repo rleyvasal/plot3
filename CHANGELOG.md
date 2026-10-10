@@ -4,6 +4,18 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- A categorical colour column (`pd.Categorical(..., categories=[...])`)
+  keeps its order, and so its colours, in every geom. Violins, boxplots,
+  densities, histograms, bars, smoothers, and summaries sorted the levels
+  as text, so a violin and a scatter of the same column in one figure gave
+  a group different colours.
+- Legends under `theme_grey()` and `theme_classic()` have no frame, as in
+  ggplot2; they had a dark grey one.
+
 ## 0.6.1 — 2026-10-09
 
 ggplot2's grey facet strips.

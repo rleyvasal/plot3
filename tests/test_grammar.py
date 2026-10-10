@@ -135,3 +135,45 @@ def test_geom_smooth_takes_a_linetype():
     assert [layer.get("dash") for layer in spec["layers"] if layer["kind"] == "line"] == [[4.0, 4.0]]
     with pytest.raises(ValueError):
         geom_smooth(linetype="wavy")
+
+
+@pytest.mark.parametrize("kind", ["violin", "boxplot", "density", "histogram", "bar", "smooth", "summary"])
+def test_categorical_colour_order_survives_stats(kind):
+    # pd.Categorical(categories=["placebo", "low", "high"]) sets the colour
+    # order for every geom, as in ggplot2; stats used to sort it as text, so
+    # a violin and a scatter of the same column disagreed on colours.
+    import numpy as np
+    import pandas as pd
+
+    from plot3 import (aes, geom_bar, geom_boxplot, geom_density, geom_histogram,
+                       geom_smooth, geom_violin, ggplot, stat_summary)
+    from plot3.build import build_spec
+
+    rng = np.random.default_rng(0)
+    arms = ["placebo", "low", "high"]
+    df = pd.DataFrame({"arm": pd.Categorical(rng.choice(arms, 90), categories=arms),
+                       "x": rng.uniform(0, 10, 90), "y": rng.normal(size=90),
+                       "sex": rng.choice(["F", "M"], 90)})
+    layer = {
+        "violin": (aes(x="arm", y="y", fill="arm"), geom_violin()),
+        "boxplot": (aes(x="sex", y="y", fill="arm"), geom_boxplot()),
+        "density": (aes(x="y", colour="arm"), geom_density()),
+        "histogram": (aes(x="y", fill="arm"), geom_histogram(bins=10)),
+        "bar": (aes(x="sex", fill="arm"), geom_bar()),
+        "smooth": (aes(x="x", y="y", colour="arm"), geom_smooth(method="lm")),
+        "summary": (aes(x="sex", y="y", colour="arm"), stat_summary()),
+    }[kind]
+    spec, _ = build_spec(ggplot(df, layer[0]) + layer[1])
+    assert spec["color"]["cats"] == arms
+    assert [entry["label"] for entry in spec["legend"]] == arms
+
+
+def test_theme_grey_legend_has_no_dark_frame(tmp_path):
+    import pandas as pd
+
+    from plot3 import aes, geom_point, ggplot, ggsave, theme_grey
+
+    df = pd.DataFrame({"x": [1, 2], "y": [1, 2], "g": ["a", "b"]})
+    out = tmp_path / "g.svg"
+    ggsave(str(out), ggplot(df, aes(x="x", y="y", colour="g")) + geom_point() + theme_grey())
+    assert 'stroke="#4d4d4d"' not in out.read_text()

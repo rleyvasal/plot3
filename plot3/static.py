@@ -2196,13 +2196,15 @@ def _paint_legend(commands, origin, metrics, theme, fonts) -> None:
     surface = theme.get("surface") or "#0b1020"
     grid = theme.get("grid") or "#1c2742"
     if _rgb(grid) == _rgb(surface):
-        grid = theme.get("muted") or "#898781"
+        # theme_grey / theme_classic: white grid on a white page. ggplot2
+        # draws no legend box, so neither do we (not a dark one instead).
+        grid = None
     tick = fonts[0]
     row_h = metrics["row_h"]
     lx, ly = origin
     # Opaque, so a legend inside the panel does not fade the marks under it.
     commands.append((
-        "rect", lx, ly, metrics["w"], metrics["h"], surface, grid, 1, 1.0,
+        "rect", lx, ly, metrics["w"], metrics["h"], surface, grid, 1 if grid else 0, 1.0,
     ))
     cursor = ly + 6
     for row in metrics["rows"]:
