@@ -609,6 +609,7 @@ def smooth(geom: _Geom, mapping: dict, data: Any):
     curve = _layer(
         "line", pd.concat(lines, ignore_index=True), line_map, geom,
         _groups=starts, linewidth=float(getattr(geom, "linewidth", 2.0) or 2.0),
+        linetype=getattr(geom, "linetype", None),
     )
     _title(curve, "y", ycol)
     _title(curve, "x", xcol)

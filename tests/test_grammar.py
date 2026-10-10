@@ -121,3 +121,17 @@ def test_set_colour_replaces_inherited_colour_mapping():
         ggplot(df, aes(x="g", y="y", fill="g")) + geom_boxplot(colour="black")
     )
     assert spec["layers"][0].get("color") is not None
+
+
+def test_geom_smooth_takes_a_linetype():
+    import pandas as pd
+    import pytest
+
+    from plot3 import aes, geom_smooth, ggplot
+    from plot3.build import build_spec
+
+    df = pd.DataFrame({"x": [1, 2, 3, 4], "y": [1.0, 2.5, 2.9, 4.2]})
+    spec, _ = build_spec(ggplot(df, aes(x="x", y="y")) + geom_smooth(method="lm", se=False, linetype="dashed"))
+    assert [layer.get("dash") for layer in spec["layers"] if layer["kind"] == "line"] == [[4.0, 4.0]]
+    with pytest.raises(ValueError):
+        geom_smooth(linetype="wavy")

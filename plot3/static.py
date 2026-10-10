@@ -659,7 +659,7 @@ def _draw_facets(panels, layout, first_spec, theme, width, height, base_pt, comm
     # One legend for the figure, from the first panel (colour levels are
     # shared, so every panel has the same keys).
     legend_spec = dict(first_spec, legendPosition="right")
-    metrics = _legend_metrics(
+    metrics = None if layout.get("legend") == "none" else _legend_metrics(
         legend_spec, theme, fonts, raw_labs.get("color") or "",
         max_box=(width * 0.3, height - head - foot),
     )

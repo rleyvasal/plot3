@@ -1184,13 +1184,14 @@ class geom_smooth(_Geom):
     ``method="loess"`` (default, local quadratic with ``span``) or ``"lm"``
     (a straight line). ``se=True`` shades the ``level`` confidence band,
     using Student's t like R. ``aes(colour=)`` fits each group.
+    ``linetype`` dashes the fitted line (``"dashed"``, ``"dotted"``, …).
     """
 
     kind = "smooth"
 
     def __init__(
         self, mapping=None, *, method="loess", se=True, level=0.95,
-        span=0.75, n=80, linewidth=2.0, **kw,
+        span=0.75, n=80, linewidth=2.0, linetype=None, **kw,
     ):
         super().__init__(mapping, **kw)
         self.method = method
@@ -1199,6 +1200,8 @@ class geom_smooth(_Geom):
         self.span = float(span)
         self.n = int(n)
         self.linewidth = float(linewidth)
+        dash_pattern(linetype)
+        self.linetype = linetype
 
 
 class stat_summary(_Geom):
@@ -1751,6 +1754,14 @@ class geom_violin(_Geom):
         self.linewidth = float(linewidth)
 
 
+_FACET_SCALES = ("fixed", "free", "free_x", "free_y")
+
+
+def _check_facet_scales(scales) -> None:
+    if scales not in _FACET_SCALES:
+        raise ValueError("scales must be 'fixed', 'free', 'free_x', or 'free_y'")
+
+
 class facet_wrap:
     """Wrap panels by a discrete column (ggplot2 ``facet_wrap``).
 
@@ -1762,7 +1773,8 @@ class facet_wrap:
         Panel grid size. If both are omitted, the grid is ggplot2's: 3 panels
         in a row, 4 in 2 x 2, 5 or 6 in 2 rows of 3, 7 to 9 in 3 x 3.
     scales:
-        ``"fixed"`` (shared domains across panels) or ``"free"`` (per-panel).
+        ``"fixed"`` (shared domains across panels), ``"free"`` (per-panel),
+        or ``"free_x"`` / ``"free_y"`` (only that axis per-panel).
     """
 
     def __init__(
@@ -1792,8 +1804,7 @@ class facet_wrap:
                     f"(got {facets!r})"
                 )
             name = candidates[0]
-        if scales not in {"fixed", "free"}:
-            raise ValueError("scales must be 'fixed' or 'free'")
+        _check_facet_scales(scales)
         if ncol is not None and ncol < 1:
             raise ValueError("ncol must be positive")
         if nrow is not None and nrow < 1:
@@ -1812,7 +1823,8 @@ class facet_grid:
     ``facet_grid(rows="sex", cols="day")`` or the formula ``"sex ~ day"``
     (``". ~ day"`` for columns only). Column labels sit above the top row and
     row labels to the right, as in ggplot2. ``scales="fixed"`` (default)
-    shares axes across panels; ``"free"`` lets each panel fit its data.
+    shares axes across panels; ``"free"`` lets each panel fit its data, and
+    ``"free_x"`` / ``"free_y"`` free one axis only.
     """
 
     def __init__(self, facets: str | None = None, *, rows=None, cols=None, scales: str = "fixed",
@@ -1839,8 +1851,7 @@ class facet_grid:
         cols = _as_column_name(cols) if cols is not None else None
         if rows is None and cols is None:
             raise ValueError("facet_grid() needs rows=, cols=, or both")
-        if scales not in {"fixed", "free"}:
-            raise ValueError("scales must be 'fixed' or 'free'")
+        _check_facet_scales(scales)
         self.rows = rows
         self.cols = cols
         self.scales = scales

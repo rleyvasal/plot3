@@ -3731,7 +3731,13 @@ def facet_cells(g: ggplot) -> dict:
     facet = g.facet
     if g.data is None:
         raise ValueError("ggplot has no data")
-    force = _global_numeric_domains(g) if facet.scales == "fixed" else {}
+    # ggplot2: "fixed" shares every axis, "free" none, "free_x" / "free_y"
+    # all but that one.
+    freed = {"fixed": set(), "free_x": {"x"}, "free_y": {"y"}}.get(facet.scales)
+    force = (
+        {ax: dom for ax, dom in _global_numeric_domains(g).items() if ax not in freed}
+        if freed is not None else {}
+    )
     colour_levels = _facet_colour_levels(g)
 
     def child(panel):
@@ -3745,6 +3751,9 @@ def facet_cells(g: ggplot) -> dict:
     header = {
         key: g.labs.get(key) for key in ("title", "subtitle", "caption", "tag") if g.labs.get(key)
     }
+    # Panels hide their own legends; the figure draws one unless
+    # theme(legend_position="none") asks for none.
+    legend = _legend_position_spec(getattr(g, "legend_position", None))
     cells: list[dict] = []
     if not isinstance(facet, _facet_grid):
         column = facet.variable
@@ -3764,7 +3773,8 @@ def facet_cells(g: ggplot) -> dict:
             row, col = divmod(index, ncol)
             cells.append({"row": row, "col": col, "fig": panel, "strip": label})
         return {"ncol": ncol, "nrow": nrow, "cells": cells, "col_strips": None,
-                "row_strips": None, "header": header, "kind": "wrap"}
+                "row_strips": None, "header": header, "kind": "wrap",
+                "legend": legend}
 
     for column in (facet.rows, facet.cols):
         if column is not None and not has_column(g.data, column):
@@ -3793,6 +3803,7 @@ def facet_cells(g: ggplot) -> dict:
         "row_strips": [_strip_text(facet, facet.rows, v) for v in row_levels] if facet.rows else None,
         "header": header,
         "kind": "grid",
+        "legend": legend,
     }
 
 
@@ -3874,7 +3885,7 @@ def _build_doc_faceted(g: ggplot, facet) -> str:
     first_spec, _pairs = build_spec(first)
     shared_x = str((first_spec.get("labs") or {}).get("x") or "")
     shared_y = str((first_spec.get("labs") or {}).get("y") or "")
-    legend_html = _facet_legend_html(first_spec, theme)
+    legend_html = "" if layout.get("legend") == "none" else _facet_legend_html(first_spec, theme)
     cells: list[str] = []
     total_kb = 0
     count = 0

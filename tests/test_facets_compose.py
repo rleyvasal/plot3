@@ -163,3 +163,49 @@ def test_composition_saves_static_and_html(tmp_path, plots):
     assert doc.count("<iframe") == 3
     assert "Overview" in doc
     assert re.search(r"flex-direction:row", doc) and re.search(r"flex-direction:column", doc)
+
+
+def _facet_frame():
+    import pandas as pd
+
+    return pd.DataFrame({
+        "g": ["a"] * 3 + ["b"] * 3,
+        "x": [1, 2, 3, 10, 20, 30],
+        "y": [1.0, 2.0, 3.0, 100.0, 200.0, 300.0],
+    })
+
+
+def test_facet_free_y_frees_only_y():
+    from plot3 import aes, facet_wrap, geom_point, ggplot
+    from plot3.build import facet_cells
+
+    layout = facet_cells(ggplot(_facet_frame(), aes(x="x", y="y")) + geom_point() + facet_wrap("g", scales="free_y"))
+    forced = [cell["fig"]._force_scales for cell in layout["cells"]]
+    assert all(set(f) == {"x"} and f["x"] == (1.0, 30.0) for f in forced)
+    layout = facet_cells(ggplot(_facet_frame(), aes(x="x", y="y")) + geom_point() + facet_wrap("g", scales="free_x"))
+    assert all(set(cell["fig"]._force_scales) == {"y"} for cell in layout["cells"])
+
+
+def test_facet_scales_rejects_unknown_values():
+    import pytest
+
+    from plot3 import facet_grid, facet_wrap
+
+    with pytest.raises(ValueError, match="free_y"):
+        facet_wrap("g", scales="loose")
+    facet_grid("g ~ .", scales="free_x")
+
+
+def test_facet_legend_position_none_hides_the_figure_legend(tmp_path):
+    from plot3 import aes, facet_wrap, geom_point, ggplot, ggsave, theme
+    from plot3.build import build_doc
+
+    p = (ggplot(_facet_frame(), aes(x="x", y="y", colour="g")) + geom_point()
+         + facet_wrap("g") + theme(legend_position="none"))
+    assert "id='flegend'" not in build_doc(p)
+    out = tmp_path / "f.svg"
+    ggsave(str(out), p)
+    assert ">a<" in out.read_text()  # strip label
+    shown = tmp_path / "shown.svg"
+    ggsave(str(shown), ggplot(_facet_frame(), aes(x="x", y="y", colour="g")) + geom_point() + facet_wrap("g"))
+    assert shown.read_text().count(">a<") > out.read_text().count(">a<")  # legend key too
