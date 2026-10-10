@@ -191,18 +191,27 @@ ggplot2's names and defaults.
 
 ```python
 rng = np.random.default_rng(1)
-trial = pd.DataFrame({"arm": rng.choice(["placebo", "low", "high"], 150),
+arms = ["placebo", "low", "high"]
+trial = pd.DataFrame({"arm": pd.Categorical(rng.choice(arms, 150), categories=arms),
                       "dose": rng.uniform(0, 10, 150)})
-trial["response"] = 2 + 0.6 * trial.dose + 1.5 * (trial.arm == "high") + rng.normal(0, 1.2, 150)
+slope = trial.arm.map({"placebo": 0.05, "low": 0.35, "high": 0.7}).astype(float)
+trial["response"] = 2 + slope * trial.dose + rng.normal(0, 0.9, 150)
 
 a = (ggplot(trial, aes(x="dose", y="response", colour="arm"))
-     + geom_point(alpha=0.7) + geom_smooth(method="lm"))
+     + geom_point(alpha=0.7) + geom_smooth(method="lm", se=False)
+     + scale_colour_hue() + theme_grey() + theme(legend_position="bottom"))
 b = (ggplot(trial, aes(x="arm", y="response", fill="arm"))
-     + geom_violin() + geom_jitter(width=0.1, height=0) + theme(legend_position="none"))
-fig = (a | b) + plot_annotation(title="Response by dose and arm", tag_levels="A")
+     + geom_violin() + geom_jitter(width=0.1, height=0)
+     + scale_fill_hue() + theme_grey() + theme(legend_position="none"))
+fig = ((a | b) + plot_layout(widths=[3, 2])
+       + plot_annotation(title="Response by dose and arm", tag_levels="A"))
 ```
 
-<img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/ggplot2_compose.png" alt="Two-panel figure: scatter with linear fits, and violins by arm">
+`scale_colour_hue()` and `theme_grey()` are ggplot2's own defaults, so the
+figure looks as it would from R. plot3's defaults are `theme_bw()` for saved
+files and `theme_dark()` in the viewer.
+
+<img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/ggplot2_look.png" alt="Two-panel figure in ggplot2's grey theme: response against dose with one fitted line per arm, and violins of response by arm">
 
 Everything else you'd expect is there, including histograms, densities,
 boxplots, bar positions, `stat_summary`, error bars, heatmaps, hexbins, 2D
