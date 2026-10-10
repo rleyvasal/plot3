@@ -4,6 +4,26 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.6.0 — 2026-10-09
+
+Free-axis facets, dashed smoothers, and column expressions in notebook aes().
+
+### Added
+
+- `facet_wrap()` and `facet_grid()` take `scales="free_x"` and
+  `scales="free_y"`, freeing one axis per panel as in ggplot2.
+- `geom_smooth(linetype=)` dashes the fitted line.
+
+### Fixed
+
+- `theme(legend_position="none")` hides the legend of a faceted figure, in
+  the viewer and in saved files. It used to be drawn anyway.
+
+- In notebooks, an expression over columns in `aes()` works bare:
+  `aes(colour = factor(cyl))`, `aes(x = log10(pop))`, `aes(colour = cyl > 4)`.
+  Each column name used to be quoted on its own (`factor("cyl")`), which
+  failed; the expression now reaches `aes()` whole, as `"factor(cyl)"`.
+
 ## 0.5.1 — 2026-10-09
 
 A fix for layers with a set colour.
