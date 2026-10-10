@@ -55,6 +55,9 @@ body{display:flex;flex-direction:column}
 #legend .sz-block{clear:both;padding-top:6px}
 #legend .bub{display:inline-block;border-radius:50%;box-sizing:border-box;flex:none;
   border:1px solid rgba(0,0,0,.35)}
+#legend.docked{display:flex!important;flex-wrap:wrap;align-items:center;column-gap:14px;row-gap:0;line-height:1.5}
+#legend.docked .sz-block{display:flex;flex-wrap:wrap;align-items:center;column-gap:10px;padding-top:0;clear:none}
+#legend.docked .sz{margin:0}
 #player{display:none;flex:none;align-items:center;flex-wrap:wrap;gap:8px;padding:4px 10px 8px;max-width:100%;box-sizing:border-box}
 #player button{font:inherit;padding:3px 10px;border-radius:5px;cursor:pointer}
 #player #play-range{flex:1;min-width:80px}
@@ -345,19 +348,25 @@ function showLegendBox() {
   legEl.style.border = '1px solid ' + T.grid;
   legEl.style.color = T.ink2;
 }
+// Height the docked legend takes at the bottom; the plot shrinks by it.
+let legendReserve = 0;
 function placeLegend() {
-  if (!legEl || legEl.style.display === 'none' || legEl.dataset.docked === '1') return;
+  legendReserve = 0;
+  if (!legEl || legEl.style.display === 'none') return;
   const figH = figEl.clientHeight || 0;
   if (figH < 40) return;
-  // A key taller than the panel covers the curve. Sit it under the axes.
-  if (legEl.offsetHeight > figH * 0.40) {
+  // A key taller than the panel covers the data (a short notebook output).
+  // Lay it out in rows under the axes, and keep that room free.
+  if (legEl.dataset.docked !== '1' && legEl.offsetHeight > figH * 0.40) {
     legEl.dataset.docked = '1';
+    legEl.classList.add('docked');
     legEl.style.top = 'auto';
-    legEl.style.bottom = '8px';
+    legEl.style.bottom = '6px';
     legEl.style.left = '8px';
     legEl.style.right = '8px';
     legEl.style.maxWidth = 'none';
   }
+  if (legEl.dataset.docked === '1') legendReserve = legEl.offsetHeight + 8;
 }
 const LEGEND_GLYPH = { circle: '●', triangle: '▲', square: '■', diamond: '◆', plus: '+', cross: '×' };
 // Legend keys: a square, the point's symbol, or a short (dashed) line.
@@ -2036,7 +2045,7 @@ if (!S.is3d) {
   function layout() {
     placeLegend();
     W = Math.max(50, figEl.clientWidth - M.l - M.r);
-    H = Math.max(50, figEl.clientHeight - M.t - M.b);
+    H = Math.max(50, figEl.clientHeight - M.t - M.b - legendReserve);
     if (equalAspect) applyEqual();
     host.style.left = M.l + 'px'; host.style.top = M.t + 'px';
     renderer.setSize(W, H);
@@ -2741,7 +2750,7 @@ if (!S.is3d) {
 
   function layout() {
     placeLegend();
-    const w = Math.max(figEl.clientWidth, 1), h = Math.max(figEl.clientHeight, 1);
+    const w = Math.max(figEl.clientWidth, 1), h = Math.max(figEl.clientHeight - legendReserve, 1);
     renderer.setSize(w, h);
     cam.aspect = w / h;
     cam.updateProjectionMatrix();
@@ -2763,7 +2772,7 @@ if (!S.is3d) {
   const touches = (a, b, air) => a[0] - air < b[0] + b[2] && b[0] - air < a[0] + a[2] &&
     a[1] - air < b[1] + b[3] && b[1] - air < a[1] + a[3];
   function declutterTicks() {
-    const w = Math.max(figEl.clientWidth, 1), h = Math.max(figEl.clientHeight, 1);
+    const w = Math.max(figEl.clientWidth, 1), h = Math.max(figEl.clientHeight - legendReserve, 1);
     const placed = [];
     for (const marks of tickSprites) {
       if (!marks.length) continue;

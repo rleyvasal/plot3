@@ -4,6 +4,15 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- In a short output area (a SolveIt or notebook cell), a legend taller than
+  the plot no longer covers the bottom of the plot and the x axis. It runs
+  in rows under the axes, and the plot (2D or 3D) shrinks to make room. In
+  a taller window the legend stays at the top right as before.
+
 ## 0.6.3 — 2026-10-09
 
 A plain `pip install plot3`.
