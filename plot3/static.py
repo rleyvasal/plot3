@@ -1065,6 +1065,10 @@ def _draw_2d(
     box = _box_2d(spec, x, y, w, h, labs, fonts, extra_right, extra_bottom)
     scales = spec.get("scales") or {}
     window = _view_window(spec, box[2], box[3])
+    scales = dict(scales)
+    for axis, u_lo, u_hi in (("x", window[0], window[1]), ("y", window[2], window[3])):
+        if axis in scales:
+            scales[axis] = _window_ticks(scales[axis], u_lo, u_hi)
     surface = theme.get("surface") or "#0b1020"
     grid = theme.get("grid") or "#1c2742"
     axis = theme.get("axis") or "#2e3a5c"
@@ -1429,6 +1433,15 @@ def _draw_3d(
         # labels the same room as the others.
         inner = _inset_box(box, layout["pad"])
         project, centre = _fit_projector(base, ext, inner, zoom)
+    if not void and centre is not None:
+        # A long axis title ("elevation") beside a short edge can reach past
+        # the canvas: narrow the cube on that side to make room for it.
+        spots = _axis_title_spots(ext, project, centre, labs, fonts, layout)
+        left, right = _title_overflow(spots, fonts, (x, y, w, h))
+        if left > 0.5 or right > 0.5:
+            ix, iy, iw, ih = inner
+            inner = (ix + left, iy, max(4.0, iw - left - right), ih)
+            project, centre = _fit_projector(base, ext, inner, zoom)
     ink = theme.get("ink") or "#ffffff"
     gz = bool(spec.get("gz"))
     min_dim = min(box[2], box[3])
@@ -2449,6 +2462,16 @@ def _clamp_point(px: float, py: float, bounds) -> tuple[float, float]:
     )
 
 
+def _clamp_label(px, py, text, size, anchor, baseline, bounds) -> tuple[float, float]:
+    """``(px, py)`` moved so the whole label, not only its anchor, stays in ``bounds``."""
+    px, py = _clamp_point(px, py, bounds)
+    left, top, width, height = _label_box(px, py, text, size, anchor, baseline)
+    x, y, w, h = bounds
+    dx = max(0.0, x + 3.0 - left) - max(0.0, left + width - (x + w - 3.0))
+    dy = max(0.0, y + 3.0 - top) - max(0.0, top + height - (y + h - 3.0))
+    return px + dx, py + dy
+
+
 def _thin_marks(marks, air: float) -> list:
     """Every k-th tick, the smallest k whose labels do not touch, keeping
     round values (0, 5, 10 rather than 1, 4, 7) when the ticks allow."""
@@ -2472,6 +2495,41 @@ def _thin_marks(marks, air: float) -> list:
     return marks[:1]
 
 
+def _axis_title_spots(ext, project, centre, labs, fonts, layout) -> list:
+    """``(text, x, y, anchor, baseline)`` for each 3D axis title, unclamped."""
+    if centre is None:
+        return []
+    corners = _cube_corners(project, ext)
+    hull = _hull_edge_set(corners)
+    spots = []
+    for axis in ("x", "y", "z"):
+        text = labs.get(axis) or ""
+        if not text:
+            continue
+        pair = _visible_axis_edge(axis, hull, corners, centre)
+        if corners[pair[0]] is None or corners[pair[1]] is None:
+            continue
+        nx, ny = _outward_normal(corners[pair[0]], corners[pair[1]], centre)
+        anchor, baseline = _outside_anchor(nx, ny)
+        mid = project(_corner_xyz(pair[0], ext) * 0.5 + _corner_xyz(pair[1], ext) * 0.5)
+        if mid is None:
+            continue
+        gap = layout["title_gap"]
+        spots.append((text, mid[0] + nx * gap, mid[1] + ny * gap, anchor, baseline))
+    return spots
+
+
+def _title_overflow(spots, fonts, bounds) -> tuple[float, float]:
+    """How far the axis titles reach past the left and right of ``bounds``."""
+    x, _y, w, _h = bounds
+    left = right = 0.0
+    for text, lx, ly, anchor, baseline in spots:
+        bx, _by, bw, _bh = _label_box(lx, ly, text, fonts[0], anchor, baseline)
+        left = max(left, x + 3.0 - bx)
+        right = max(right, bx + bw - (x + w - 3.0))
+    return left, right
+
+
 def _draw_3d_axes(spec, ext, project, centre, commands, theme, fonts, labs, bounds, layout) -> None:
     """Tick numbers and axis names just outside the three visible edges."""
     if centre is None:
@@ -2482,7 +2540,6 @@ def _draw_3d_axes(spec, ext, project, centre, commands, theme, fonts, labs, boun
     hull = _hull_edge_set(corners)
     scales = spec.get("scales") or {}
     tick_gap = layout["tick_gap"]
-    title_gap = layout["title_gap"]
     placed: list[tuple[float, float, float, float]] = []  # label boxes, all axes
     for axis in ("x", "y", "z"):
         pair = _visible_axis_edge(axis, hull, corners, centre)
@@ -2504,7 +2561,10 @@ def _draw_3d_axes(spec, ext, project, centre, commands, theme, fonts, labs, boun
             hit = project(_corner_xyz(pair[0], ext) * (1.0 - u) + _corner_xyz(pair[1], ext) * u)
             if hit is None:
                 continue
-            tx, ty = _clamp_point(hit[0] + nx * tick_gap, hit[1] + ny * tick_gap, bounds)
+            tx, ty = _clamp_label(
+                hit[0] + nx * tick_gap, hit[1] + ny * tick_gap, str(lab), fonts[0],
+                anchor, baseline, bounds,
+            )
             box = _label_box(tx, ty, str(lab), fonts[0], anchor, baseline)
             marks.append((value, str(lab), hit, tx, ty, box))
         reach = max(3.0, tick_gap - 2.0)
@@ -2522,13 +2582,8 @@ def _draw_3d_axes(spec, ext, project, centre, commands, theme, fonts, labs, boun
                 "text", tx, ty, lab, fonts[0], muted,
                 anchor, baseline, 0, 400,
             ))
-        text = labs.get(axis) or ""
-        if not text:
-            continue
-        mid = project(_corner_xyz(pair[0], ext) * 0.5 + _corner_xyz(pair[1], ext) * 0.5)
-        if mid is None:
-            continue
-        lx, ly = _clamp_point(mid[0] + nx * title_gap, mid[1] + ny * title_gap, bounds)
+    for text, lx, ly, anchor, baseline in _axis_title_spots(ext, project, centre, labs, fonts, layout):
+        lx, ly = _clamp_label(lx, ly, text, fonts[0], anchor, baseline, bounds)
         commands.append((
             "text", lx, ly, text, fonts[0], ink2, anchor, baseline, 0, 400,
         ))
@@ -2607,6 +2662,30 @@ def _view_window(spec, plot_w, plot_h):
     else:
         ny = nx / target
     return (0.5 - nx / 2, 0.5 + nx / 2, 0.5 - ny / 2, 0.5 + ny / 2)
+
+
+def _window_ticks(scale: dict, u_lo: float, u_hi: float) -> dict:
+    """Ticks across the visible window when coord_equal widens an axis.
+
+    The scale's ticks span the data. Equal aspect can show far more than
+    that (``y^2 = x^3`` is 4.6 wide and 20 tall), and the data's ticks then
+    bunch in a strip. The viewer re-ticks whatever is visible; so does this.
+    Breaks the user chose (``fixed``) are kept.
+    """
+    if (
+        scale.get("kind") != "num" or scale.get("fixed") or scale.get("trans") == "log10"
+        or (u_hi - u_lo) <= 1.2 * (1 + 2 * _PAD)
+    ):
+        return scale
+    from plot3.scales import fmt_ticks, nice_ticks
+
+    lo = float(scale.get("lo", 0.0))
+    span = float(scale.get("hi", 1.0)) - lo or 1.0
+    v_lo, v_hi = lo + u_lo * span, lo + u_hi * span
+    values = [v for v in nice_ticks(v_lo, v_hi, 5) if v_lo <= v <= v_hi]
+    if not values:
+        return scale
+    return dict(scale, ticks=[[v, label] for v, label in zip(values, fmt_ticks(values))])
 
 
 def _ticks(scale: dict) -> list:

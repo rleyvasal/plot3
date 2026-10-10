@@ -228,3 +228,21 @@ def test_named_colours_reach_the_png(tmp_path):
     path = tmp_path / "grey.svg"
     ggsave(str(path), ggplot(frame, aes(x="x", y="y")) + geom_point(colour="grey50", size=20))
     assert 'fill="#808080"' in path.read_text()
+
+
+
+def test_scale_x_log10_takes_name_limits_breaks_labels(tmp_path):
+    import pandas as pd
+
+    from plot3 import aes, geom_point, ggplot, ggsave, scale_x_log10, scale_y_log10
+
+    df = pd.DataFrame({"x": [300, 3_000, 30_000], "y": [1, 10, 100]})
+    p = (ggplot(df, aes(x="x", y="y")) + geom_point()
+         + scale_x_log10("GDP", limits=(100, 1e5), breaks=[1e3, 1e4], labels=["$1k", "$10k"])
+         + scale_y_log10())
+    assert p.xscale.trans == "log10" and p.xscale.limits == (100, 1e5)
+    assert p.scale_x is not None and p.scale_y is not None
+    out = tmp_path / "log.svg"
+    ggsave(str(out), p)
+    text = out.read_text()
+    assert ">$1k<" in text and ">$10k<" in text and ">GDP<" in text

@@ -261,3 +261,32 @@ def test_facet_fixed_shares_numeric_domains():
     assert domains["x"][0] == 0.0 and domains["x"][1] == 11.0
     html = build_doc(fig)
     assert html.count("<iframe") == 2
+
+
+def test_isosurface_mesh_is_closed_and_faces_outward():
+    from collections import Counter
+
+    from plot3.stats3d import isosurface_mesh
+
+    g = np.linspace(-1.5, 1.5, 24)
+    xx, yy, zz = np.meshgrid(g, g, g, indexing="ij")
+    verts, faces = isosurface_mesh(np.exp(-(xx**2 + yy**2 + zz**2)), np.exp(-1), g, g, g)
+    radius = np.linalg.norm(verts, axis=1)
+    assert np.allclose(radius, 1.0, atol=0.03)
+    edges = Counter(
+        tuple(sorted(edge)) for f in faces for edge in ((f[0], f[1]), (f[1], f[2]), (f[2], f[0]))
+    )
+    assert set(edges.values()) == {2}  # watertight: every edge joins two triangles
+    tri = verts[faces]
+    normal = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    assert (np.einsum("ij,ij->i", normal, tri.mean(axis=1)) > 0).all()
+
+
+def test_isosurface_legend_shows_the_levels():
+    rng = np.random.default_rng(1)
+    df = pd.DataFrame({"x": rng.normal(size=400), "y": rng.normal(size=400), "z": rng.normal(size=400)})
+    verts, _faces, _used = isosurface_levels(df.to_numpy(), [0.3, 0.6], n=16)
+    assert sorted(set(verts["level"])) == pytest.approx([0.3, 0.6])
+    fig = ggplot(df, aes(x="x", y="y", z="z")) + geom_isosurface(levels=[0.3, 0.6], n=16)
+    spec, _payloads = build_spec(fig)
+    assert spec["labs"]["color"] == "level"

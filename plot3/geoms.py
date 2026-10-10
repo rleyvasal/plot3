@@ -417,7 +417,8 @@ class geom_isosurface(_Geom):
         Density grid bins per axis (8–64). Overridden by a preceding
         :class:`stat_density_3d` if present on the figure.
     colour_by:
-        ``"level"`` colours mesh vertices by isolevel index (default).
+        ``"level"`` colours each surface by its level (default), on the
+        same 0–1 scale as ``levels``.
     wireframe, alpha:
         Same idea as :class:`geom_surface`.
     """
@@ -2066,12 +2067,17 @@ class scale_x_log10:
     Positions are encoded in log10 space, so a decade is a constant distance
     and a tween along the axis moves in log space. Non-positive values are
     omitted. Tick labels stay in the original units (1, 10, 100, …).
+    ``name``, ``limits``, ``breaks``, and ``labels`` work as in
+    ``scale_x_continuous``.
     """
 
     axis = "x"
 
+    def __init__(self, name=None, *, limits=None, breaks=None, labels=None):
+        self.name, self.limits, self.breaks, self.labels = name, limits, breaks, labels
 
-class scale_y_log10:
+
+class scale_y_log10(scale_x_log10):
     """Base-10 logarithmic scale for y. See :class:`scale_x_log10`."""
 
     axis = "y"

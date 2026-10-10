@@ -976,8 +976,8 @@ def expand_stat_geom(
             indices = np.zeros((0, 3), dtype=np.int32)
         colour_by = getattr(geom, "colour_by", "level")
         map_kwargs: dict = {"x": "x", "y": "y", "z": "z"}
-        if colour_by == "level" and "colour" in vertices.columns:
-            map_kwargs["colour"] = "colour"
+        if colour_by == "level" and "level" in vertices.columns:
+            map_kwargs["colour"] = "level"
         out = _Geom(
             aes(**map_kwargs),
             color=geom.const_color,
@@ -990,6 +990,7 @@ def expand_stat_geom(
         out.wireframe = bool(getattr(geom, "wireframe", False))
         out._indices = indices
         out._iso_levels = used
+        out._colour_title = "level"
         return out
     return geom
 

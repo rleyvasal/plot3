@@ -157,6 +157,17 @@ def _smooth3(vol: np.ndarray, passes: int = 1) -> np.ndarray:
     return out
 
 
+# The cube split into six tetrahedra around its 0-6 diagonal. Every cube
+# uses the same split, so neighbouring cubes share faces and the mesh has
+# no cracks.
+_CUBE_CORNERS = np.array(
+    [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)]
+)
+_CUBE_TETS = np.array(
+    [(0, 1, 2, 6), (0, 2, 3, 6), (0, 3, 7, 6), (0, 7, 4, 6), (0, 4, 5, 6), (0, 5, 1, 6)]
+)
+
+
 def isosurface_mesh(
     density: np.ndarray,
     level: float,
@@ -164,148 +175,103 @@ def isosurface_mesh(
     ys: np.ndarray,
     zs: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Extract a triangle mesh where ``density >= level`` meets empty space.
+    """Triangle mesh of the surface ``density == level`` (marching tetrahedra).
 
-    Dependency-free **voxel face** extraction: for each solid voxel, emit
-    quads on faces adjacent to empty (or boundary). Robust for interactive
-    EDA; slightly blocky at low ``n``.
+    Vertices sit on grid edges, interpolated linearly, and are shared
+    between neighbouring triangles, so the surface is closed and smooth.
+    The grid is padded with empty cells, so a blob touching the edge is
+    closed too. Triangles face outward, away from the dense side.
 
     Returns vertices ``(V, 3)`` and triangle indices ``(T, 3)``.
     """
     vol = np.asarray(density, dtype=np.float64)
     if vol.ndim != 3:
         raise ValueError("density must be a 3D array")
-    nx, ny, nz = vol.shape
-    xs = np.asarray(xs, dtype=np.float64)
-    ys = np.asarray(ys, dtype=np.float64)
-    zs = np.asarray(zs, dtype=np.float64)
     level = float(level)
-    solid = vol >= level
-    if not solid.any():
-        return np.zeros((0, 3), dtype=np.float64), np.zeros((0, 3), dtype=np.int32)
+    empty = (np.zeros((0, 3), dtype=np.float64), np.zeros((0, 3), dtype=np.int32))
+    if not (vol >= level).any():
+        return empty
+    axes = [_padded_axis(np.asarray(a, dtype=np.float64)) for a in (xs, ys, zs)]
+    vol = np.pad(vol, 1, mode="constant", constant_values=min(0.0, level) - 1.0)
+    nx, ny, nz = vol.shape
+    flat = vol.ravel()
 
-    def centers(axis: np.ndarray) -> np.ndarray:
-        if len(axis) == 1:
-            return axis.copy()
-        # half-bin edges for face placement
-        return axis
+    # Global grid index of each tetrahedron's four corners.
+    ci, cj, ck = np.meshgrid(
+        np.arange(nx - 1), np.arange(ny - 1), np.arange(nz - 1), indexing="ij"
+    )
+    base = np.stack([ci.ravel(), cj.ravel(), ck.ravel()], axis=1)
+    corner_ids = []
+    for di, dj, dk in _CUBE_CORNERS:
+        corner_ids.append(
+            ((base[:, 0] + di) * ny + (base[:, 1] + dj)) * nz + (base[:, 2] + dk)
+        )
+    corner_ids = np.stack(corner_ids, axis=1)
+    tets = corner_ids[:, _CUBE_TETS].reshape(-1, 4)
+    inside = flat[tets] >= level
+    count = inside.sum(axis=1)
+    keep = (count > 0) & (count < 4)
+    tets, inside, count = tets[keep], inside[keep], count[keep]
+    if len(tets) == 0:
+        return empty
+    # Outside corners first, then inside ones.
+    order = np.argsort(inside, axis=1, kind="stable")
+    v = np.take_along_axis(tets, order, axis=1)
 
-    def half_step(axis: np.ndarray) -> float:
-        if len(axis) < 2:
-            return 1.0
-        return float(np.median(np.diff(axis)) * 0.5)
+    edges = []  # (corner p, corner q, inside corner) per triangle, three edges each
+    one = count == 1  # [o, o, o, i]
+    if one.any():
+        t = v[one]
+        edges.append((np.stack([t[:, [3, 3, 3]], t[:, [0, 1, 2]]], -1), t[:, 3]))
+    three = count == 3  # [o, i, i, i]
+    if three.any():
+        t = v[three]
+        edges.append((np.stack([t[:, [0, 0, 0]], t[:, [1, 2, 3]]], -1), t[:, 1]))
+    two = count == 2  # [o, o, i, i]: a quad, two triangles
+    if two.any():
+        t = v[two]
+        ac, ad, bc, bd = t[:, [2, 0]], t[:, [2, 1]], t[:, [3, 0]], t[:, [3, 1]]
+        edges.append((np.stack([ac, ad, bd], 1), t[:, 2]))
+        edges.append((np.stack([ac, bd, bc], 1), t[:, 2]))
+    tri_edges = np.concatenate([e for e, _ in edges])  # (T, 3, 2)
+    tri_inside = np.concatenate([i for _, i in edges])
 
-    hx, hy, hz = half_step(xs), half_step(ys), half_step(zs)
-    verts: list[list[float]] = []
-    faces: list[list[int]] = []
+    # One vertex per grid edge, shared by every triangle that crosses it.
+    lo = tri_edges.min(axis=2)
+    hi = tri_edges.max(axis=2)
+    keys = lo.astype(np.int64) * flat.size + hi
+    unique, faces = np.unique(keys.ravel(), return_inverse=True)
+    faces = faces.reshape(-1, 3)
+    p, q = unique // flat.size, unique % flat.size
+    fp, fq = flat[p], flat[q]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = np.where(np.abs(fq - fp) < 1e-15, 0.5, (level - fp) / (fq - fp))
+    w = np.clip(w, 0.0, 1.0)[:, None]
+    pp, qq = _grid_points(p, axes, ny, nz), _grid_points(q, axes, ny, nz)
+    verts = pp + w * (qq - pp)
 
-    def add_quad(corners: list[tuple[float, float, float]], flip: bool = False):
-        base = len(verts)
-        for c in corners:
-            verts.append([c[0], c[1], c[2]])
-        if flip:
-            faces.append([base, base + 2, base + 1])
-            faces.append([base, base + 3, base + 2])
-        else:
-            faces.append([base, base + 1, base + 2])
-            faces.append([base, base + 2, base + 3])
-
-    # 6 neighbor offsets and corresponding face corner templates in local ±half
-    neighbors = [
-        # (di,dj,dk), four corners relative (sx,sy,sz) in ±1 for the face
-        (1, 0, 0, [(1, -1, -1), (1, 1, -1), (1, 1, 1), (1, -1, 1)], False),
-        (-1, 0, 0, [(-1, -1, -1), (-1, -1, 1), (-1, 1, 1), (-1, 1, -1)], False),
-        (0, 1, 0, [(-1, 1, -1), (-1, 1, 1), (1, 1, 1), (1, 1, -1)], False),
-        (0, -1, 0, [(-1, -1, -1), (1, -1, -1), (1, -1, 1), (-1, -1, 1)], False),
-        (0, 0, 1, [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)], False),
-        (0, 0, -1, [(-1, -1, -1), (-1, 1, -1), (1, 1, -1), (1, -1, -1)], False),
-    ]
-
-    for i in range(nx):
-        for j in range(ny):
-            for k in range(nz):
-                if not solid[i, j, k]:
-                    continue
-                cx, cy, cz = float(xs[i]), float(ys[j]), float(zs[k])
-                for di, dj, dk, corners, flip in neighbors:
-                    ii, jj, kk = i + di, j + dj, k + dk
-                    outside = (
-                        ii < 0
-                        or jj < 0
-                        or kk < 0
-                        or ii >= nx
-                        or jj >= ny
-                        or kk >= nz
-                        or not solid[ii, jj, kk]
-                    )
-                    if not outside:
-                        continue
-                    # Interpolate face position toward empty neighbor for less blockiness
-                    if 0 <= ii < nx and 0 <= jj < ny and 0 <= kk < nz:
-                        va = vol[i, j, k]
-                        vb = vol[ii, jj, kk]
-                        t = 0.5 if abs(vb - va) < 1e-15 else (level - va) / (vb - va)
-                        t = float(np.clip(t, 0.0, 1.0))
-                    else:
-                        t = 0.5
-                    # Face center between voxel centers
-                    fcx = cx + di * hx * 2 * t
-                    fcy = cy + dj * hy * 2 * t
-                    fcz = cz + dk * hz * 2 * t
-                    # Build quad in the plane perpendicular to (di,dj,dk)
-                    world = []
-                    for sx, sy, sz in corners:
-                        # project local face offsets onto the face plane
-                        if di != 0:
-                            world.append(
-                                (fcx, cy + sy * hy, cz + sz * hz)
-                            )
-                        elif dj != 0:
-                            world.append(
-                                (cx + sx * hx, fcy, cz + sz * hz)
-                            )
-                        else:
-                            world.append(
-                                (cx + sx * hx, cy + sy * hy, fcz)
-                            )
-                    add_quad(world, flip=flip)
-
-    if not verts:
-        return np.zeros((0, 3), dtype=np.float64), np.zeros((0, 3), dtype=np.int32)
-    V = np.asarray(verts, dtype=np.float64)
-    F = np.asarray(faces, dtype=np.int32)
-    V = _laplacian_smooth(V, F, iterations=2)
-    return V, F
+    # Face each triangle away from its tetrahedron's inside corner.
+    tri = verts[faces]
+    normal = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    toward = _grid_points(tri_inside, axes, ny, nz) - tri.mean(axis=1)
+    flip = np.einsum("ij,ij->i", normal, toward) > 0
+    faces[flip] = faces[flip][:, [0, 2, 1]]
+    area = np.linalg.norm(normal, axis=1)
+    faces = faces[area > 1e-18]
+    return verts, faces.astype(np.int32)
 
 
-def _laplacian_smooth(
-    vertices: np.ndarray,
-    faces: np.ndarray,
-    *,
-    iterations: int = 2,
-    lambda_: float = 0.45,
-) -> np.ndarray:
-    """Relax mesh vertices toward neighbor averages (boundary-friendly)."""
-    if len(vertices) == 0 or len(faces) == 0 or iterations < 1:
-        return vertices
-    n = len(vertices)
-    # undirected adjacency
-    nbrs: list[set[int]] = [set() for _ in range(n)]
-    for a, b, c in faces:
-        for u, v in ((a, b), (b, c), (c, a)):
-            if 0 <= u < n and 0 <= v < n and u != v:
-                nbrs[u].add(int(v))
-                nbrs[v].add(int(u))
-    V = vertices.copy()
-    for _ in range(int(iterations)):
-        new = V.copy()
-        for i in range(n):
-            if not nbrs[i]:
-                continue
-            avg = V[list(nbrs[i])].mean(axis=0)
-            new[i] = (1.0 - lambda_) * V[i] + lambda_ * avg
-        V = new
-    return V
+def _padded_axis(axis: np.ndarray) -> np.ndarray:
+    """``axis`` with one more step at each end (for the padded grid)."""
+    step = float(np.median(np.diff(axis))) if len(axis) > 1 else 1.0
+    return np.concatenate([[axis[0] - step], axis, [axis[-1] + step]])
+
+
+def _grid_points(ids: np.ndarray, axes, ny: int, nz: int) -> np.ndarray:
+    k = ids % nz
+    j = (ids // nz) % ny
+    i = ids // (ny * nz)
+    return np.stack([axes[0][i], axes[1][j], axes[2][k]], axis=-1)
 
 
 def isosurface_levels(
@@ -332,7 +298,8 @@ def isosurface_levels(
     Returns
     -------
     vertices:
-        Columns x, y, z, level (numeric level id 0..L-1), colour (= level).
+        Columns x, y, z, level (the threshold, relative to the peak
+        density), colour (= level), as ggplot2's contours colour by level.
     indices:
         Triangle indices into vertices.
     used_levels:
@@ -349,7 +316,7 @@ def isosurface_levels(
     all_faces: list[np.ndarray] = []
     all_level: list[np.ndarray] = []
     v_offset = 0
-    for li, raw in enumerate(levels):
+    for raw in levels:
         thr = float(raw)
         if not absolute:
             thr = float(np.clip(thr, 0.0, 1.0)) * peak
@@ -362,7 +329,7 @@ def isosurface_levels(
         used.append(thr)
         all_verts.append(verts)
         all_faces.append(faces + v_offset)
-        all_level.append(np.full(len(verts), li, dtype=np.float64))
+        all_level.append(np.full(len(verts), thr, dtype=np.float64))
         v_offset += len(verts)
 
     if not all_verts:

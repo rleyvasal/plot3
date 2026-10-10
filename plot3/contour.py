@@ -42,6 +42,7 @@ _EDGE_LUT = np.array(
 # it cannot refine a small loop that shares the window with a long curve.
 _REFINE_SUB = 8
 _REFINE_NODE_BUDGET = 400_000
+_REFINE_GROW = 4  # rounds of refining around a curve's stray ends
 
 _contourpy_mod = None
 _contourpy_loaded = False
@@ -128,6 +129,51 @@ def _interp_t(a: np.ndarray, b: np.ndarray, level: float) -> np.ndarray:
         safe = np.where(span == 0.0, 1.0, span)
         t = np.where(span == 0.0, 0.5, (level - a) / safe)
         return np.clip(t, 0.0, 1.0)
+
+
+_ROOT_STEPS = 14  # bisection steps per crossing: 1/16384 of a fine cell
+
+
+def _edge_root(sample, fa, fb, xa, ya, xb, yb, level: float) -> np.ndarray:
+    """Where the curve crosses each edge, as a fraction from a to b.
+
+    Linear interpolation of the corner values is exact only where the
+    function crosses zero like a line. Near a double or triple root (the
+    heart ``(x^2 + y^2 - 1)^3 = x^2 y^3``) it can miss by half a cell, which
+    shows as kinks. With ``sample``, the crossing is bisected on the
+    function itself, then interpolated inside the final bracket.
+    """
+    t = _interp_t(fa, fb, level)
+    if sample is None:
+        return t
+    fa = np.asarray(fa, dtype=np.float64)
+    fb = np.asarray(fb, dtype=np.float64)
+    cross = np.isfinite(fa) & np.isfinite(fb) & ((fa >= level) != (fb >= level))
+    if not np.any(cross):
+        return t
+    xa, ya, xb, yb = (np.broadcast_to(v, fa.shape)[cross] for v in (xa, ya, xb, yb))
+    lo = np.zeros(xa.shape)
+    hi = np.ones(xa.shape)
+    flo = fa[cross] - level
+    fhi = fb[cross] - level
+    for _ in range(_ROOT_STEPS):
+        mid = 0.5 * (lo + hi)
+        fm = np.asarray(sample(xa + mid * (xb - xa), ya + mid * (yb - ya)), dtype=np.float64)
+        fm = np.broadcast_to(fm, mid.shape) - level
+        ok = np.isfinite(fm)
+        low_side = ok & ((fm >= 0) == (flo >= 0))
+        high_side = ok & ~low_side
+        lo = np.where(low_side, mid, lo)
+        flo = np.where(low_side, fm, flo)
+        hi = np.where(high_side, mid, hi)
+        fhi = np.where(high_side, fm, fhi)
+        if not ok.all():
+            break
+    with np.errstate(divide="ignore", invalid="ignore"):
+        inner = np.where(fhi != flo, -flo / (fhi - flo), 0.5)
+    out = np.array(t, dtype=np.float64, copy=True)
+    out[cross] = lo + np.clip(inner, 0.0, 1.0) * (hi - lo)
+    return out
 
 
 def _pair_segments(
@@ -367,6 +413,83 @@ def _refine_active_cells(
     _case, active, _center = _cell_cases(field, level)
     if not np.any(active):
         return []
+    lines = _refine_cells(xs, ys, active, level, sample, sub)
+    # A curve that stops inside the window left the refined cells through
+    # a cell whose corners all share a sign: a cusp, or a wedge thinner
+    # than one cell. Refine around each stray end until the curve goes on.
+    for _ in range(_REFINE_GROW):
+        if lines is None:
+            return None
+        ends = _stray_ends(lines, xs, ys)
+        if not ends:
+            break
+        grown = active.copy()
+        for x_val, y_val in ends:
+            i = int(np.clip(np.searchsorted(xs, x_val) - 1, 0, len(xs) - 2))
+            j = int(np.clip(np.searchsorted(ys, y_val) - 1, 0, len(ys) - 2))
+            grown[max(0, j - 1) : j + 2, max(0, i - 1) : i + 2] = True
+        if grown.sum() == active.sum():
+            break
+        active = grown
+        lines = _refine_cells(xs, ys, active, level, sample, sub)
+    if lines is None:
+        return None
+    gap = 2.0 * max(float(np.max(np.diff(xs))), float(np.max(np.diff(ys)))) / max(1, int(sub))
+    return _join_close_ends(lines, xs, ys, gap)
+
+
+def _stray_ends(lines, xs, ys) -> list[tuple[float, float]]:
+    """End points of open polylines that are not on the window's edge."""
+    tol_x = 1e-9 * max(1.0, abs(float(xs[-1] - xs[0])))
+    tol_y = 1e-9 * max(1.0, abs(float(ys[-1] - ys[0])))
+    out = []
+    for line in lines:
+        if len(line) < 2 or line[0] == line[-1]:
+            continue
+        for x_val, y_val in (line[0], line[-1]):
+            on_edge = (
+                abs(x_val - xs[0]) <= tol_x or abs(x_val - xs[-1]) <= tol_x
+                or abs(y_val - ys[0]) <= tol_y or abs(y_val - ys[-1]) <= tol_y
+            )
+            if not on_edge:
+                out.append((x_val, y_val))
+    return out
+
+
+def _join_close_ends(lines, xs, ys, gap: float):
+    """Join open polylines whose stray ends are within ``gap`` (a cusp tip)."""
+    lines = [list(line) for line in lines if len(line) >= 2]
+    while True:
+        stray = set(_stray_ends(lines, xs, ys))
+        ends = [
+            (a, at_end, line[-1] if at_end else line[0])
+            for a, line in enumerate(lines)
+            for at_end in (False, True)
+            if line[0] != line[-1] and (line[-1] if at_end else line[0]) in stray
+        ]
+        pair = next(
+            (
+                (p, q)
+                for k, p in enumerate(ends)
+                for q in ends[k + 1 :]
+                if (p[0], p[1]) != (q[0], q[1])
+                and np.hypot(p[2][0] - q[2][0], p[2][1] - q[2][1]) <= gap
+            ),
+            None,
+        )
+        if pair is None:
+            return lines
+        (a, a_end, _pa), (b, b_end, _pb) = pair
+        if a == b:
+            lines[a].append(lines[a][0])  # both ends of one line: close it
+            continue
+        first = lines[a] if a_end else lines[a][::-1]  # ends at the joint
+        second = lines[b] if not b_end else lines[b][::-1]  # starts at it
+        lines[a] = first + second
+        del lines[b]
+
+
+def _refine_cells(xs, ys, active, level, sample, sub):
     jj, ii = np.nonzero(active)
     sub = int(sub)
     nodes = sub + 1
@@ -389,7 +512,7 @@ def _refine_active_cells(
     fine = np.asarray(sample(xx, yy), dtype=np.float64)
     if fine.shape != xx.shape:
         fine = np.broadcast_to(fine, xx.shape).astype(np.float64, copy=False)
-    return _contour_refined(ii, jj, xs, ys, fine, xf, yf, level, sub)
+    return _contour_refined(ii, jj, xs, ys, fine, xf, yf, level, sub, sample)
 
 
 def _contour_refined(
@@ -402,6 +525,7 @@ def _contour_refined(
     yf: np.ndarray,
     level: float,
     sub: int,
+    sample=None,
 ) -> list[list[tuple[float, float]]]:
     """Marching squares on a batch of refined cells, chained by global edge id."""
     f00 = fine[:, :-1, :-1]
@@ -429,7 +553,7 @@ def _contour_refined(
     ny = int(ys.shape[0])
     h_stride = (nx - 1) * sub
     v_stride = (nx - 1) * sub + 1
-    n_horizontal = h_stride * ((ny - 1) * sub)
+    n_horizontal = h_stride * ((ny - 1) * sub + 1)  # rows of cells + 1 rows of edges
     bottom = gj * h_stride + gi
     top = (gj + 1) * h_stride + gi
     left = n_horizontal + gj * v_stride + gi
@@ -445,30 +569,18 @@ def _contour_refined(
         for edge, x_val, y_val in zip(edge_ids.tolist(), x_vals.tolist(), y_vals.tolist()):
             points[int(edge)] = (float(x_val), float(y_val))
 
-    t = _interp_t(fine[aj, lj, li], fine[aj, lj, li + 1], level)
-    put(
-        bottom,
-        xf[aj, li] + t * (xf[aj, li + 1] - xf[aj, li]),
-        yf[aj, lj],
-    )
-    t = _interp_t(fine[aj, lj, li + 1], fine[aj, lj + 1, li + 1], level)
-    put(
-        right,
-        xf[aj, li + 1],
-        yf[aj, lj] + t * (yf[aj, lj + 1] - yf[aj, lj]),
-    )
-    t = _interp_t(fine[aj, lj + 1, li], fine[aj, lj + 1, li + 1], level)
-    put(
-        top,
-        xf[aj, li] + t * (xf[aj, li + 1] - xf[aj, li]),
-        yf[aj, lj + 1],
-    )
-    t = _interp_t(fine[aj, lj, li], fine[aj, lj + 1, li], level)
-    put(
-        left,
-        xf[aj, li],
-        yf[aj, lj] + t * (yf[aj, lj + 1] - yf[aj, lj]),
-    )
+    x0, x1 = xf[aj, li], xf[aj, li + 1]
+    y0, y1 = yf[aj, lj], yf[aj, lj + 1]
+    f00, f10 = fine[aj, lj, li], fine[aj, lj, li + 1]
+    f01, f11 = fine[aj, lj + 1, li], fine[aj, lj + 1, li + 1]
+    t = _edge_root(sample, f00, f10, x0, y0, x1, y0, level)
+    put(bottom, x0 + t * (x1 - x0), y0)
+    t = _edge_root(sample, f10, f11, x1, y0, x1, y1, level)
+    put(right, x1, y0 + t * (y1 - y0))
+    t = _edge_root(sample, f01, f11, x0, y1, x1, y1, level)
+    put(top, x0 + t * (x1 - x0), y1)
+    t = _edge_root(sample, f00, f01, x0, y0, x0, y1, level)
+    put(left, x0, y0 + t * (y1 - y0))
 
     def point_of(edge: int) -> tuple[float, float]:
         return points[edge]

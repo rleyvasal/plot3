@@ -308,3 +308,21 @@ def test_streamlines_draw():
     )[0]
     assert layer.kind == "line"
     assert len(_frame(layer)) > 4
+
+
+def test_streamlines_stay_apart_and_close_orbits():
+    layers = _layers(ggplot() + geom_vector_field("dx = -y, dy = x", stream=True))
+    frame = _frame(layers[0])
+    groups = layers[0]._groups
+    pts = frame[["x", "y"]].to_numpy()
+    lines = [pts[start : start + count] for start, count in groups if count > 3]
+    assert 3 <= len(lines) <= 30
+    # Rings around the centre close on themselves instead of wrapping again.
+    closing = [np.hypot(*(line[-1] - line[0])) for line in lines]
+    assert sum(gap < 0.1 for gap in closing) >= 3
+    # No two lines run on top of each other.
+    cell = 4.0 / 10
+    for a in range(len(lines)):
+        for b in range(a + 1, len(lines)):
+            d = np.hypot(*(lines[a][:, None, :] - lines[b][None, :, :]).transpose(2, 0, 1))
+            assert d.min() > 0.35 * cell

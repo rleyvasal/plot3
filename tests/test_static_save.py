@@ -841,3 +841,37 @@ def test_3d_surface_triangles_are_stroked_to_close_seams(tmp_path):
     svg = path.read_text(encoding="utf-8")
     polygons = re.findall(r"<polygon[^>]*>", svg)
     assert polygons and all('stroke="' in poly for poly in polygons)
+
+
+def test_3d_axis_title_stays_on_the_canvas(tmp_path):
+    import re
+
+    from plot3 import geom_function, ggplot, ggsave, labs
+    from plot3.static import _real_width
+
+    out = tmp_path / "surface.svg"
+    ggsave(
+        str(out),
+        ggplot() + geom_function("z = sin(x) cos(y)", xlim=(-3, 3), ylim=(-3, 3))
+        + labs(z="a long height title"),
+        width=4, height=3.5, units="in",
+    )
+    svg = out.read_text()
+    tag = re.search(r"<text[^>]*>a long height title</text>", svg).group(0)
+    x = float(re.search(r'\bx="([-0-9.]+)"', tag).group(1))
+    size = float(re.search(r'font-size="([0-9.]+)', tag).group(1))
+    if 'text-anchor="end"' in tag:
+        x -= _real_width("a long height title", size)
+    assert x >= 0
+
+
+def test_equal_aspect_ticks_span_the_widened_window(tmp_path):
+    # coord_equal shows x from about -8 to 13 for y^2 = x^3 (data 0 to 4.6):
+    # the ticks cover what is visible instead of bunching in 0..4.
+    from plot3 import geom_function, ggplot, ggsave
+
+    out = tmp_path / "cusp.svg"
+    ggsave(str(out), ggplot() + geom_function("y^2 = x^3"), width=3, height=3, units="in")
+    svg = out.read_text()
+    assert ">10<" in svg and (">−5<" in svg or ">-5<" in svg)
+    assert ">1<" not in svg and ">3<" not in svg

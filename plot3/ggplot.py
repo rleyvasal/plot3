@@ -355,22 +355,23 @@ class ggplot:
             g.coord = other
         elif isinstance(other, stat_density_3d):
             g.stat_density_3d = other
-        elif isinstance(other, scale_x_log10):
-            g.scale_x = other
-        elif isinstance(other, scale_y_log10):
-            g.scale_y = other
+        elif isinstance(other, scale_x_log10):  # also scale_y_log10
+            g = g + _scaling.PositionScale(
+                other.axis, "continuous", name=other.name, limits=other.limits,
+                breaks=other.breaks, labels=other.labels, trans="log10",
+            )
         elif isinstance(other, _scaling._Lims):
             for part in other:
                 g = g + part
         elif isinstance(other, _scaling.PositionScale):
             if other.axis == "x":
                 g.xscale = other
-                g.scale_x = scale_x_log10() if other.trans == "log10" else (
+                g.scale_x = scale_x_log10(other.name) if other.trans == "log10" else (
                     None if other.kind == "continuous" else g.scale_x
                 )
             else:
                 g.yscale = other
-                g.scale_y = scale_y_log10() if other.trans == "log10" else (
+                g.scale_y = scale_y_log10(other.name) if other.trans == "log10" else (
                     None if other.kind == "continuous" else g.scale_y
                 )
         elif isinstance(other, _scaling.ColourScale):

@@ -515,3 +515,19 @@ def test_animated_steep_curve_is_not_clipped():
         ggplot() + geom_function("y = a x^4") + transition_time(a=(0.5, 2))
     )
     assert spec["notes"] == []
+
+
+def test_swept_letter_beside_x_and_y_needs_no_keyword():
+    from plot3 import geom_function, ggplot, slider, transition_time
+    from plot3.build import build_spec
+    from plot3.expr import ExprError
+
+    spec, _ = build_spec(
+        ggplot() + geom_function("z = sin(sqrt(x^2 + y^2) - t)", xlim=(-3, 3), ylim=(-3, 3))
+        + transition_time(t=(0, 6.28))
+    )
+    assert spec["layers"][0]["frames"]["nFrames"] > 1
+    build_spec(ggplot() + geom_function("x^2 + y^2 = r^2") + transition_time(r=(0.5, 2)))
+    build_spec(ggplot() + geom_function("x^2 + y^2 = r^2") + slider(r=(0.5, 2)))
+    with pytest.raises(ExprError, match="'t' has no value"):
+        build_spec(ggplot() + geom_function("z = x + y + t"))

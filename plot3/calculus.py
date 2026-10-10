@@ -884,35 +884,113 @@ def _arrow(x, y, dx, dy, length: float):
 
 
 def _streamlines(formula, xs, ys, cell, xlim, ylim):
-    stride = max(1, int(len(xs) / 6))
-    seeds = [
-        (float(xs[i]), float(ys[j]))
-        for j in range(0, len(ys), stride)
-        for i in range(0, len(xs), stride)
-    ]
-    step = 0.45 * cell
+    """Evenly spaced streamlines (Jobard and Lefer), one arrowhead each.
+
+    Seeds sit on the grid, centre first. Each line is traced both ways with
+    RK4 at unit speed and stops at the edge, at a zero of the field, within
+    ``0.5 * cell`` of another line, or where it meets itself (a closed
+    orbit), so lines never pile up on one another.
+    """
+    sep = cell
+    near = 0.5 * sep
+    step = 0.1 * sep
+    lag = 3.0 * sep  # arc length before a line may end on itself
+    max_steps = int(4 * ((xlim[1] - xlim[0]) + (ylim[1] - ylim[0])) / step)
+    taken: dict[tuple[int, int], list[tuple[float, float]]] = {}
+
+    def key(x, y):
+        return int(np.floor(x / near)), int(np.floor(y / near))
+
+    def crowded(grid, x, y, radius, s=None):
+        kx, ky = key(x, y)
+        for ix in (kx - 1, kx, kx + 1):
+            for iy in (ky - 1, ky, ky + 1):
+                for item in grid.get((ix, iy), ()):
+                    if (item[0] - x) ** 2 + (item[1] - y) ** 2 >= radius * radius:
+                        continue
+                    if s is None or abs(item[2] - s) > lag:
+                        return True
+        return False
+
+    def unit(x, y):
+        vx, vy = _field_at(formula, x, y)
+        mag = float(np.hypot(vx, vy))
+        if not np.isfinite(mag) or mag < 1e-12:
+            return None
+        return vx / mag, vy / mag
+
+    def trace(sx, sy, direction, own):
+        points = []
+        x, y, s = sx, sy, 0.0
+        for _ in range(max_steps):
+            k1 = unit(x, y)
+            if k1 is None:
+                break
+            k2 = unit(x + 0.5 * step * direction * k1[0], y + 0.5 * step * direction * k1[1])
+            k3 = None if k2 is None else unit(
+                x + 0.5 * step * direction * k2[0], y + 0.5 * step * direction * k2[1]
+            )
+            k4 = None if k3 is None else unit(
+                x + step * direction * k3[0], y + step * direction * k3[1]
+            )
+            if k4 is None:
+                break
+            x += step * direction * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]) / 6
+            y += step * direction * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]) / 6
+            s += direction * step
+            if not (xlim[0] <= x <= xlim[1] and ylim[0] <= y <= ylim[1]):
+                break
+            if crowded(taken, x, y, near):
+                break
+            closed = crowded(own, x, y, 0.5 * step + 1e-12, s)
+            points.append((x, y, s))
+            own.setdefault(key(x, y), []).append((x, y, s))
+            if closed:
+                break
+        return points
+
+    cx, cy = 0.5 * (xlim[0] + xlim[1]), 0.5 * (ylim[0] + ylim[1])
+    seeds = sorted(
+        ((float(x), float(y)) for y in ys for x in xs),
+        key=lambda p: (p[0] - cx) ** 2 + (p[1] - cy) ** 2,
+    )
     rows: list[tuple[float, float]] = []
     groups: list[list[int]] = []
     for sx, sy in seeds:
-        for direction in (1.0, -1.0):
-            points = [(sx, sy)]
-            x, y = sx, sy
-            for _ in range(48):
-                vx, vy = _field_at(formula, x, y)
-                mag = float(np.hypot(vx, vy))
-                if not np.isfinite(mag) or mag < 1e-12:
-                    break
-                x += direction * step * vx / mag
-                y += direction * step * vy / mag
-                if x < xlim[0] or x > xlim[1] or y < ylim[0] or y > ylim[1]:
-                    break
-                points.append((x, y))
-            if len(points) < 2:
-                continue
+        if crowded(taken, sx, sy, sep) or unit(sx, sy) is None:
+            continue
+        own: dict = {key(sx, sy): [(sx, sy, 0.0)]}
+        forward = trace(sx, sy, 1.0, own)
+        backward = trace(sx, sy, -1.0, own)
+        line = [p for p in reversed(backward)] + [(sx, sy, 0.0)] + forward
+        if len(line) * step < sep:
+            continue
+        for p in line:
+            taken.setdefault(key(p[0], p[1]), []).append(p)
+        start = len(rows)
+        rows.extend((p[0], p[1]) for p in line)
+        groups.append([start, len(line)])
+        head = _line_arrowhead(line, 0.7 * sep)
+        if head is not None:
             start = len(rows)
-            rows.extend(points)
-            groups.append([start, len(points)])
+            rows.extend(head)
+            groups.append([start, len(head)])
     return rows, groups
+
+
+def _line_arrowhead(line, size: float):
+    """A barb pair at the middle of ``line``, pointing along it."""
+    mid = len(line) // 2
+    a, b = line[max(0, mid - 1)], line[min(len(line) - 1, mid + 1)]
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    mag = float(np.hypot(dx, dy))
+    if not np.isfinite(mag) or mag == 0.0:
+        return None
+    ux, uy = dx / mag, dy / mag
+    hx, hy = line[mid][0], line[mid][1]
+    bx, by = hx - 0.4 * size * ux, hy - 0.4 * size * uy
+    wing = 0.25 * size
+    return [(bx - wing * uy, by + wing * ux), (hx, hy), (bx + wing * uy, by - wing * ux)]
 
 
 def _field_at(formula, x: float, y: float) -> tuple[float, float]:

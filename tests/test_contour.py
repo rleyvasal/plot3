@@ -351,3 +351,33 @@ def test_contour_400_is_fast(backend, monkeypatch):
     elapsed = time.perf_counter() - started
     assert lines
     assert elapsed < 0.2
+
+
+def test_cusp_curve_closes_and_never_jumps_across_the_window():
+    from plot3 import geom_function, ggplot
+    from plot3.function import expand_function
+
+    def lines(formula):
+        layer = expand_function(geom_function(formula), None, None)[0]
+        pts = layer.data_override[["x", "y"]].to_numpy()
+        return [pts[start : start + count] for start, count in layer._groups]
+
+    heart = lines("(x^2 + y^2 - 1)^3 = x^2 y^3")
+    assert len(heart) == 1
+    assert np.hypot(*(heart[0][-1] - heart[0][0])) < 1e-6  # closed at the bottom cusp
+    for line in lines("y^2 = x^3"):
+        steps = np.hypot(*np.diff(line, axis=0).T)
+        assert steps.max() < 1.0  # no segment from the top edge to the bottom one
+
+
+def test_crossings_sit_on_the_curve_at_a_triple_root():
+    # At y = 0 the heart reads (x^2 - 1)^3 = 0: linear interpolation of the
+    # cube missed the curve by half a cell there, which showed as kinks.
+    from plot3 import geom_function
+    from plot3.function import expand_function
+
+    layer = expand_function(geom_function("(x^2 + y^2 - 1)^3 = x^2 y^3"), None, None)[0]
+    x, y = layer.data_override[["x", "y"]].to_numpy().T
+    g = x**2 + y**2 - 1 - np.cbrt(x**2 * y**3)
+    near = np.abs(y) < 0.1
+    assert near.any() and np.abs(g[near]).max() < 1e-4

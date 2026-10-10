@@ -434,6 +434,14 @@ def _parse_math(
         code_tree = ast.BinOp(left=lhs_tree, op=ast.Sub(), right=rhs_tree)
         # Names only on the left still count (already in ``free``).
 
+    if len(free) > 2 and defer_missing and "x" in free and "y" in free:
+        # ``z = sin(r - t)`` or ``x^2 + y^2 = r^2``: x and y are the axes, so
+        # any other letter is a coefficient a slider or transition will
+        # sweep. Unswept ones fail at build time like any missing coefficient.
+        pending.extend(name for name in free if name not in ("x", "y"))
+        free = [name for name in free if name in ("x", "y")]
+        if mode == "explicit" and lhs_tree is None:
+            dependent = "z"
     if len(free) > 2:
         listed = ", ".join(free)
         raise ExprError(
