@@ -702,6 +702,26 @@ const stepEntries = [];
 let hoverHold = false;
 let trail = null;
 let trailId = null;
+// The clicked bubble's path: points with their frame, its name and colour.
+let trailInfo = null;
+// A click toggles a bubble's path only on the bubble itself (a little
+// slack for tiny dots), so a stray click near one draws nothing.
+function clickRadius(L, i, minimum) {
+  return L._size ? Math.max(minimum, L._size[i] * 0.55) : minimum;
+}
+function trailKey(L, i) { return String(i) + '|' + (L.ids ? L.ids[i] : ''); }
+function trailHint(L, i) {
+  return '<br><span style="opacity:.6;font-size:10px">click to ' +
+    (trailId === trailKey(L, i) ? 'hide' : 'show') + ' its path</span>';
+}
+// The frame's value (the year) for a point on the path, or '' if unknown.
+function trailYear(f) {
+  const tr = S.transition;
+  if (!tr || !tr.times || !trailInfo || tr.times.length !== trailInfo.nF) return '';
+  const v = tr.times[f];
+  if (tr.integer) return String(Math.round(+v));
+  return typeof v === 'number' ? fmt(v) : String(v);
+}
 function framePresent(F, i) {
   if (!F.x || !F.x.maskData || !F.x.maskData[i]) return false;
   if (!F.y || !F.y.maskData || !F.y.maskData[i]) return false;
@@ -1167,6 +1187,7 @@ function clearTrail() {
     trail = null;
   }
   trailId = null;
+  trailInfo = null;
 }
 function setTrail(L, obj) {
   clearTrail();
@@ -1208,7 +1229,18 @@ function setTrail(L, obj) {
   }
   scene.add(group);
   trail = group;
-  trailId = String(obj) + '|' + (L.ids ? L.ids[obj] : '');
+  trailId = trailKey(L, obj);
+  const pts = [];
+  for (let f = 0; f < nF; f++) {
+    const i = obj * nF + f;
+    if (!framePresent(F, i)) continue;
+    pts.push({ x: F.x.data[i], y: F.y.data[i], z: F.z ? F.z.data[i] : 0, f: f });
+  }
+  trailInfo = {
+    L: L, obj: obj, nF: nF, ext: ext, pts: pts,
+    name: L.ids && L.ids[obj] != null ? String(L.ids[obj]) : '',
+    color: 'rgb(' + rgb.map(c => Math.round(c * 255)).join(',') + ')',
+  };
 }
 let frameLabel = '';
 const axisTitleSprites = [];
@@ -2038,8 +2070,46 @@ if (!S.is3d) {
       const AY = Math.min(Math.max(Y, M.t + 12), M.t + H - 10);
       s += '<text x="' + AX + '" y="' + AY + '" fill="' + T.ink + '" text-anchor="middle" dominant-baseline="middle" font-size="12" font-weight="600" paint-order="stroke" stroke="' + T.surface + '" stroke-width="4" stroke-linejoin="round">' + plot3Esc(ann.text) + '</text>';
     }
+    if (trailInfo) s += trailLabels2D();
     svg.innerHTML = s;
     if (gridSvg) gridSvg.innerHTML = grid;
+  }
+
+  // The clicked bubble's name rides beside it; years mark its path,
+  // spaced so they do not overlap (the first and last always show).
+  function trailLabels2D() {
+    const t = trailInfo, ext = t.ext;
+    const inside = (X, Y) => X >= M.l && X <= M.l + W && Y >= M.t && Y <= M.t + H;
+    const halo = ' paint-order="stroke" stroke="' + T.surface + '" stroke-width="3" stroke-linejoin="round"';
+    // The name sits right of the bubble's current position; years keep clear.
+    const L = t.L, i = t.obj;
+    let nameBox = null, nameSvg = '';
+    if (t.name && L._x && L._y) {
+      const X = M.l + screenX(L._x[i] * ext[0]), Y = M.t + screenY(L._y[i] * ext[1]);
+      if (inside(X, Y)) {
+        const x0 = X + (L._size ? L._size[i] * 0.5 : 4) + 4;
+        nameBox = [x0 - 4, Y - 9, x0 + 7.2 * t.name.length + 4, Y + 9];
+        nameSvg = '<text x="' + x0 + '" y="' + Y + '" fill="' + t.color +
+          '" font-size="12" font-weight="700" dominant-baseline="middle"' + halo + '>' +
+          plot3Esc(t.name) + '</text>';
+      }
+    }
+    const underName = (X, Y) => nameBox && X + 5 + 26 > nameBox[0] && X + 5 < nameBox[2] &&
+      Y - 5 > nameBox[1] - 6 && Y - 5 - 10 < nameBox[3];
+    const kept = [];
+    t.pts.forEach((p, k) => {
+      const X = M.l + screenX(p.x * ext[0]), Y = M.t + screenY(p.y * ext[1]);
+      const label = trailYear(p.f);
+      if (!label || !inside(X, Y) || underName(X, Y)) return;
+      const prev = kept[kept.length - 1];
+      const near = prev && Math.hypot(X - prev.X, Y - prev.Y) < 34;
+      if (near && k !== t.pts.length - 1) return;
+      if (near && kept.length > 1) kept.pop();   // the last year wins a crowded end
+      else if (near) return;
+      kept.push({ X, Y, label });
+    });
+    return kept.map(k => '<text x="' + (k.X + 5) + '" y="' + (k.Y - 5) + '" fill="' + T.muted +
+      '" font-size="10"' + halo + '>' + plot3Esc(k.label) + '</text>').join('') + nameSvg;
   }
 
   function layout() {
@@ -2283,7 +2353,9 @@ if (!S.is3d) {
               : head
                 + fmtSpan('x', xv, xSpan) + ', '
                 + fmtSpan('y', yv, ySpan) + sizeBit;
-            consider(d, sx, sy, html, !!(L.kind === 'point' && L.frames && S.transition));
+            const moving = L.kind === 'point' && L.frames && S.transition;
+            const cr = clickRadius(L, i, 6);
+            consider(d, sx, sy, html + (moving && d <= cr * cr ? trailHint(L, i) : ''), !!moving);
           }
         }
       }
@@ -2311,14 +2383,14 @@ if (!S.is3d) {
       for (let i = 0; i < L.n; i++) {
         if (L._alpha && L._alpha[i] <= 0.04) continue;
         const sx = screenX(L._x[i]), sy = screenY(L._y[i]);
-        const rad = L._size ? Math.max(10, L._size[i] * 0.55) : 12;
+        const rad = clickRadius(L, i, 6);
         const d = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
         if (d <= rad * rad && d < hitD) { hitD = d; hit = { L, i }; }
       }
     }
+    tip.style.display = 'none';
     if (!hit) { clearTrail(); draw(); return; }
-    const key = String(hit.i) + '|' + (hit.L.ids ? hit.L.ids[hit.i] : '');
-    if (trailId === key) { clearTrail(); draw(); return; }
+    if (trailId === trailKey(hit.L, hit.i)) { clearTrail(); draw(); return; }
     setTrail(hit.L, hit.i);
     draw();
   });
@@ -2660,6 +2732,7 @@ if (!S.is3d) {
       }
     }
     hoverHold = !!(best && best[0].kind === 'point' && best[0].frames && S.transition);
+    const hoverD = bestD;
     if (!best) { tip3.style.display = 'none'; return; }
     const [L, i, sx, sy, xn, yn, zn] = best;
     const xv = fromScale('x', xn);
@@ -2687,6 +2760,10 @@ if (!S.is3d) {
         + axisPair('y', fmt(yv)) + ', '
         + axisPair('z', fmt(zv)) + sizeBit
       : head + fmt(xv) + ', ' + fmt(yv) + ', ' + fmt(zv) + sizeBit;
+    if (hoverHold) {
+      const cr = sizeAtten ? 8 : clickRadius(L, i, 8);
+      if (hoverD <= cr * cr) tip3.innerHTML += trailHint(L, i);
+    }
     plot3Typeset(tip3);
     tip3.style.left = Math.min(w - 8, sx + 12) + 'px';
     tip3.style.top = Math.max(8, sy - 10) + 'px';
@@ -2737,15 +2814,36 @@ if (!S.is3d) {
         v.project(cam);
         const sx = (v.x * 0.5 + 0.5) * w;
         const sy = (-v.y * 0.5 + 0.5) * h;
-        const rad = (L._size && !sizeAtten) ? Math.max(16, L._size[i] * 0.55) : 16;
+        const rad = sizeAtten ? 8 : clickRadius(L, i, 8);
         const d = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
         if (d <= rad * rad && d < hitD) { hitD = d; hit = { L, i }; }
       }
     }
+    tip3.style.display = 'none';
     if (!hit) { clearTrail(); return; }
-    const key = String(hit.i) + '|' + (hit.L.ids ? hit.L.ids[hit.i] : '');
-    if (trailId === key) { clearTrail(); return; }
+    if (trailId === trailKey(hit.L, hit.i)) { clearTrail(); return; }
     setTrail(hit.L, hit.i);
+    // The scene cannot move text every frame cheaply: label the path's
+    // ends, the first year, and the name with the last year.
+    if (trail && trailInfo && trailInfo.pts.length) {
+      const t = trailInfo;
+      const at = p => new THREE.Vector3(p.x * t.ext[0], p.y * t.ext[1], p.z * t.ext[2]);
+      const first = t.pts[0], last = t.pts[t.pts.length - 1];
+      const startText = trailYear(first.f);
+      if (startText) {
+        const sp = sprite(startText, true);
+        sp.center.set(-0.1, -0.2);
+        sp.position.copy(at(first));
+        trail.add(sp);
+      }
+      const endText = [t.name, trailYear(last.f)].filter(Boolean).join(' ');
+      if (endText) {
+        const sp = sprite(endText, false);
+        sp.center.set(-0.1, -0.2);
+        sp.position.copy(at(last));
+        trail.add(sp);
+      }
+    }
   });
 
   function layout() {

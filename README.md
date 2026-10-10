@@ -103,6 +103,10 @@ gapminder = pd.read_csv("https://raw.githubusercontent.com/kirenz/datasets/maste
 `{frame_time}` in the title shows the current year as it plays.
 `transition_states("phase")` steps through categories instead of time.
 
+Click a bubble to trace it: its path through every frame appears, with
+the years along it and its name (from `group=`) riding beside it as it
+plays. Click it again, or empty space, to clear it. This works in 3D too.
+
 <details>
 <summary>Run this without downloading anything (made-up gapminder-shaped data)</summary>
 

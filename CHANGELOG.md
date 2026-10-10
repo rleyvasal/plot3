@@ -4,6 +4,16 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- Clicking a bubble in an animation traces its path, as before, and now
+  labels it: the years along the path, and the bubble's name (its `group=`
+  value) beside it as it moves; in 3D the path's ends are labelled. The
+  tooltip says "click to show its path" (or hide), and only a click on the
+  bubble itself counts, so a stray click near a small dot draws nothing.
+
 ## 0.6.4 — 2026-10-09
 
 Legends no longer cover short plots.
