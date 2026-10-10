@@ -3953,8 +3953,9 @@ html,body{{margin:0;height:100%;background:{theme["surface"]};color:{theme["ink"
   border:1px solid {theme["axis"]};border-radius:6px;overflow:hidden;
   background:{theme["surface"]}}}
 .plab{{padding:4px 8px;font-size:11px;color:{theme["ink2"]};
+  background:{theme.get("strip") or "transparent"};
   border-bottom:1px solid {theme["grid"]}}}
-.cstrip,.rstrip{{background:{theme["grid"]};color:{theme["ink2"]};font-size:11px;
+.cstrip,.rstrip{{background:{theme.get("strip") or theme["grid"]};color:{theme["ink2"]};font-size:11px;
   font-weight:600;display:flex;align-items:center;justify-content:center;border-radius:4px}}
 .rstrip span{{writing-mode:vertical-rl}}
 .panel iframe{{flex:1;width:100%;border:0;background:{theme["surface"]}}}

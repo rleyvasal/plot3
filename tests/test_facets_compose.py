@@ -209,3 +209,18 @@ def test_facet_legend_position_none_hides_the_figure_legend(tmp_path):
     shown = tmp_path / "shown.svg"
     ggsave(str(shown), ggplot(_facet_frame(), aes(x="x", y="y", colour="g")) + geom_point() + facet_wrap("g"))
     assert shown.read_text().count(">a<") > out.read_text().count(">a<")  # legend key too
+
+
+def test_facet_strips_are_grey85_in_ggplot2_themes(tmp_path):
+    # ggplot2 theme_grey / theme_bw: strips are grey85, not the grid colour
+    # (white in theme_grey, which made them invisible).
+    from plot3 import aes, facet_wrap, geom_point, ggplot, ggsave, theme_dark, theme_grey
+    from plot3.build import build_doc
+
+    base = ggplot(_facet_frame(), aes(x="x", y="y")) + geom_point() + facet_wrap("g")
+    for theme, colour in ((theme_grey(), "#d9d9d9"), (None, "#d9d9d9"), (theme_dark(), "#1c2742")):
+        fig = base + theme if theme is not None else base
+        out = tmp_path / "f.svg"
+        ggsave(str(out), fig)
+        assert colour in out.read_text().lower()
+    assert "#d9d9d9" in build_doc(base + theme_grey()).lower()

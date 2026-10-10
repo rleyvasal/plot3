@@ -650,7 +650,9 @@ def _draw_facets(panels, layout, first_spec, theme, width, height, base_pt, comm
         0, 0, width, height, commands,
     )
     pad = 8.0
-    strip_bg = theme.get("grid") or "#1c2742"
+    # ggplot2's facet strips are grey85 in theme_grey and theme_bw; other
+    # themes fall back to the grid colour.
+    strip_bg = theme.get("strip") or theme.get("grid") or "#1c2742"
     ink2 = theme.get("ink2") or theme.get("ink") or "#ffffff"
     raw_labs = first_spec.get("labs") or {}
     x_title = _with_frame(raw_labs.get("x") or "", label)

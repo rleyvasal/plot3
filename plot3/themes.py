@@ -53,7 +53,7 @@ _THEMES = {
     "bw": dict(
         surface="#ffffff", ink="#000000", ink2="#222222", muted="#4d4d4d",
         grid="#ebebeb", axis="#333333", cat=_CAT_LIGHT, seq=_SEQ,
-        frame="box",
+        frame="box", strip="#d9d9d9",
     ),
     # ggplot2 theme_classic: white page, no grid, black axis lines.
     "classic": dict(
@@ -78,7 +78,7 @@ _THEMES = {
     "grey": dict(
         surface="#ffffff", panel="#ebebeb", ink="#000000", ink2="#000000",
         muted="#4d4d4d", grid="#ffffff", axis="#ebebeb", cat=_CAT_LIGHT, seq=_SEQ,
-        frame="none",
+        frame="none", strip="#d9d9d9",
     ),
     # ggplot2 theme_linedraw: white panel, thin dark grid, black border.
     "linedraw": dict(

@@ -4,6 +4,14 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- Facet strips are ggplot2's grey85 in `theme_grey()` and `theme_bw()`
+  (saved files' default), in the viewer and in saved files. Under
+  `theme_grey()` they took the white grid colour and disappeared.
+
 ## 0.6.0 — 2026-10-09
 
 Free-axis facets, dashed smoothers, and column expressions in notebook aes().
