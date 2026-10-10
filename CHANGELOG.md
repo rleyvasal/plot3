@@ -4,7 +4,9 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.6.4 — 2026-10-09
+
+Legends no longer cover short plots.
 
 ### Fixed
 
