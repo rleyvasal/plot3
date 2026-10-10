@@ -1,353 +1,114 @@
 # plot3
 
-ggplot2's grammar of graphics for Python, drawn with WebGL (three.js) in the
-notebook and saved as journal-ready PNG, SVG, or PDF.
+**ggplot2 for Python, plus what ggplot2 can't do: interactive 3D, animated
+data, and plots typed straight from an equation.** Figures render with WebGL
+in the notebook and save as journal-ready PNG, SVG, or PDF.
 
-```python notest
-ggplot(df, aes(x="dose", y="response", colour="arm")) + geom_point() + geom_smooth(method="lm")
-```
-
-- **ggplot2 grammar**: `+` layers, `aes()`, geoms, stats, scales, facets,
-  themes, and `ggsave()`, with ggplot2's defaults and names.
-- **Interactive 2D and 3D**: pan, zoom, hover, click a legend entry to hide
-  it, orbit 3D point clouds and surfaces, play animations, drag sliders.
-- **Publication output**: `ggsave("fig.pdf", p, width=3.5, height=2.6,
-  units="in")` with real fonts, 300 dpi metadata, and `theme_bw` by default.
-- **Maths built in**: plot `"y = x^2 + 1"`, implicit equations, surfaces,
-  densities (`dbeta`, `dnorm`), probability areas, tangents, and LaTeX.
-- **Your data as it is**: pandas, Polars, tidy3, or NumPy arrays, locally
-  or on a remote GPU kernel (CRAFT / SolveIt).
-
-Contents: [Install](#install) · [Quick start](#quick-start) ·
-[Statistical plots](#statistical-plots) · [Annotation](#annotation) ·
-[Scales](#scales) · [Themes and titles](#themes-and-titles) ·
-[Facets and multi-panel figures](#facets-and-multi-panel-figures) ·
-[Saving for a paper](#saving-for-a-paper) · [Functions and maths](#functions-and-maths) ·
-[Animation and sliders](#animation-and-sliders) · [3D](#3d-and-point-clouds) ·
-[Notebooks, SolveIt, CRAFT](#notebooks-solveit-and-craft) ·
-[API reference](#api-reference) · [Differences from ggplot2](#differences-from-ggplot2)
-
-## Install
+<table>
+<tr>
+<td width="50%"><img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/gapminder.gif" alt="Gapminder: life expectancy against GDP per capita, animated from 1952 to 2007"></td>
+<td width="50%"><img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/lidar.gif" alt="A lidar driving scene with detection boxes, orbiting"></td>
+</tr>
+<tr>
+<td><sub><code>+ transition_time("year")</code>: gapminder in one line</sub></td>
+<td><sub><code>geom_point3d()</code> + <code>geom_box3d()</code>: a 220k-point lidar sweep with detection boxes</sub></td>
+</tr>
+<tr>
+<td><img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/ripple.gif" alt="An animated ripple surface z = sin(r - t)"></td>
+<td><img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/beta_slider.gif" alt="A beta density reshaping as two sliders move"></td>
+</tr>
+<tr>
+<td><sub><code>geom_function("z = sin(sqrt(x^2 + y^2) - t)") + transition_time(t=(0, 6.28))</code></sub></td>
+<td><sub><code>geom_function("y = dbeta(x, a, b)") + slider(a=…, b=…)</code></sub></td>
+</tr>
+</table>
 
 ```bash
 pip install "plot3[jupyter,export]"
 ```
 
-The latest unreleased code installs straight from GitHub:
+Contents: [Plot an equation](#plot-an-equation) ·
+[Animate your data](#animate-your-data) · [3D and point clouds](#3d-and-point-clouds) ·
+[One figure, two outputs](#one-figure-two-outputs) · [It's ggplot2](#its-ggplot2) ·
+[Notebooks, SolveIt, CRAFT](#notebooks-solveit-and-craft) · [Install](#install) ·
+[Full reference](docs/reference.md)
 
-```bash
-pip install "plot3[jupyter,export] @ git+https://github.com/rleyvasal/plot3"
-```
+## Plot an equation
 
-To work on plot3 itself:
-
-```bash
-git clone https://github.com/rleyvasal/plot3 && cd plot3
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev,jupyter,export]"
-```
-
-| Extra | Adds |
-|---|---|
-| `export` | `cairosvg`: PNG with real fonts and PDF. Needs the Cairo C library (`brew install cairo`, `apt install libcairo2`). SVG needs nothing. |
-| `fast` | `contourpy`: faster implicit-curve contours (matplotlib users have it) |
-| `jupyter` | IPython integration (bare column names, `%plot3`) |
-| `polars` | Polars tables |
-
-Python 3.10 or newer; NumPy and pandas are the only required packages.
-
-## Quick start
-
-The examples below share this data:
+Write the maths as you would on paper. `geom_function` works out whether
+it's a curve, an implicit shape, a region, or a 3D surface, and picks a
+sensible window.
 
 ```python
-import numpy as np
-import pandas as pd
 from plot3 import *
 
-rng = np.random.default_rng(1)
-trial = pd.DataFrame({
-    "arm": rng.choice(["placebo", "low", "high"], 150),
-    "sex": rng.choice(["F", "M"], 150),
-    "dose": rng.uniform(0, 10, 150),
-})
-trial["response"] = (2 + 0.6 * trial.dose + 1.5 * (trial.arm == "high")
-                     + rng.normal(0, 1.2, 150))
-sales = pd.DataFrame({"month": pd.date_range("2021-01-01", periods=36, freq="MS")})
-sales["units"] = 100 + np.cumsum(rng.normal(1, 4, 36))
-sales["lo"], sales["hi"] = sales.units - 8, sales.units + 8
+(ggplot() + geom_function("y = sin(x)", xlim=(-4, 4))                        # a function and
+ + geom_function("y = x - x^3/6", xlim=(-4, 4)))                            # its Taylor polynomial
+ggplot() + geom_function("(x^2 + y^2 - 1)^3 = x^2 y^3")                     # implicit: a heart
+ggplot() + geom_function("y > x^2", xlim=(-2, 2))                           # shaded region
+ggplot() + geom_function("r = 1 + cos(theta)") + coord_polar()              # polar cardioid
+ggplot() + geom_function(r"z = \frac{\sin\sqrt{x^2+y^2}}{\sqrt{x^2+y^2}}",  # LaTeX in, 3D sombrero out
+                         xlim=(-10, 10), ylim=(-10, 10))
+ggplot() + geom_vector_field("dx = y, dy = -sin(x) - 0.3y",                # a damped pendulum's
+                          xlim=(-6, 6), ylim=(-3, 3), stream=True)          # phase portrait
 ```
 
-A plot is data, an aesthetic mapping, and layers:
+<p>
+<img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/fn_taylor.png" width="15%" alt="sin(x) and its Taylor polynomial">
+<img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/fn_heart.png" width="15%" alt="Implicit heart curve">
+<img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/fn_region.png" width="15%" alt="Shaded region y > x^2">
+<img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/fn_cardioid.png" width="15%" alt="Polar cardioid">
+<img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/fn_sombrero.png" width="15%" alt="3D sombrero surface">
+<img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/fn_streamlines.png" width="15%" alt="Streamlines of a damped pendulum">
+</p>
 
-```python
-p = (ggplot(trial, aes(x="dose", y="response", colour="arm"))
-     + geom_point(alpha=0.7)
-     + geom_smooth(method="lm")
-     + labs(title="Response by dose", x="Dose (mg)", y="Response"))
-```
-
-In a notebook, `p` on its own line displays the interactive figure. Save it:
-
-```python notest
-ggsave("response.pdf", p, width=3.5, height=2.6, units="in")   # vector, journal column
-ggsave("response.png", p, width=7, height=4, units="in", dpi=300)
-ggsave("response.html", p)                                      # interactive page
-```
-
-In notebooks, bare column names work too: `aes(x=dose, y=response)`.
-Plain `.py` files use strings, as above.
-
-## Statistical plots
-
-```python
-# Distributions
-ggplot(trial, aes(x="response", fill="sex")) + geom_histogram(bins=20)            # stacked by group
-(ggplot(trial, aes(x="response", y="after_stat(density)"))                         # density scale
- + geom_histogram(bins=20) + geom_density())
-ggplot(trial, aes(x="response", fill="arm")) + geom_density(alpha=0.4)
-ggplot(trial, aes(x="arm", y="response")) + geom_boxplot(outliers=False) + geom_jitter(width=0.15, height=0)
-ggplot(trial, aes(x="arm", y="response", fill="arm")) + geom_violin()
-ggplot(trial, aes(x="response", colour="arm")) + stat_ecdf()
-ggplot(trial, aes(sample="response")) + geom_qq() + geom_qq_line()
-
-# Counts and proportions
-ggplot(trial, aes(x="arm", fill="sex")) + geom_bar()                     # stacked
-ggplot(trial, aes(x="arm", fill="sex")) + geom_bar(position="dodge")     # side by side
-ggplot(trial, aes(x="arm", fill="sex")) + geom_bar(position="fill")      # shares
-
-# Means with uncertainty
-(ggplot(trial, aes(x="arm", y="response", fill="sex"))
- + stat_summary(fun_data="mean_se", geom="col", position="dodge")
- + stat_summary(fun_data="mean_cl_normal", geom="errorbar", position="dodge", width=0.3))
-
-# Trends and time series
-ggplot(trial, aes(x="dose", y="response")) + geom_point() + geom_smooth()        # loess + 95% band
-(ggplot(sales, aes(x="month", y="units"))
- + geom_ribbon(aes(ymin="lo", ymax="hi"), alpha=0.25) + geom_line())
-```
-
-| Need | Use |
-|---|---|
-| Error bars from your own columns | `geom_errorbar(aes(ymin="mean - se", ymax="mean + se"))`, `geom_pointrange`, `geom_linerange`, `geom_crossbar`, `geom_errorbarh(aes(xmin=, xmax=))` |
-| Summaries | `stat_summary(fun_data="mean_se" / "mean_cl_normal" / "mean_sdl" / "median_hilow")` |
-| Heatmaps | `geom_tile(aes(x=, y=, fill=))` (or `geom_raster`), with `geom_text(aes(label=))` |
-| Stacked areas | `geom_area(aes(fill=))`, `position="fill"` for shares |
-| Steps, segments, rectangles | `geom_step()`, `geom_segment(aes(xend=, yend=), arrow=arrow())`, `geom_rect(aes(xmin=, xmax=, ymin=, ymax=))` |
-| Horizontal layout | `+ coord_flip()` (bars, boxplots, densities, error bars) |
-| Several datasets | `geom_rect(aes(...), data=periods)`: any layer can bring its own data |
-| Points over grouped boxes | `geom_boxplot(aes(colour="sex"), outliers=False) + geom_point(position=position_jitterdodge())` |
-| Labels beside points | `geom_text(position=position_nudge(y=0.3))`, or `nudge_y=` |
-| Shapes and maps | `geom_polygon(aes(group="id", fill="region"))`, concave shapes included |
-| Frequency lines | `geom_freqpoly(aes(colour="arm"), binwidth=0.5)` |
-| Big scatters, 2D distributions | `geom_hex()`, `geom_bin_2d()`, `geom_count()`, `geom_density_2d()`, `geom_density_2d_filled()`, `stat_ellipse()` (95% by group) |
-| Contours of a grid | `geom_contour(aes(x=, y=, z=))` |
-
-`aes()` reads expressions over your columns, as ggplot2 does:
-`aes(ymin="mean - se")`, `aes(y="log10(count)")`, `aes(colour="factor(cyl)")`,
-`aes(colour="dose > 5")`, `aes(label="round(estimate, 2)")`. They use `+ - * /
-^`, comparisons, and `log`, `log10`, `log2`, `exp`, `sqrt`, `abs`, `round`,
-`floor`, `ceiling`, `factor`, `as.numeric`, `ifelse`, `pmin`, `pmax`, `mean`,
-`median`, `sd`, `min`, `max`, `sum`; nothing else runs. The expression names
-the axis or legend.
-
-Rows with missing values are dropped, and plot3 says so: *Removed 3 rows
-containing missing values (geom_point)*.
-
-## Annotation
-
-```python
-(ggplot(trial, aes(x="dose", y="response"))
- + geom_point()
- + geom_hline(yintercept=5, linetype="dashed")
- + geom_vline(xintercept=[2, 8], colour="firebrick")
- + geom_abline(slope=0.6, intercept=2)
- + annotate("rect", xmin=2, xmax=8, ymin=0, ymax=12)
- + annotate("label", x=9, y=1, label="safe range")
- + annotate("segment", x=1, y=10, xend=3, yend=8, arrow=arrow()))
-
-means = trial.groupby("arm", as_index=False).response.mean()
-(ggplot(means, aes(x="arm", y="response", label="response"))
- + geom_col() + geom_text(nudge_y=0.4))     # numbers print to 4 significant figures
-```
-
-`geom_text` / `geom_label` take `size` in millimetres (ggplot2's 3.88 mm
-default), `hjust`, `vjust`, `nudge_x`, `nudge_y`, `fontface`, and
-`check_overlap`. Line types are `"solid"`, `"dashed"`, `"dotted"`,
-`"dotdash"`, `"longdash"`, `"twodash"`, R's numbers, or hex such as `"44"`.
-
-Map more aesthetics: `aes(shape=)` (circle, triangle, square, diamond, plus,
-cross), `aes(linetype=)`, `aes(size=)` (area), `aes(fill=)` for filled shapes
-and `aes(colour=)` for points and lines.
-
-## Scales
-
-```python
-(ggplot(trial, aes(x="dose", y="response", colour="arm"))
- + geom_point()
- + scale_x_continuous("Dose (mg)", breaks=[0, 2.5, 5, 7.5, 10])
- + scale_y_continuous(limits=(0, None))
- + scale_colour_manual(values={"placebo": "grey50", "low": "#56B4E9", "high": "#D55E00"},
-                       breaks=["placebo", "low", "high"],
-                       labels=["Placebo", "Low dose", "High dose"], name="Arm"))
-
-(ggplot(sales, aes(x="month", y="units"))
- + geom_line()
- + scale_x_date(date_breaks="6 months", date_labels="%b %Y")
- + scale_y_continuous(labels="dollar"))
-```
-
-| Scale | Functions |
-|---|---|
-| Position | `scale_x_continuous(name, limits, breaks, labels, trans="log10"/"reverse")`, `scale_x_discrete(limits, labels)`, `scale_x_date(date_breaks, date_labels)`, `scale_x_log10`, `scale_x_reverse`, `xlim`, `ylim`, `lims` (and the `y` versions) |
-| Label formats | `"percent"`, `"comma"`, `"dollar"`, `"scientific"`, `"{:.1f} kg"`, a list, or a function |
-| Discrete colour / fill | `scale_colour_hue` (ggplot2's default colours), `scale_colour_manual`, `scale_colour_brewer(palette="Set2")`, `scale_colour_viridis_d`, `scale_colour_grey`, `scale_colour_okabe_ito` (colour-blind safe), `scale_colour_identity` (the column holds colours) |
-| Continuous colour / fill | `scale_colour_gradient(low, high)`, `scale_colour_gradient2(low, mid, high, midpoint)`, `scale_colour_gradientn(colours, values)`, `scale_colour_distiller(palette="RdBu")`, `scale_colour_viridis_c`, `scale_colour_continuous(trans="log10")` |
-| Size / alpha | `scale_size(range=(4, 23))` (by area across the data's range, as ggplot2), `scale_size_area(max_size=)` (area from zero), `scale_alpha(range=(0.1, 1))` for `aes(alpha=)` |
-| Shape / linetype | `scale_shape_manual`, `scale_linetype_manual` |
-| Limits | `expand_limits(y=0)` makes an axis reach a value with no data there |
-
-Every colour scale has `scale_fill_*` and `scale_color_*` names. Colours can
-be CSS names (`"steelblue"`), R greys (`"grey50"`), `"rgb(1,2,3)"`, or hex.
-Limits on a continuous axis drop the rows outside them and say how many.
-
-## Themes and titles
-
-```python
-(ggplot(trial, aes(x="arm", y="response", fill="arm"))
- + geom_boxplot()
- + labs(title="Response", subtitle="150 patients", caption="Source: simulated", tag="A")
- + theme_classic()
- + theme(legend_position="none", axis_text_x_angle=45, plot_title_hjust=0.5))
-```
-
-Themes: `theme_bw` (default for saved files), `theme_classic`,
-`theme_minimal`, `theme_void` (the data alone), `theme_light`, `theme_dark`
-(default in the interactive viewer), and `theme_lidar` (driving scenes). Each takes `base_size` (points) and `base_family`. `theme()` sets
-`legend_position` (`"right"`, `"bottom"`, `"none"`, or `(x, y)` inside the
-panel), `legend_title=False`, `panel_grid=False`, `axis_text_x_angle`,
-`plot_title_hjust`, `base_size`, and `base_family`. `theme_grey` (ggplot2's
-grey panel) and `theme_linedraw` are there too.
-
-ggplot2's elements work, with R's dotted names or underscores:
-
-```python
-(ggplot(trial, aes(x="arm", y="response")) + geom_boxplot() + theme_bw()
- + theme(**{"axis.text.x": element_text(angle=45), "panel.grid": element_blank(),
-            "plot.title": element_text(hjust=0.5),
-            "panel.background": element_rect(fill="grey95")}))
-```
-
-`element_blank()` hides axis text, axis titles, the grid, the panel border,
-or the legend title; colours in `element_text`, `element_line`, and
-`element_rect` recolour text, grid, border, and backgrounds. Parts plot3
-does not draw (minor grid, tick length) are accepted, and anything else it
-cannot draw warns.
-
-`ggtitle("Response", subtitle=)`, `xlab()`, and `ylab()` are shortcuts for
-`labs()`. `guides(colour="none")` hides one legend (also `fill`, `size`,
-`shape`, `linetype`) and keeps the others;
-`guides(colour=guide_legend(title="Arm", reverse=True))` retitles or
-reorders it. The `stat_*` spellings (`stat_smooth`, `stat_bin`,
-`stat_count`, `stat_density`, `stat_function(fun=, args=)`) work too.
-
-Zoom without dropping data with `coord_cartesian`: a smoother or boxplot is
-still computed from every row, while `xlim()` and `scale_x_continuous(limits=)`
-remove the rows outside first.
-
-```python
-(ggplot(trial, aes(x="dose", y="response"))
- + geom_point() + geom_smooth(method="lm") + geom_rug(alpha=0.4)
- + coord_cartesian(xlim=(2, 6)))
-```
-
-## Facets and multi-panel figures
-
-```python
-ggplot(trial, aes(x="dose", y="response")) + geom_point() + facet_wrap("arm")
-ggplot(trial, aes(x="dose", y="response")) + geom_point() + facet_wrap("arm", labeller="label_both")
-ggplot(trial, aes(x="dose", y="response")) + geom_point() + facet_wrap(vars("arm"))
-(ggplot(trial, aes(x="dose", y="response", colour="arm"))
- + geom_point() + facet_grid("sex ~ arm"))                # rows ~ columns
-
-a = ggplot(trial, aes(x="dose", y="response", colour="arm")) + geom_point()
-b = ggplot(trial, aes(x="arm", y="response", fill="arm")) + geom_boxplot() + theme(legend_position="none")
-c = ggplot(sales, aes(x="month", y="units")) + geom_line()
-fig = ((a | b) / c) + plot_annotation(title="Overview", tag_levels="A")
-fig2 = (a | b) + plot_layout(widths=[2, 1])
-```
-
-Facet panels share scales, colours, one legend, and one pair of axis titles,
-as in ggplot2. `|` puts plots side by side, `/` stacks them, and
-`tag_levels` is `"A"`, `"a"`, `"1"`, or `"I"`. Save a composed figure with
-`ggsave` like any plot.
-
-## Saving for a paper
-
-```python notest
-ggsave("fig1.pdf", p, width=3.5, height=2.6, units="in")             # one column
-ggsave("fig1.png", p, width=7, height=4.5, units="in", dpi=300)       # two columns
-ggsave("fig1.svg", p, width=18, height=12, units="cm", fontsize=9, family="Arial")
-```
-
-- PNG, SVG, and PDF draw the same picture with real fonts. PNGs carry their
-  DPI, so Word and journal portals size them correctly.
-- Saved files use `theme_bw` unless you add a theme.
-- Crowded category labels turn or thin automatically; set
-  `theme(axis_text_x_angle=)` to choose.
-- Non-Latin text (東京, 서울, ✓) uses an installed font that has the glyphs.
-- Notes such as *Removed 3 rows…* are printed, not drawn; `notes=True` draws them.
-- Without the `export` extra, `.svg` works everywhere and `.png` falls back to
-  a built-in bitmap font.
-
-The interactive viewer also has a **Save** button (HTML, SVG, PNG, video for
-animations, copy to clipboard).
-
-## Functions and maths
-
-`geom_function` plots a formula with the same grammar as data. `^` is power
-and `2x` means `2*x`.
-
-```python
-ggplot() + geom_function("y = 2x + 2")
-ggplot() + geom_function("y = a x^2 + b x + c", a=2, b=-3, c=1)    # coefficients at the end
-ggplot() + geom_function("x^2 + y^2 = 1")                          # implicit: a round circle
-ggplot() + geom_function("z = sin(x) cos(y)", xlim=(-3, 3), ylim=(-3, 3))   # 3D surface, coloured by height
-ggplot() + geom_function(r"y = \frac{\sin x}{x}")                  # LaTeX input
-ggplot() + geom_function("r = 1 + cos(theta)") + coord_polar()
-ggplot() + geom_function("y > x^2")                                # shaded region
-ggplot(trial, aes(x="dose", y="response")) + geom_point() + geom_function("y = 2 + 0.6x")
-```
-
-Distributions and probability areas (no SciPy needed):
+**Probability and calculus, with the answer printed.** No SciPy needed:
 
 ```python
 inf = float("inf")
-ggplot() + geom_function("y = dbeta(x, 2, 5)") + area(0.2, 0.5)            # P(0.2 ≤ X ≤ 0.5) = 0.546
+ggplot() + geom_function("y = dbeta(x, 2, 5)") + area(0.2, 0.5)          # labels P(0.2 ≤ X ≤ 0.5) = 0.546
 ggplot() + geom_function("y = dnorm(x)") + area(-inf, -1.96) + area(1.96, inf)
-ggplot() + geom_function("y = dt(x, 3)") + area(2.353, inf)               # P(X ≥ 2.353) = 0.05
 ggplot() + geom_function("y = x^3 - 3x") + tangent(at=1) + derivative()
 ```
 
-Formulas know `sin cos tan exp log ln sqrt abs floor ceil gamma lgamma beta
-erf erfc`, the densities `dnorm dbeta dt dchisq dgamma dexp dunif dlnorm`, and
-`pnorm qnorm pt qt pbeta pexp punif`. A density opens on its own support
-(`dbeta` on [0, 1]). Poles (`1/x`, `tan x`) are clipped with a note; steep but
-finite curves are not. Pass your own functions as keywords:
-`geom_function("y = damp(x) sin(3x)", damp=my_damp)`, or a lambda.
-
-## Animation and sliders
+**Turn any coefficient into a slider or an animation:**
 
 ```python
-ggplot() + geom_function("y = sin(x - t)") + transition_time(t=(0, 6.28))   # travelling wave
 ggplot() + geom_function("y = dbeta(x, a, b)") + slider(a=(0.5, 5), b=(0.5, 5))
+ggplot() + geom_function("y = sin(x - t)") + transition_time(t=(0, 6.28))   # travelling wave
 ```
 
-Data animations follow `gganimate`. With a table shaped like gapminder
-(made-up numbers here; the real data is
-`pl.read_csv("https://raw.githubusercontent.com/kirenz/datasets/master/gapminder.csv")`):
+Equations mix freely with data:
+`ggplot(df, aes(x="dose", y="response")) + geom_point() + geom_function("y = 2 + 0.6x")`.
+`^` is power and `2x` means `2*x`. All functions, densities, and rules are in
+the [reference](docs/reference.md#functions-and-maths).
+
+## Animate your data
+
+[gganimate](https://gganimate.com)'s grammar: add a transition and the plot
+plays. The viewer interpolates between frames in the browser, with play,
+pause, scrubbing, speed control, and one-click video export.
+
+```python notest
+import pandas as pd
+gapminder = pd.read_csv("https://raw.githubusercontent.com/kirenz/datasets/master/gapminder.csv")
+
+(ggplot(gapminder, aes(x="gdpPercap", y="lifeExp", size="pop", colour="continent", group="country"))
+ + geom_point(alpha=0.7)
+ + scale_x_log10()
+ + transition_time("year")
+ + labs(title="{frame_time}", x="GDP per capita", y="Life expectancy"))
+```
+
+`{frame_time}` in the title shows the current year as it plays.
+`transition_states("phase")` steps through categories instead of time.
+
+<details>
+<summary>Run this without downloading anything (made-up gapminder-shaped data)</summary>
 
 ```python
+import pandas as pd
+
 countries = {"Brazil": "Americas", "China": "Asia", "Egypt": "Africa",
              "France": "Europe", "India": "Asia", "Mexico": "Americas"}
 gapminder = pd.DataFrame([
@@ -363,53 +124,96 @@ gapminder = pd.DataFrame([
  + geom_point() + scale_x_log10() + transition_time("year") + labs(title="{frame_time}"))
 ```
 
-`{frame_time}` in a title shows the current year as the animation plays.
-
-The viewer interpolates between frames in the browser, with play, pause,
-scrubbing, speed, and video recording.
+</details>
 
 ## 3D and point clouds
 
-Map `z` on every layer for an orbit view. A point cloud with no colour of
-its own is coloured by height (viridis), as lidar viewers draw it; map
-`colour=` or set `colour="steelblue"` to change that.
+Map `z` and the plot becomes a 3D scene you can orbit, zoom, and hover.
+Hundreds of thousands of points stay smooth because they're drawn on the
+GPU.
 
-```python notest
-ggplot(lidar, aes(x="x", y="y", z="z")) + geom_point3d()      # coloured by height
+```python
+import numpy as np
 
-(ggplot(cloud, aes(x="x", y="y", z="z", colour="intensity"))
- + geom_point3d(size=0.008)
- + coord_3d(aspect="data", max_points=300_000)
- + scale_colour_viridis_c(option="turbo"))
+rng = np.random.default_rng(0)
+arm = rng.integers(0, 2, 20_000)
+r = rng.gamma(2, 1.2, 20_000)
+theta = r * 0.9 + arm * np.pi + rng.normal(0, 0.25, 20_000)
+galaxy = pd.DataFrame({"x": r * np.cos(theta), "y": r * np.sin(theta),
+                       "z": rng.normal(0, 0.15, 20_000), "r": r})
 
-ggplot(grid, aes(x="x", y="y", z="height", fill="height")) + geom_surface()
-ggplot(points, aes(x="x", y="y", z="z")) + geom_isosurface(levels=[0.2, 0.5, 0.8])
-read_bin("scan.pcd.bin")          # nuScenes-style point clouds; remote=True under CRAFT
+(ggplot(galaxy, aes(x="x", y="y", z="z", colour="r"))
+ + geom_point3d(size=0.01) + scale_colour_viridis_c(option="magma")
+ + coord_3d(elev=40) + theme_lidar() + guides(colour="none"))
 ```
 
-NumPy arrays use column positions: `ggplot(pts, aes(x=0, y=1, z=2, colour=3))`.
+<p>
+<img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/galaxy.gif" width="32%" alt="A 20,000-point spiral galaxy, orbiting">
+<img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/peaks.png" width="32%" alt="The peaks surface coloured by height">
+<img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/isosurface.png" width="32%" alt="Nested density isosurfaces of three clusters">
+</p>
 
-A driving scene, as autonomous-driving viewers draw it: points coloured by
-height on black, detection boxes by class, and a chase camera behind the car.
+Surfaces, isosurfaces, and self-driving scenes use the same grammar:
 
 ```python notest
-(ggplot(sweep, aes(x="x", y="y", z="z"))
- + geom_point3d()
- + geom_box3d(aes(length="l", width="w", height="h", angle="yaw", colour="class"),
-              data=boxes)
- + coord_3d(azim=180, elev=28, zoom=1.6)
+ggplot(grid, aes(x="x", y="y", z="height", fill="height")) + geom_surface()
+ggplot(points, aes(x="x", y="y", z="z")) + geom_isosurface(levels=[0.2, 0.5, 0.8])
+
+(ggplot(sweep, aes(x="x", y="y", z="z"))                 # a nuScenes / KITTI lidar sweep
+ + geom_point3d()                                         # coloured by height, as lidar viewers do
+ + geom_box3d(aes(length="l", width="w", height="h", angle="yaw", colour="class"), data=boxes)
+ + coord_3d(azim=180, elev=28, zoom=1.6)                 # chase camera behind the car
  + theme_lidar())
 ```
 
-`geom_box3d` takes each box's centre (`x`, `y`, `z`), its `length` along
-the heading, `width`, `height`, and the heading `angle` in radians, as
-nuScenes and KITTI store them. `coord_3d(elev=, azim=, zoom=)` sets where
-the camera starts, in degrees as matplotlib's `view_init`.
+`read_bin("scan.pcd.bin")` loads nuScenes-style point clouds, and NumPy
+arrays work by column position: `aes(x=0, y=1, z=2, colour=3)`. Camera,
+aspect, and point-budget options are in the
+[reference](docs/reference.md#api-reference) under `coord_3d`.
 
-The box keeps the data's proportions, except that a tall cloud (a helix, a
-tree) is shortened to twice its width so it does not become a thin column;
-`coord_3d(aspect="data")` keeps true proportions always, and
-`aspect="equal"` draws a cube.
+## One figure, two outputs
+
+The same object is an interactive figure in the notebook and a publication
+figure on disk, with real fonts, correct DPI metadata, and `theme_bw` by
+default.
+
+```python notest
+ggsave("fig1.pdf", p, width=3.5, height=2.6, units="in")         # vector, one journal column
+ggsave("fig1.png", p, width=7, height=4.5, units="in", dpi=300)   # two columns
+ggsave("fig1.html", p)                                            # interactive page to share
+```
+
+## It's ggplot2
+
+If you know ggplot2, you already know plot3: `+` layers, `aes()`, geoms,
+stats, scales, facets, themes, `labs()`, and patchwork's `|` and `/`, with
+ggplot2's names and defaults.
+
+```python
+rng = np.random.default_rng(1)
+trial = pd.DataFrame({"arm": rng.choice(["placebo", "low", "high"], 150),
+                      "dose": rng.uniform(0, 10, 150)})
+trial["response"] = 2 + 0.6 * trial.dose + 1.5 * (trial.arm == "high") + rng.normal(0, 1.2, 150)
+
+a = (ggplot(trial, aes(x="dose", y="response", colour="arm"))
+     + geom_point(alpha=0.7) + geom_smooth(method="lm"))
+b = (ggplot(trial, aes(x="arm", y="response", fill="arm"))
+     + geom_violin() + geom_jitter(width=0.1, height=0) + theme(legend_position="none"))
+fig = (a | b) + plot_annotation(title="Response by dose and arm", tag_levels="A")
+```
+
+<img src="https://raw.githubusercontent.com/rleyvasal/plot3/main/docs/img/ggplot2_compose.png" alt="Two-panel figure: scatter with linear fits, and violins by arm">
+
+Everything else you'd expect is there, including histograms, densities,
+boxplots, bar positions, `stat_summary`, error bars, heatmaps, hexbins, 2D
+densities, `facet_wrap` / `facet_grid`, Brewer, viridis, and Okabe–Ito
+scales, date axes, `theme()` with `element_*()`, and `coord_flip` /
+`coord_polar`. See the **[full reference](docs/reference.md)** for what
+plot3 supports and how it differs from ggplot2, or use the
+[ggplot2 docs](https://ggplot2.tidyverse.org/reference/) directly; the
+names match.
+
+In notebooks, bare column names work as in R: `aes(x=dose, y=response)`.
 
 ## Notebooks, SolveIt, and CRAFT
 
@@ -430,48 +234,31 @@ tree) is shortened to twice its width so it does not become a thin column;
 %plot3 df x=wt y=mpg color=cyl       # optional shortcut magic
 ```
 
-## API reference
+## Install
 
-| Area | Functions |
+```bash
+pip install "plot3[jupyter,export]"
+```
+
+Python 3.10 or newer; NumPy and pandas are the only required packages.
+
+| Extra | Adds |
 |---|---|
-| Figure | `ggplot(data, aes(...))`, `data >> ggplot(aes(...))`, `+`, `p.show()`, `p.save()`, `ggsave()` |
-| Aesthetics | `aes(x, y, z, colour, fill, size, shape, linetype, group, label, ymin, ymax, xmin, xmax, xend, yend, sample)` |
-| Points and lines | `geom_point`, `geom_jitter`, `geom_line`, `geom_path`, `geom_step`, `geom_segment`, `geom_text`, `geom_label` |
-| Bars and areas | `geom_col`, `geom_bar`, `geom_histogram`, `geom_freqpoly`, `geom_area`, `geom_ribbon`, `geom_rect`, `geom_tile`/`geom_raster`, `geom_polygon` |
-| Distributions | `geom_boxplot`, `geom_violin`, `geom_density`, `geom_qq`, `geom_qq_line`, `stat_ecdf`, `stat_summary` |
-| 2D distributions | `geom_bin_2d`, `geom_hex`, `geom_count`, `geom_density_2d` / `stat_density_2d`, `geom_density_2d_filled`, `geom_contour`, `stat_ellipse` |
-| Uncertainty and fits | `geom_errorbar`, `geom_errorbarh`, `geom_crossbar`, `geom_pointrange`, `geom_linerange`, `geom_smooth(method="loess"/"lm")` |
-| Reference | `geom_hline`, `geom_vline`, `geom_abline`, `geom_rug`, `annotate("text"/"label"/"rect"/"segment"/"point")` |
-| Positions | `position="stack"/"dodge"/"fill"/"identity"/"jitter"`, `position_dodge(width)`, `position_dodge2(padding)`, `position_stack()`, `position_fill()`, `position_jitter()`, `position_jitterdodge()`, `position_nudge()` |
-| Functions | `geom_function`, `geom_vector_field`, `area`, `tangent`, `derivative` |
-| Scales | see [Scales](#scales) |
-| Coordinates | `coord_cartesian`, `coord_flip`, `coord_equal` / `coord_fixed`, `coord_polar`, `coord_3d` |
-| Facets and layout | `facet_wrap`, `facet_grid`, `labeller="label_both"` / `labeller(var=dict)`, `p1 \| p2`, `p1 / p2`, `plot_layout(widths, heights, height)`, `plot_annotation` |
-| Labels and themes | `labs(title, subtitle, caption, tag, x, y, colour, fill, alpha)`, `ggtitle`, `xlab`, `ylab`, `guides`, `theme_*`, `theme()`, `element_text`, `element_line`, `element_rect`, `element_blank` |
-| Animation | `transition_time`, `transition_states`, `slider` |
-| 3D | `geom_point3d`, `geom_surface`, `geom_isosurface`, `geom_box3d`, `stat_density_3d`, `read_bin` |
+| `export` | `cairosvg`: PNG with real fonts and PDF. Needs the Cairo C library (`brew install cairo`, `apt install libcairo2`). SVG needs nothing. |
+| `fast` | `contourpy`: faster implicit-curve contours (matplotlib users have it) |
+| `jupyter` | IPython integration (bare column names, `%plot3`) |
+| `polars` | Polars tables |
 
-## Differences from ggplot2
-
-- Python needs quotes outside notebooks: `aes(x="wt")`. In Jupyter and
-  SolveIt, `aes(x=wt)` works.
-- `labs(x=None)` (or `labs(x="")`) removes a title, as ggplot2's `labs(x = NULL)`.
-- `fill` colours filled shapes; points and lines use `colour`, as in ggplot2.
-- Categories sort alphabetically (numbers numerically); use
-  `pd.Categorical` or `scale_x_discrete(limits=)` for your own order.
-- Text `size` is in millimetres, as in ggplot2; `geom_point(size=)` is in
-  pixels in 2D.
-- Saved files default to `theme_bw`, the interactive viewer to `theme_dark`.
-  On light themes, a layer with no colour of its own is drawn as ggplot2
-  draws it: black points and lines, grey bars, white boxes and violins. The
-  dark viewer uses its own blue instead.
-- Building a figure prints nothing. `PLOT3_VERBOSE=1` prints each figure's
-  size in KB, for embedding in slides or pages with a size cap.
+The latest unreleased code installs from GitHub with
+`pip install "plot3[jupyter,export] @ git+https://github.com/rleyvasal/plot3"`.
 
 ## Development
 
 ```bash
-pytest -q                       # ~670 tests, including every example in this README
+git clone https://github.com/rleyvasal/plot3 && cd plot3
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev,jupyter,export]"
+pytest -q                       # includes every example in this README and docs/reference.md
 python examples/showcase_2d.py  # 2D gallery in the browser
 python examples/showcase_3d.py  # 3D gallery
 ```

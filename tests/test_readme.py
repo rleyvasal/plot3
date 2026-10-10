@@ -1,4 +1,5 @@
-"""Every ```python block in README.md runs, and every figure it makes builds.
+"""Every ```python block in README.md and docs/reference.md runs, and every
+figure it makes builds.
 
 Blocks tagged ```python notest are skipped (notebook magics, CRAFT, files
 the reader supplies). Blocks share one namespace, in order, like a notebook.
@@ -12,11 +13,12 @@ from pathlib import Path
 
 import pytest
 
-README = Path(__file__).resolve().parents[1] / "README.md"
+ROOT = Path(__file__).resolve().parents[1]
+DOCS = [ROOT / "README.md", ROOT / "docs" / "reference.md"]
 
 
-def _blocks() -> list[tuple[int, str]]:
-    text = README.read_text(encoding="utf-8")
+def _blocks(doc: Path) -> list[tuple[int, str]]:
+    text = doc.read_text(encoding="utf-8")
     out = []
     for match in re.finditer(r"^```(python[^\n]*)\n(.*?)^```", text, re.M | re.S):
         info, body = match.group(1), match.group(2)
@@ -41,18 +43,20 @@ def _check(value) -> None:
             build_spec(value)
 
 
-def test_readme_has_examples():
-    assert len(_blocks()) >= 8
+@pytest.mark.parametrize("doc", DOCS, ids=lambda d: d.name)
+def test_doc_has_examples(doc):
+    assert len(_blocks(doc)) >= 5
 
 
-def test_readme_examples_run_and_build(capsys):
+@pytest.mark.parametrize("doc", DOCS, ids=lambda d: d.name)
+def test_doc_examples_run_and_build(doc, capsys):
     namespace: dict = {}
-    for line, body in _blocks():
+    for line, body in _blocks(doc):
         tree = ast.parse(body)
         for node in tree.body:
-            code = compile(ast.Module(body=[node], type_ignores=[]), f"README.md:{line}", "exec")
+            code = compile(ast.Module(body=[node], type_ignores=[]), f"{doc.name}:{line}", "exec")
             if isinstance(node, ast.Expr):
-                value = eval(compile(ast.Expression(node.value), f"README.md:{line}", "eval"), namespace)
+                value = eval(compile(ast.Expression(node.value), f"{doc.name}:{line}", "eval"), namespace)
                 _check(value)
                 continue
             exec(code, namespace)
