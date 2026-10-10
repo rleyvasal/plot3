@@ -4,6 +4,18 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.5.1 — 2026-10-09
+
+A fix for layers with a set colour.
+
+### Fixed
+
+- A colour set on a layer replaces the plot's colour mapping for that layer,
+  as in ggplot2. `geom_point(data=centres, colour="black")` under
+  `ggplot(aes(colour="cluster"))` draws black points (they were coloured by
+  the mapping), and its data no longer needs a `cluster` column. Filled
+  layers keep their mapped fill when `colour=` sets the outline.
+
 ## 0.5.0 — 2026-10-09
 
 Cleaner maths and 3D figures, and a README that shows them.
