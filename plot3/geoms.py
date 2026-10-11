@@ -2181,20 +2181,23 @@ class slider:
 
         ggplot() + geom_function("y = a sin(k x)") + slider(a=(0, 3), k=(1, 5))
 
-    ``steps`` defaults to 25 per parameter. A surface on the default grid
-    is too large for several parameters at that count; pass a smaller
-    ``steps`` or ``n``. Do not combine with ``transition_time()``.
+    ``steps`` defaults to 25 per parameter, lowered as far as needed for
+    the whole grid to fit (three parameters on a curve get 9). An explicit
+    ``steps`` is kept as given and refused if it is too large; pass a
+    smaller ``steps`` or ``n``. Do not combine with ``transition_time()``.
     """
 
     kind = "slider"
 
-    def __init__(self, *, steps: int = 25, **ranges):
+    def __init__(self, *, steps: int | None = None, **ranges):
         if not ranges:
             raise TypeError(
                 "slider() needs a parameter range, for example slider(a=(0, 3))"
             )
+        # Only the default shrinks to fit; an explicit count is the user's.
+        self.auto_steps = steps is None
         try:
-            nsteps = int(steps)
+            nsteps = 25 if steps is None else int(steps)
         except (TypeError, ValueError):
             raise TypeError(
                 "slider() steps= must be an integer, for example steps=25"

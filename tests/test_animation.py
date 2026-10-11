@@ -671,3 +671,33 @@ def test_swept_parameter_is_not_frozen_into_labels():
     )
     assert "t = 0" not in spec
     assert "(a = 2)" in spec  # fixed coefficients still show their value
+
+
+def test_default_slider_steps_shrink_to_fit():
+    from plot3 import geom_function
+
+    g = (
+        ggplot()
+        + geom_function("y = a*(x-h)^2 + k", xlim=(-5, 5))
+        + slider(a=(0.2, 3), h=(-3, 3), k=(-3, 3))
+    )
+    spec, _ = build_spec(g)
+    assert [p["n"] for p in spec["slider"]["params"]] == [9, 9, 9]
+    assert spec["slider"]["nFrames"] == 729
+    # The figure's own slider keeps its default for later renders.
+    assert g.slider.steps == 25
+
+
+def test_render_error_is_shown_instead_of_the_bare_repr():
+    from plot3 import geom_function
+
+    g = (
+        ggplot()
+        + geom_function("y = a x + k")
+        + slider(a=(0, 1), k=(0, 1), steps=2000)
+    )
+    bundle = g._repr_mimebundle_()
+    assert "plot3-error" in bundle["text/html"]
+    assert "smaller steps" in bundle["text/html"]
+    assert "ValueError" in bundle["text/plain"]
+    assert "smaller steps" in g._repr_html_()

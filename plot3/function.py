@@ -938,6 +938,16 @@ def _guard_slider(source: Any, n_samples: int, what: str) -> None:
     cells = int(n_samples) * n_frames
     if cells <= _SLIDER_CELL_CAP:
         return
+    if getattr(source, "auto_steps", False):
+        # Default steps: take the largest count that fits. build_spec hands
+        # each render its own copy and re-expands if this lowered it.
+        count = len(source.ranges)
+        steps = int(source.steps)
+        while steps > 2 and int(n_samples) * steps**count > _SLIDER_CELL_CAP:
+            steps -= 1
+        if int(n_samples) * steps**count <= _SLIDER_CELL_CAP:
+            source.steps = steps
+            return
     raise ValueError(
         f"slider() would sample {n_frames} frames of {n_samples} {what} "
         f"({cells} values). Pass a smaller steps= or n=."

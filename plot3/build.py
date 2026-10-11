@@ -1970,6 +1970,9 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             "slider() cannot be combined with transition_time() "
             "or transition_states()"
         )
+    if slider is not None:
+        # Default steps shrink to fit while layers expand; keep that per render.
+        slider = copy.copy(slider)
     domains = None
     if any(getattr(layer, "kind", None) == "function" for layer in layers_in):
         from plot3.function import data_domains
@@ -1978,27 +1981,35 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     addon_map: dict[int, list] = {}
     for index, addon in getattr(g, "_addons", None) or []:
         addon_map.setdefault(int(index), []).append(addon)
-    expanded = []
-    for index, geom in enumerate(layers_in):
-        layer_data = getattr(geom, "layer_data", None)
-        if getattr(geom, "kind", None) == "box3d":
-            # Box classes take the figure theme's group colours.
-            geom = copy.copy(geom)
-            geom._palette = list(theme["cat"])
-        result = expand_stat_geom(
-            geom,
-            g.mapping,
-            data if layer_data is None else layer_data,
-            domains,
-            transition,
-            slider,
-            coord,
-            addon_map.get(index),
-        )
-        if isinstance(result, list):
-            expanded.extend(result)
-        else:
-            expanded.append(result)
+    def expand_all() -> list:
+        out = []
+        for index, geom in enumerate(layers_in):
+            layer_data = getattr(geom, "layer_data", None)
+            if getattr(geom, "kind", None) == "box3d":
+                # Box classes take the figure theme's group colours.
+                geom = copy.copy(geom)
+                geom._palette = list(theme["cat"])
+            result = expand_stat_geom(
+                geom,
+                g.mapping,
+                data if layer_data is None else layer_data,
+                domains,
+                transition,
+                slider,
+                coord,
+                addon_map.get(index),
+            )
+            if isinstance(result, list):
+                out.extend(result)
+            else:
+                out.append(result)
+        return out
+
+    steps_before = getattr(slider, "steps", None)
+    expanded = expand_all()
+    if getattr(slider, "steps", None) != steps_before:
+        # A later layer lowered the default steps: every layer shares one grid.
+        expanded = expand_all()
     from plot3.calculus import mark_intersections
 
     expanded = mark_intersections(expanded)

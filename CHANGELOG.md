@@ -4,6 +4,20 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- `slider()` without `steps=` lowers its step count until the grid fits, so
+  `slider(a=..., h=..., k=...)` on a curve draws with 9 steps per parameter
+  instead of refusing. An explicit `steps=` is kept and still refused when
+  too large.
+
+### Fixed
+
+- A figure that fails to build now shows the error in the notebook output.
+  Before, hosts swallowed it and printed only `<plot3.ggplot.ggplot at 0x…>`.
+
 ## 0.6.6 — 2026-10-10
 
 Plot layers on their own lines in notebooks.

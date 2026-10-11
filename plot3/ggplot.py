@@ -42,6 +42,25 @@ from plot3.table import as_table, detect_backend
 from plot3.themes import _THEMES
 
 
+def _error_text(exc: BaseException) -> str:
+    return f"plot3 could not draw this figure.\n{type(exc).__name__}: {exc}"
+
+
+def _error_html(exc: BaseException) -> str:
+    import traceback
+
+    trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    return (
+        '<div class="plot3-error" style="border-left:4px solid #d9534f;'
+        "padding:8px 12px;font-family:ui-monospace,Menlo,monospace;"
+        'font-size:13px;white-space:pre-wrap">'
+        "<strong>plot3 could not draw this figure.</strong>\n"
+        f"{_htmlesc.escape(type(exc).__name__)}: {_htmlesc.escape(str(exc))}"
+        '<details style="margin-top:6px"><summary>Traceback</summary>'
+        f"{_htmlesc.escape(trace)}</details></div>"
+    )
+
+
 def _env_flag(name: str) -> bool | None:
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -422,7 +441,10 @@ class ggplot:
         # Used by hosts that only understand HTML reprs (and by tests).
         # Prefer ``display(fig)`` / ``fig.show()`` so VS Code can open a browser.
         self._maybe_hide_from_ai()
-        return self._iframe()
+        try:
+            return self._iframe()
+        except Exception as exc:
+            return _error_html(exc)
 
     def _repr_mimebundle_(self, include=None, exclude=None):
         """HTML plus optional PlotPayload mime for CRAFT host handoff.
@@ -435,7 +457,12 @@ class ggplot:
         from plot3.remote import MIME_PLOT3
 
         self._maybe_hide_from_ai()
-        bundle: dict = {"text/html": self._iframe()}
+        try:
+            bundle: dict = {"text/html": self._iframe()}
+        except Exception as exc:
+            # Notebook hosts swallow repr errors and fall back to the bare
+            # object repr, so the reason a plot is missing must be the output.
+            return {"text/html": _error_html(exc), "text/plain": _error_text(exc)}
         try:
             if self.facet is None and (
                 self._payload is not None or self.data is not None or self.layers
