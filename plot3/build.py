@@ -1726,7 +1726,8 @@ def _formula_legend(legend, formula_geoms, has_title: bool):
     """Tidy the legend rows that function curves add.
 
     * One curve under a title of your own: the title already names it, so
-      the curve gets no row (ggplot2 draws no legend for an unmapped layer).
+      the curve gets no row (ggplot2 draws no legend for an unmapped layer),
+      unless a tangent, derivative or other row sits beside it.
     * Several curves of one formula (a loop over ``a``): the formula moves
       to the legend title and each row lists only its values.
 
@@ -1744,7 +1745,7 @@ def _formula_legend(legend, formula_geoms, has_title: bool):
         return legend, None
     if has_title and len(formula_geoms) == 1:
         kept = [entry for entry in legend if not any(entry is p for p in primary)]
-        return kept or None, None
+        return (legend if kept else None), None
     if len(primary) < 2 or len(primary) != len(formula_geoms):
         return legend, None
     geoms = [entry["_geom"] for entry in primary]
@@ -2871,6 +2872,28 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         source = getattr(geom, "_inherit_from", None)
         if source and source in labeled:
             geom.const_color = labeled[source]
+    # Clicking a legend row hides every layer it names: a tangent's line and
+    # its point, a curve and the area shaded under it.
+    legend_keys: dict[int, str] = {}
+    key_of: dict[str, str] = {}
+    for geom, _mapped in resolved:
+        label = getattr(geom, "_legend_label", None)
+        if not label or geom.const_color is None:
+            continue
+        color_key = getattr(geom, "_color_key", None)
+        key = key_of.get(str(label)) or str(color_key or label)
+        legend_keys[id(geom)] = key
+        key_of.setdefault(str(label), key)
+        if color_key:
+            key_of.setdefault(str(color_key), key)
+    for geom, _mapped in resolved:
+        source = getattr(geom, "_inherit_from", None)
+        if id(geom) not in legend_keys and source and str(source) in key_of:
+            legend_keys[id(geom)] = key_of[str(source)]
+    # Stable short keys, so the same figure always builds the same spec.
+    stable: dict[str, str] = {}
+    for gid, key in legend_keys.items():
+        legend_keys[gid] = stable.setdefault(key, f"k{len(stable)}")
 
     payloads: list[tuple[str, str]] = []
     layer_specs = []
@@ -3362,6 +3385,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             if tip_latex:
                 tip["latex"] = str(tip_latex)
             spec_l["tip"] = tip
+        if id(geom) in legend_keys:
+            spec_l["lk"] = legend_keys[id(geom)]
         layer_specs.append(spec_l)
 
     # color spec + legend
@@ -3402,6 +3427,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             if not label or not geom.const_color:
                 continue
             entry = {"label": str(label), "color": geom.const_color}
+            if id(geom) in legend_keys:
+                entry["lk"] = legend_keys[id(geom)]
             if getattr(geom, "_is_formula", False):
                 entry["formula"] = True
                 entry["_geom"] = geom
@@ -3439,7 +3466,9 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     raw_title = g.labs.get("title") or ""
     # One function and no title of your own: the formula is the title.
     # A shaded area, a tangent, or roots stay in the legend when they
-    # have a label of their own. The curve's row would only repeat the title.
+    # have a label of their own. The curve keeps its row beside them, so the
+    # legend says which line is the curve; alone, its row would only repeat
+    # the title.
     if not str(raw_title).strip() and len(formula_geoms) == 1:
         shown = formula_geoms[0]
         # Symbolic formula, not the value list. That list stays in the legend
@@ -3456,11 +3485,11 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         elif title_latex:
             labs_math["title"] = [{"text": title, "latex": str(title_latex)}]
         if legend:
-            legend = [
+            others = [
                 entry for entry in legend
                 if not (entry.get("formula") and entry.get("label") == title)
             ]
-            if not legend:
+            if not others:
                 legend = None
     else:
         title = _take("title", raw_title)

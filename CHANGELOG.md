@@ -4,6 +4,20 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- A function curve keeps its legend row when a tangent, derivative, area or
+  other row sits beside it, so the legend says which line is the curve. Alone,
+  the curve still has no row; its formula is the title.
+
+### Fixed
+
+- Clicking a legend row of `tangent()`, `derivative()`, `geom_function()` and
+  the other formula layers now hides them, line and point together. Before,
+  the row only dimmed.
+
 ## 0.6.7 — 2026-10-11
 
 Sliders fit themselves, and a plot that fails to build says why.

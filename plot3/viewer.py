@@ -338,8 +338,14 @@ function regCat(ci, obj) {
   if (!catObjs.has(ci)) catObjs.set(ci, []);
   catObjs.get(ci).push(obj);
 }
+// legend click on a formula row (tangent, derivative, curve): row key ->
+// every three.js object its layers drew, e.g. a tangent's line and its point
+const hiddenKeys = new Set();
+const keyObjs = new Map();
+let currentLK = null;   // the key of the layer being drawn, while it draws
+function layerHidden(L) { return L.lk != null && hiddenKeys.has(L.lk); }
 let redraw = () => {};   // 2D assigns its draw(); 3D renders continuously
-window.__plot3 = { hiddenCats, catObjs };
+window.__plot3 = { hiddenCats, catObjs, hiddenKeys, keyObjs };
 function showLegendBox() {
   // theme(legend_position="none"), and all but one panel of a facet_grid.
   if (S.legendPosition === 'none') return;
@@ -414,15 +420,23 @@ if (S.legend) {
   legEl.innerHTML = (S.labs.color ? '<b style="color:'+T.ink+'">' +
       richLabel('color', S.labs.color) + '</b>' : '') +
     S.legend.map((e, i) => '<div class="lg-e" data-ci="' + (e.ci != null ? e.ci : i) +
+      (e.lk != null ? '" data-lk="' + plot3Esc(e.lk) : '') +
       '">' + keyHTML(e, e.color) +
       legendLabel(e) + '</div>').join('') + barHTML() + szHTML;
   legEl.addEventListener('click', ev => {
     const row = ev.target.closest('.lg-e');
     if (!row) return;
-    const ci = +row.dataset.ci;
-    if (hiddenCats.has(ci)) hiddenCats.delete(ci); else hiddenCats.add(ci);
-    row.style.opacity = hiddenCats.has(ci) ? 0.35 : 1;
-    for (const o of (catObjs.get(ci) || [])) o.visible = !hiddenCats.has(ci);
+    const lk = row.dataset.lk;
+    if (lk != null) {
+      if (hiddenKeys.has(lk)) hiddenKeys.delete(lk); else hiddenKeys.add(lk);
+      row.style.opacity = hiddenKeys.has(lk) ? 0.35 : 1;
+      for (const o of (keyObjs.get(lk) || [])) o.visible = !hiddenKeys.has(lk);
+    } else {
+      const ci = +row.dataset.ci;
+      if (hiddenCats.has(ci)) hiddenCats.delete(ci); else hiddenCats.add(ci);
+      row.style.opacity = hiddenCats.has(ci) ? 0.35 : 1;
+      for (const o of (catObjs.get(ci) || [])) o.visible = !hiddenCats.has(ci);
+    }
     if (window.__plot3.afterLegend) window.__plot3.afterLegend();
     tip.style.display = 'none';
     redraw();
@@ -607,6 +621,16 @@ renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setClearColor(0x000000, 0);
 host.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
+{
+  const add0 = scene.add.bind(scene);
+  scene.add = (...objs) => {
+    if (currentLK != null) {
+      if (!keyObjs.has(currentLK)) keyObjs.set(currentLK, []);
+      keyObjs.get(currentLK).push(...objs);
+    }
+    return add0(...objs);
+  };
+}
 const lineMats = [];
 
 // Point symbols (aes(shape=) / geom_point(shape=)) as white sprites tinted
@@ -1614,6 +1638,7 @@ if (!S.is3d) {
     return addToScene(...objs);
   };
   for (const L of S.layers) {
+    currentLK = L.lk != null ? L.lk : null;
     if (L.blank) continue;  // geom_blank: on the scales only
     paintOrder += 1;
     const n = L.n;
@@ -1937,6 +1962,7 @@ if (!S.is3d) {
       });
     }
   }
+  currentLK = null;
   scene.add = addToScene;
 
   function drawAxes() {
@@ -2267,6 +2293,7 @@ if (!S.is3d) {
       if (!best || score < best.score) best = { score, sx, sy, html, hold: !!hold };
     }
     for (const L of S.layers) {
+      if (layerHidden(L)) continue;
       if (L.kind === 'col') {
         // Full bar rectangle (not just the top-center point).
         const hw = (L.width || 0.08) * 0.5;
@@ -2445,6 +2472,7 @@ if (!S.is3d) {
   }
 
   for (const L of S.layers) {
+    currentLK = L.lk != null ? L.lk : null;
     if (L.blank) continue;  // geom_blank: on the scales only
     const n = L.n;
     const cols = layerColors(L, hex2rgb(T.cat[0]));
@@ -2528,6 +2556,7 @@ if (!S.is3d) {
       }
     }
   }
+  currentLK = null;
 
   // Axes box as matplotlib and plotly draw it: the three far walls with
   // grid lines, refreshed as the camera orbits. The edges at the near
@@ -2706,6 +2735,7 @@ if (!S.is3d) {
     let best = null, bestD = Infinity;
     const maxScan = 80000;
     for (const { L } of pickLayers) {
+      if (layerHidden(L)) continue;
       const n = L._stepN != null ? L._stepN : L.n;
       const step = n > maxScan ? Math.ceil(n / maxScan) : 1;
       const xs = L._x || L.x.data;

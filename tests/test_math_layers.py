@@ -13,6 +13,7 @@ from plot3 import (
     geom_vector_field,
     ggplot,
     ggsave,
+    labs,
     slider,
     tangent,
 )
@@ -132,6 +133,39 @@ def test_tangent_at_one_has_slope_two():
         ggplot() + geom_function("y = x^2", xlim=(-2, 4), n=21) + tangent(at=1)
     )
     assert any(entry["label"] == "tangent" for entry in spec["legend"])
+
+
+def test_legend_rows_name_the_layers_a_click_hides():
+    # The viewer hides every layer whose key matches the clicked row: the
+    # tangent row covers its line and the point at x = 1.
+    spec, _payloads = build_spec(
+        ggplot() + geom_function("y = x^3 - 3x") + tangent(at=1) + derivative()
+    )
+    keys = {entry["label"]: entry["lk"] for entry in spec["legend"]}
+    tangent_layers = [layer for layer in spec["layers"] if layer.get("lk") == keys["tangent"]]
+    assert sorted(layer["kind"] for layer in tangent_layers) == ["line", "point"]
+    assert len(set(keys.values())) == 3
+    # Stable keys: the same figure builds the same spec.
+    again, _payloads = build_spec(
+        ggplot() + geom_function("y = x^3 - 3x") + tangent(at=1) + derivative()
+    )
+    assert [entry["lk"] for entry in again["legend"]] == list(keys.values())
+
+
+def test_curve_keeps_its_row_beside_a_tangent_and_derivative():
+    spec, _payloads = build_spec(
+        ggplot() + geom_function("y = x^3 - 3x") + tangent(at=1) + derivative()
+    )
+    labels = [entry["label"] for entry in spec["legend"]]
+    assert labels[0] == spec["labs"]["title"]
+    assert "tangent" in labels and len(labels) == 3
+    titled, _payloads = build_spec(
+        ggplot() + geom_function("y = x^2") + tangent(at=1) + labs(title="Slope")
+    )
+    assert len(titled["legend"]) == 2
+    # Alone, the curve's row would only repeat the title.
+    alone, _payloads = build_spec(ggplot() + geom_function("y = x^2"))
+    assert alone["legend"] is None
 
 
 def test_derivative_is_the_slope_curve():
