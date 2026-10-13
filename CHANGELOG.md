@@ -4,7 +4,9 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.6.8 — 2026-10-12
+
+Legend rows of formula layers hide what they name, and the curve has a row of its own.
 
 ### Changed
 
