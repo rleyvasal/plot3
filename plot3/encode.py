@@ -21,7 +21,7 @@ def pack_u16(q: np.ndarray, compress: bool) -> str:
         raw = _gzip.compress(
             np.ascontiguousarray(d[:, 0]).tobytes()
             + np.ascontiguousarray(d[:, 1]).tobytes(),
-            6,
+            compresslevel=6, mtime=0,
         )
     else:
         raw = np.ascontiguousarray(q, dtype="<u2").tobytes()
@@ -31,7 +31,7 @@ def pack_u16(q: np.ndarray, compress: bool) -> str:
 def pack_f32(v: np.ndarray, compress: bool) -> str:
     raw = np.ascontiguousarray(v, dtype="<f4").tobytes()
     if compress:
-        raw = _gzip.compress(raw, 6)
+        raw = _gzip.compress(raw, 6, mtime=0)
     return base64.b64encode(raw).decode("ascii")
 
 
@@ -55,7 +55,7 @@ def pack_u8(values: np.ndarray, compress: bool) -> str:
     """uint8 array -> base64 (optional gzip; no delta)."""
     raw = np.ascontiguousarray(values, dtype=np.uint8).tobytes()
     if compress:
-        raw = _gzip.compress(raw, 6)
+        raw = _gzip.compress(raw, 6, mtime=0)
     return base64.b64encode(raw).decode("ascii")
 
 
@@ -63,6 +63,6 @@ def pack_u32(values: np.ndarray, compress: bool) -> str:
     """uint32 array -> base64 (optional gzip; no delta)."""
     raw = np.ascontiguousarray(values, dtype="<u4").tobytes()
     if compress:
-        raw = _gzip.compress(raw, 6)
+        raw = _gzip.compress(raw, 6, mtime=0)
     return base64.b64encode(raw).decode("ascii")
 
