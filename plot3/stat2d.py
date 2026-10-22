@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from plot3.geoms import _Geom, aes
+from plot3.kde import EXACT_WORK, gaussian_2d
 from plot3.scales import col_values, ordered_levels, resolution
 from plot3.special import qt
 from plot3.table import has_column, materialize_columns
@@ -1334,6 +1335,11 @@ def _kde2d(xs, ys, n, lims=None, h=None):
     y0, y1 = (ys.min(), ys.max()) if lims is None else lims[2:]
     gx, gy = np.linspace(x0, x1, n), np.linspace(y0, y1, n)
     hx, hy = (_bandwidth(xs), _bandwidth(ys)) if h is None else (float(h[0]) / 4, float(h[1]) / 4)
+    if xs.size * n > EXACT_WORK:
+        # Large inputs: bilinear binning and FFT convolution.
+        sums = gaussian_2d(xs, ys, (float(x0), float(x1)), (float(y0), float(y1)), n, hx, hy)
+        if sums is not None:
+            return gx, gy, sums / xs.size
     kx = np.exp(-0.5 * ((gx[:, None] - xs[None, :]) / hx) ** 2) / (hx * math.sqrt(2 * math.pi))
     ky = np.exp(-0.5 * ((gy[:, None] - ys[None, :]) / hy) ** 2) / (hy * math.sqrt(2 * math.pi))
     z = (ky @ kx.T) / xs.size  # (ny, nx), the shape the contour code takes

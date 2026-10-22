@@ -4,6 +4,26 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- Densities of large inputs bin the values onto a fine grid and convolve by
+  FFT, as R's `density()` does, instead of summing every kernel at every
+  grid point. On 100,000 rows: `geom_density(aes(colour=))` 174 ms → 8 ms,
+  `geom_violin` 60 ms → 9 ms, `geom_density_2d` 82 ms → 14 ms. Curves stay
+  within 0.02% of the exact sum (0.2% of the peak for 2D). Inputs below
+  about 2 million value-by-grid-point pairs keep the exact sum, so small
+  figures are unchanged.
+- Discrete levels test missing values once per distinct value, and category
+  codes are remapped with one table lookup instead of a Python call per
+  row: a 100,000-row histogram with `fill=` builds in 26 ms instead of 35 ms.
+  Output is unchanged.
+- Payloads are compressed at gzip level 1 instead of 6. gzip is lossless,
+  so figures draw exactly as before; payloads are about 3% larger, and
+  100,000-row figures with mapped colour, shape or size build 35-45% faster
+  (a coloured scatter 34 ms → 18 ms).
+
 ## 0.6.8 — 2026-10-12
 
 Legend rows of formula layers hide what they name, and the curve has a row of its own.

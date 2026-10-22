@@ -288,9 +288,19 @@ def ordered_levels(values, *, keep_order: bool = False) -> list:
     "10" before "4"); anything else sorts as text.
     """
     values = list(values)
-    present = [v for v in values if not _is_na(v)]
-    missing = len(present) != len(values)
-    distinct = list(dict.fromkeys(present))
+    try:
+        # Drop repeats first, then test the distinct values for missing:
+        # one isna() call per level instead of one per row.
+        keys = list(dict.fromkeys(values))
+    except TypeError:  # an NA whose comparison has no truth value
+        keys = None
+    if keys is None:
+        present = [v for v in values if not _is_na(v)]
+        missing = len(present) != len(values)
+        distinct = list(dict.fromkeys(present))
+    else:
+        distinct = [v for v in keys if not _is_na(v)]
+        missing = len(distinct) != len(keys)
     if not keep_order:
         if all(isinstance(v, (bool, np.bool_)) for v in distinct):
             distinct.sort(key=bool)

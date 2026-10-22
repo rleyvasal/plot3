@@ -10,6 +10,7 @@ import pandas as pd
 import copy
 import os
 
+from plot3.kde import EXACT_WORK, gaussian_1d
 from plot3.encode import encode_codes, encode_norm, pack_u16, pack_u32, pack_u8
 from plot3.mathtext import split_math
 from plot3.geoms import (
@@ -100,6 +101,11 @@ def _kde_1d(
     if hi <= lo:
         hi = lo + 1.0
     grid = np.linspace(lo, hi, n)
+    if x.size * n > EXACT_WORK:
+        # Large inputs: linear binning and an FFT, as R's density() does.
+        sums = gaussian_1d(x, lo, hi, n, bw)
+        if sums is not None:
+            return grid, sums / x.size
     # (n_grid, n_obs)
     u = (grid[:, None] - x[None, :]) / bw
     dens = np.exp(-0.5 * u * u).sum(axis=1) / (
@@ -1522,6 +1528,26 @@ def _rug_series(rug, g):
     return out
 
 
+def _remap_codes(codes, remap: dict, default) -> np.ndarray:
+    """``remap.get(int(c), default)`` for every code, as one table lookup."""
+    c = np.asarray(codes)
+    if c.dtype.kind not in "biuf" or (c.dtype.kind == "f" and not np.isfinite(c).all()):
+        # Same per-value rule, errors included (int() of NaN raises).
+        return np.array([remap.get(int(x), default) for x in c.ravel()]).reshape(c.shape)
+    ints = c.astype(np.int64)
+    out = np.full(ints.shape, default)
+    if remap and ints.size:
+        keys = np.fromiter(remap.keys(), dtype=np.int64, count=len(remap))
+        values = np.array(list(remap.values()))
+        order = np.argsort(keys)
+        keys, values = keys[order], values[order]
+        at = np.clip(np.searchsorted(keys, ints), 0, len(keys) - 1)
+        hit = keys[at] == ints
+        out = out.astype(np.result_type(out, values))
+        out[hit] = values[at[hit]]
+    return out
+
+
 def _rug_positions(scale, series) -> np.ndarray:
     """Values in the scale's own units; NaN where they have no place."""
     kind, pos, cats = col_values(series)
@@ -1531,6 +1557,13 @@ def _rug_positions(scale, series) -> np.ndarray:
             lookup = np.array([index.get(c, np.nan) for c in cats] + [np.nan], dtype=np.float64)
             codes = np.where(np.isfinite(pos), pos, len(cats)).astype(np.int64)
             return lookup[codes]
+        values = np.asarray(series)
+        # float32 prints differently as a NumPy scalar than as a float.
+        if values.dtype.kind in "biu" or values.dtype == np.float64:
+            # One text lookup per distinct value (NaN included), not per row.
+            codes, uniques = pd.factorize(values, use_na_sentinel=False)
+            lookup = np.array([index.get(str(u), np.nan) for u in uniques.tolist()], dtype=np.float64)
+            return lookup[codes] if len(codes) else np.array([], dtype=np.float64)
         return np.array([index.get(str(v), np.nan) for v in series], dtype=np.float64)
     if kind == "cat":
         return np.full(len(pos), np.nan)
@@ -2211,10 +2244,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             }
             out = np.full(np.size(v), np.nan, dtype=np.float64)
             flat = np.asarray(v, dtype=np.float64).ravel()
-            for i, c in enumerate(flat):
-                if not math.isfinite(c):
-                    continue
-                out[i] = remap.get(int(c), -1)
+            finite = np.isfinite(flat)
+            out[finite] = _remap_codes(flat[finite], remap, -1)
             v = out.reshape(np.shape(v))
             sc.cats = merged
         else:
@@ -3089,9 +3120,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                             i: color_scale[1].index(c)
                             for i, c in enumerate(local)
                         }
-                        codes = np.array(
-                            [remap.get(int(c), 0) for c in cv], dtype="<u2"
-                        )
+                        codes = _remap_codes(cv, remap, 0).astype("<u2")
                         payloads.append((pid, pack_u16(codes, g.compress)))
                         spec_l["ocolor"] = {
                             "id": pid, "dtype": "u16", "kind": "cat"
@@ -3121,8 +3150,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 # remap onto the global cat list
                 local = vals["color"][2]
                 remap = {i: color_scale[1].index(c) for i, c in enumerate(local)}
-                codes = np.array([remap.get(int(c), 0) for c in cv[order]],
-                                 dtype="<u2")
+                codes = _remap_codes(cv[order], remap, 0).astype("<u2")
                 payloads.append((pid, pack_u16(codes, g.compress)))
                 spec_l["color"] = {"id": pid, "dtype": "u16", "kind": "cat"}
             else:
@@ -3140,9 +3168,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             if ckind == "cat":
                 local = vals["color"][2]
                 remap = {i: color_scale[1].index(c) for i, c in enumerate(local)}
-                codes = np.array(
-                    [remap.get(int(c), 0) for c in cv[order]], dtype="<u2"
-                )
+                codes = _remap_codes(cv[order], remap, 0).astype("<u2")
                 payloads.append((pid, pack_u16(codes, g.compress)))
                 spec_l["color"] = {"id": pid, "dtype": "u16", "kind": "cat"}
             else:
@@ -3322,10 +3348,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                     flat = np.full(raw.shape, 65535, dtype=np.uint16)
                     ok = np.isfinite(raw) & (raw >= 0)
                     if ok.any():
-                        mapped = np.array(
-                            [remap.get(int(c), 0) for c in raw[ok]],
-                            dtype=np.uint16,
-                        )
+                        mapped = _remap_codes(raw[ok], remap, 0).astype(np.uint16)
                         flat[np.flatnonzero(ok)] = mapped
                     enc = encode_codes(flat, g.compress)
                     pid = f"p{li}fc"
