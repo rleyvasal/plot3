@@ -4,7 +4,9 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.7.0 — 2026-10-22
+
+Large figures build several times faster: densities bin like R's density(), levels and colour codes are handled per distinct value, and payloads compress faster.
 
 ### Changed
 
