@@ -4,7 +4,9 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.8.0 — 2026-11-01
+
+Facet formulas need no quotes in notebooks, a notebook's own functions named like plot3's keep Python's meaning, and the notebook's rewrites come from tidysyntax, shared with tidy3, tidy3a and stats3.
 
 ### Changed
 
