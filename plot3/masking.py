@@ -30,10 +30,15 @@ from __future__ import annotations
 
 import ast
 import builtins
+import dataclasses
 import io
 import re
 import tokenize
 from typing import Any, Iterable
+
+import tidysyntax
+from tidysyntax import repairs
+from tidysyntax.scanner import Spans, apply
 
 # Sentinels (plot3 own + tidy3 compatibility).
 BT_NAME = "__plot3_bt__"
@@ -108,75 +113,149 @@ _PASSTHROUGH_KW = frozenset(
 
 _FORMULA_CALLS = frozenset({"geom_function", "geom_vector_field"})
 
-_BT_RE = re.compile(r"`([^`\n]+)`")
+_FACETS = frozenset({"facet_wrap", "facet_grid"})
+
+# plot3's part of the notebook syntax tidy3, tidy3a, plot3 and stats3 share
+# (tidysyntax). ``drv ~ cyl`` and ``~`my col``` are not Python, so they are
+# quoted in any facet call; ``^`` in geom_function (XOR in Python) and ``~cyl``
+# in a facet (bitwise not) are valid Python, so they are rewritten only where
+# the call is plot3's: a notebook's own geom_function keeps XOR.
+DIALECT = tidysyntax.Dialect(
+    "plot3",
+    formula_calls=_FACETS,
+    formula_keywords={"facets"},
+    formula_backticks="strip",
+    power_calls=_FORMULA_CALLS,
+    unary_formula_calls=_FACETS,
+)
+_POWER_ONLY = dataclasses.replace(DIALECT, formula_calls=(), formula_keywords=(), unary_formula_calls=())
+_FACETS_ONLY = dataclasses.replace(DIALECT, power_calls=())
+
+_SESSION = object()  # default: the running IPython's namespace, if any
 
 
-def rewrite_formula_carets(source: str) -> str:
+def _session_namespace(namespace: Any) -> dict[str, Any] | None:
+    if namespace is not _SESSION:
+        return namespace
+    try:
+        from IPython import get_ipython
+
+        ip = get_ipython()
+    except Exception:
+        return None
+    return getattr(ip, "user_ns", None) if ip is not None else None
+
+
+def _plot3_bt(source: str) -> str:
+    """tidysyntax's ``__r_name__`` placeholder as plot3's ``__plot3_bt__``, outside strings and comments."""
+    if tidysyntax.NAME not in source:
+        return source
+    spans = Spans.of(source)
+    edits = [
+        (m.start(), m.end(), BT_NAME)
+        for m in re.finditer(re.escape(tidysyntax.NAME) + r"(?=\s*\()", source)
+        if m.start() in spans
+    ]
+    return apply(source, edits)
+
+
+def _repair(source: str) -> str:
+    """The rewrites of text that is not Python: ``drv ~ cyl``, ``~`my col``` and backticks."""
+    return _plot3_bt(repairs.backticks(repairs.quote_formulas(source, [DIALECT])))
+
+
+def rewrite_facet_formulas(source: str, *, unary: str = "owned", namespace: Any = _SESSION) -> str:
+    """Quote R formulas inside ``facet_wrap`` / ``facet_grid`` before parsing.
+
+    ``facet_grid(drv ~ cyl)`` → ``facet_grid('drv ~ cyl')``: ``~`` with a left
+    side is not Python, so it is quoted in any facet call, as is a ``~`` formula
+    holding a backtick name. ``facet_wrap(~cyl)`` → ``facet_wrap('~cyl')``
+    only where the facet call is plot3's, since ``~cyl`` is Python's bitwise
+    not (``unary="owned"``); ``unary="never"`` leaves such formulas for a
+    later pass. Backtick names inside the formula lose their backticks
+    (``~`my col``` → ``'~my col'``).
+    """
+    source = repairs.quote_formulas(source, [DIALECT])
+    if unary == "never":
+        return source
+    return tidysyntax.reinterpret(source, [_FACETS_ONLY], _session_namespace(namespace))
+
+
+def rewrite_formulas(source: str, namespace: Any = _SESSION) -> str:
+    """The text rewrites plot3 needs even when tidy3 handles backticks:
+    ``^`` inside ``geom_function`` and ``~`` formulas inside facets.
+
+    ``drv ~ cyl`` is quoted first, since the cell must parse before the
+    ownership of ``geom_function`` and ``facet_wrap`` can be read."""
+    source = repairs.quote_formulas(source, [DIALECT])
+    return tidysyntax.reinterpret(source, [DIALECT], _session_namespace(namespace))
+
+
+def rewrite_formula_carets(source: str, namespace: Any = _SESSION) -> str:
     """Inside ``geom_function(...)``, turn ``^`` into ``**`` before Python parses.
 
     ``2*x^3`` and ``(2*x)^3`` are the same tree once Python has parsed ``^``
-    as xor, so the rewrite has to happen on the text.
+    as xor, so the rewrite has to happen on the text. Only plot3's own
+    ``geom_function`` is rewritten: in a notebook's own function of that
+    name, ``^`` stays XOR.
     """
-    if "^" not in source or not any(name in source for name in _FORMULA_CALLS):
-        return source
-    try:
-        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
-    except (tokenize.TokenError, SyntaxError):
-        return source
-    starts = [0]
-    for line in source.splitlines(keepends=True):
-        starts.append(starts[-1] + len(line))
-    hits: list[int] = []
-    depth = 0  # paren depth inside the current geom_function call
-    armed = False  # just saw the name geom_function
-    for tok in tokens:
-        if depth == 0:
-            if tok.type == tokenize.NAME and tok.string in _FORMULA_CALLS:
-                armed = True
-                continue
-            if armed and tok.type == tokenize.OP and tok.string == "(":
-                depth = 1
-            armed = False
-            continue
-        if tok.type == tokenize.OP:
-            if tok.string in "([{":
-                depth += 1
-            elif tok.string in ")]}":
-                depth -= 1
-            elif tok.string == "^":
-                row, col = tok.start
-                hits.append(starts[row - 1] + col)
-    for pos in reversed(hits):
-        source = source[:pos] + "**" + source[pos + 1 :]
-    return source
+    return tidysyntax.reinterpret(source, [_POWER_ONLY], _session_namespace(namespace))
 
 
-def rewrite_backticks(source: str) -> str:
-    """Preparse backticks, and ``^`` inside ``geom_function``, before parsing.
+def rewrite_backticks(source: str, namespace: Any = _SESSION) -> str:
+    """Preparse backticks, ``^`` inside ``geom_function``, and facet formulas.
 
     `` `col name` `` → ``__plot3_bt__("col name")``. ``^`` → ``**`` only
-    inside a ``geom_function(...)`` call, where it means power.
+    inside plot3's ``geom_function(...)``, where it means power. Backticks
+    inside string literals and comments stay as written. The text that is
+    not Python goes first, so the cell parses when the ownership of
+    ``geom_function`` and ``facet_wrap`` is read.
     """
-    source = rewrite_formula_carets(source)
-    if "`" not in source:
-        return source
-    return _BT_RE.sub(lambda m: f"{BT_NAME}({m.group(1)!r})", source)
+    return tidysyntax.reinterpret(_repair(source), [DIALECT], _session_namespace(namespace))
 
 
-def plot3_backtick_transform(lines: list[str]) -> list[str]:
-    """IPython input transformer: backticks, and ``^`` inside geom_function."""
-    if not lines:
-        return lines
-    src = "".join(lines)
-    if "`" not in src and "^" not in src:
-        return lines
-    out = rewrite_backticks(src)
+def _parse_dedented(source: str) -> tuple[ast.Module, list[int]] | None:
+    """Parse *source* with indented ``+`` lines moved to column 0 (they are
+    joined later); the shift per line maps positions back. ``None`` if the
+    cell does not parse, in which case nothing valid is reinterpreted."""
+    raw = source.split("\n")
+    shift = [len(line) - len(line.lstrip()) if line.lstrip().startswith("+") else 0 for line in raw]
+    try:
+        tree = ast.parse("\n".join(line[n:] for line, n in zip(raw, shift)))
+    except (SyntaxError, ValueError):
+        return None
+    return tree, shift
+
+
+def _as_lines(src: str, out: str, lines: list[str]) -> list[str]:
     if out == src:
         return lines
     if out.endswith("\n"):
         return out.splitlines(keepends=True)
     parts = [ln + "\n" for ln in out.splitlines()]
     return parts or [out]
+
+
+def plot3_backtick_transform(lines: list[str]) -> list[str]:
+    """IPython input transformer: backticks, ``^`` inside geom_function, and
+    ``~`` formulas inside facets."""
+    if not lines:
+        return lines
+    src = "".join(lines)
+    if "`" not in src and "^" not in src and "~" not in src:
+        return lines
+    return _as_lines(src, rewrite_backticks(src), lines)
+
+
+def plot3_formula_transform(lines: list[str]) -> list[str]:
+    """IPython input transformer used beside tidy3's backtick preparser:
+    ``^`` inside geom_function and ``~`` formulas inside facets only."""
+    if not lines:
+        return lines
+    src = "".join(lines)
+    if "^" not in src and "~" not in src:
+        return lines
+    return _as_lines(src, rewrite_formulas(src), lines)
 
 
 _OPENERS = frozenset("([{")
@@ -229,7 +308,7 @@ def _value_start(tokens: list[tokenize.TokenInfo]) -> tuple[int, int]:
     return tokens[0].start
 
 
-def join_layer_lines(source: str) -> str | None:
+def join_layer_lines(source: str, namespace: Any = _SESSION) -> str | None:
     """Join ``+`` lines that add plot3 layers to the statement above them.
 
     In a notebook, ``ggplot(df, aes(...))`` followed by lines that start
@@ -240,6 +319,12 @@ def join_layer_lines(source: str) -> str | None:
     lines; the expression gets parentheses on the lines as typed, so error
     line numbers still match. Returns ``None`` when nothing needs joining,
     or when the result would not parse. Pipes (``>>``) are tidy3's.
+
+    An indented ``+`` line is not Python, so it joins by name. An unindented
+    one is a valid unary-plus statement, so it joins only when the name after
+    ``+`` is plot3's and the statement above starts with a plot3 call or a
+    value not known to be something else: after ``x = 2``, or with the
+    notebook's own ``geom_point``, ``+ geom_point()`` stays a statement.
     """
     if not source or "+" not in source:
         return None
@@ -253,6 +338,36 @@ def join_layer_lines(source: str) -> str | None:
     logical = _logical_lines(analysed)
     if not logical:
         return None
+    parsed = _parse_dedented(_repair(source))
+    owners = tidysyntax.Owners(parsed[0], _session_namespace(namespace), [DIALECT]) if parsed is not None else None
+
+    def plot3_name(name: str, row: int) -> bool:
+        return owners is not None and DIALECT.owns_module(owners.module(name, (row, 0)))
+
+    def plot3_head(tokens: list[tokenize.TokenInfo]) -> bool:
+        start = _value_start(tokens)
+        rest = [t for t in tokens if t.start >= start]
+        while rest and rest[0].string == "(":
+            rest = rest[1:]
+        if owners is None or not rest or rest[0].type != tokenize.NAME:
+            return False
+        name, row = rest[0].string, rest[0].start[0]
+        if len(rest) > 1 and rest[1].string in ("(", "."):
+            return plot3_name(name, row)  # ggplot(...), p3.ggplot(...)
+        # A variable: refused only when its value is known not to be plot3's.
+        bound = [package for end, package in owners.bindings.get(name, ()) if end <= (row, 0)]
+        if bound:
+            return bound[-1] is None or DIALECT.owns_module(bound[-1])
+        if owners.context is not None and name in owners.context:
+            return DIALECT.owns_module(tidysyntax.module_of(owners.context[name]))
+        return True
+
+    def may_join(tokens: list[tokenize.TokenInfo], head: list[tokenize.TokenInfo]) -> bool:
+        """Whether joining this ``+`` line changes valid Python, and may: see above."""
+        row = tokens[0].start[0]
+        if shift[row - 1]:
+            return True  # indented: not Python on its own
+        return plot3_name(tokens[1].string, row) and plot3_head(head)
 
     def is_layer(tokens: list[tokenize.TokenInfo]) -> bool:
         return (
@@ -273,6 +388,7 @@ def join_layer_lines(source: str) -> str | None:
             and head.start[1] == 0
             and head.type != tokenize.OP
             and head.string not in {"if", "for", "while", "with", "def", "class", "try", "elif", "else", "except", "finally", "return", "import", "from"}
+            and may_join(tokens, previous[0])
         ):
             previous.append(tokens)
         else:
@@ -618,7 +734,7 @@ def apply_masking(
     backticks: bool = True,
 ) -> str:
     """Apply backtick rewrite + AST masking; return unparsed source (tests)."""
-    text = rewrite_formula_carets(source)
+    text = rewrite_formulas(source)
     if backticks:
         text = rewrite_backticks(text)
     tree = ast.parse(text)
@@ -637,7 +753,8 @@ def is_mask_transformer(obj: Any) -> bool:
 def is_backtick_transformer(obj: Any) -> bool:
     return (
         getattr(obj, "__module__", "") in {"plot3.masking", "plot3.jupyter"}
-        and getattr(obj, "__name__", "") == "plot3_backtick_transform"
+        and getattr(obj, "__name__", "")
+        in {"plot3_backtick_transform", "plot3_formula_transform"}
     )
 
 

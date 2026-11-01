@@ -4,6 +4,49 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- The notebook's source rewrites (facet formulas, `^` in `geom_function`,
+  backtick names) and the check of whose call it is come from tidysyntax,
+  the notebook syntax tidy3, tidy3a, plot3 and stats3 now share, which plot3
+  requires (`tidysyntax>=0.1,<0.2`, standard library only). The results are
+  the ones described below.
+
+### Added
+
+- In notebooks, facets take ggplot2's formulas without quotes:
+  `facet_wrap(~cyl)`, `facet_grid(drv ~ cyl)`, `facet_grid(. ~ cyl)`, and
+  `facets = drv ~ .`; backtick names work inside them.
+  `facet_wrap(~ cyl + gear)` says up front that it wraps by one column.
+
+### Fixed
+
+- Backticks inside strings and comments stay as written in notebooks:
+  ``labs(title="see `hp`")`` no longer becomes `see __plot3_bt__('hp')`, and
+  single-quoted strings with backticks no longer raise a SyntaxError.
+- With tidy3 imported before plot3, `geom_function(y = x^3)` reads `^` as a
+  power again instead of raising NameError.
+- A notebook's own functions named like plot3's keep Python's meaning. Three
+  notebook rewrites change text that is already valid Python, and they used
+  to apply to any call of that name:
+  - with `def geom_function(fun): return fun(3)`,
+    `geom_function(lambda x: x ^ 2)` gave 9 instead of 1;
+  - with the notebook's own `facet_wrap`, `facet_wrap(~5)` passed the string
+    `'~5'` instead of -6;
+  - `x = 2` followed by a line `+ geom_point()` set `x` to 3.
+
+  `^` in `geom_function`, `~cyl` in a facet, and an unindented `+` line are
+  now rewritten only where the call is plot3's. The latest binding in the
+  cell before the call decides (an import from plot3, or the notebook's own
+  `def` or assignment); otherwise the session's value does. An unindented
+  `+` line also needs the statement above to start with a plot3 call, or
+  with a variable not known to hold something else. Text that is not Python
+  is rewritten as before, whoever owns the call: `drv ~ cyl`, `` ~`my col` ``,
+  backticks, and indented `+` lines. A cell that does not parse gets none of
+  the three rewrites, since its calls' owners cannot be read.
+
 ## 0.7.0 — 2026-10-22
 
 Large figures build several times faster: densities bin like R's density(), levels and colour codes are handled per distinct value, and payloads compress faster.

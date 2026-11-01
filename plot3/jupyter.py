@@ -22,6 +22,7 @@ from plot3.masking import (
     is_mask_transformer,
     is_tidy3_backtick_transformer,
     plot3_backtick_transform,
+    plot3_formula_transform,
     plot3_layer_transform,
 )
 
@@ -62,16 +63,21 @@ def enable_r_style(ipython: Any | None = None) -> bool:
         # When tidy3 is not loaded, leave tidy3 sentinel unset; plot3 AST
         # still rewrites __tidy3_bt__ if tidy3's preparser ran first.
 
-    # Source preparser: only install plot3's if tidy3 did not already provide one.
+    # Source preparser: when tidy3 already rewrites backticks, run only
+    # plot3's own formula rewrites (^ in geom_function, ~ in facets), after it.
     for attr in ("input_transformers_cleanup", "input_transformers_post"):
         transformers = getattr(ipython, attr, None)
         if not isinstance(transformers, list):
             continue
-        has_tidy3_bt = any(is_tidy3_backtick_transformer(t) for t in transformers)
         transformers[:] = [
             t for t in transformers if not is_backtick_transformer(t)
         ]
-        if not has_tidy3_bt:
+        tidy3_at = [
+            i for i, t in enumerate(transformers) if is_tidy3_backtick_transformer(t)
+        ]
+        if tidy3_at:
+            transformers.insert(tidy3_at[-1] + 1, plot3_formula_transform)
+        else:
             transformers.insert(0, plot3_backtick_transform)
 
     # AST pass for bare names inside aes / facet_wrap.

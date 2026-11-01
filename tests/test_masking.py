@@ -238,3 +238,200 @@ def test_plus_lines_leave_other_python_alone():
     assert join_layer_lines("df\n>> ggplot()\n+ geom_point()") is None  # tidy3's pipe
     assert join_layer_lines("for i in r:\n    p = ggplot(df)\n    + geom_point()") is None
     assert join_layer_lines("p = ggplot(df) + geom_point()") is None  # already one line
+
+
+def test_backticks_inside_strings_and_comments_stay():
+    # labs(title="see `hp`") keeps its text; single quotes stay valid Python.
+    cell = 'ggplot(df, aes(x=`a b`)) + labs(title="see `hp`")  # `note`'
+    out = rewrite_backticks(cell)
+    assert out == (
+        f"ggplot(df, aes(x={BT_NAME}('a b'))) + labs(title=\"see `hp`\")  # `note`"
+    )
+    assert rewrite_backticks("labs(title='a `b` c', x=`d`)") == (
+        f"labs(title='a `b` c', x={BT_NAME}('d'))"
+    )
+    assert rewrite_backticks('s = """x `y`\n z"""\naes(x=`q`)') == (
+        f's = """x `y`\n z"""\naes(x={BT_NAME}(\'q\'))'
+    )
+    assert rewrite_backticks(r"labs(title='it\'s `x`')") == r"labs(title='it\'s `x`')"
+
+
+@pytest.mark.parametrize(
+    "cell, expected",
+    [
+        ("facet_wrap(~cyl)", "facet_wrap('~cyl')"),
+        ("facet_wrap( ~ cyl , ncol=2)", "facet_wrap( '~ cyl' , ncol=2)"),
+        ("facet_wrap(~`my col`)", "facet_wrap('~my col')"),
+        (f"facet_wrap(~{TIDY3_BT_NAME}('my col'))", "facet_wrap('~my col')"),
+        ("facet_grid(drv ~ cyl)", "facet_grid('drv ~ cyl')"),
+        ('facet_grid(. ~ cyl, scales="free")', "facet_grid('. ~ cyl', scales=\"free\")"),
+        ("facet_grid(facets = drv ~ .)", "facet_grid(facets = 'drv ~ .')"),
+        ("p + facet_wrap(\n    ~ gear,\n    ncol=2)", "p + facet_wrap(\n    '~ gear',\n    ncol=2)"),
+        # Left alone: strings, other calls, ~ inside a nested call.
+        ('facet_wrap("~cyl")', 'facet_wrap("~cyl")'),
+        ("x = ~mask", "x = ~mask"),
+        ("facet_wrap(cyl, labeller=f(~x))", "facet_wrap(cyl, labeller=f(~x))"),
+        ("s = 'facet_wrap(~cyl)'", "s = 'facet_wrap(~cyl)'"),
+    ],
+)
+def test_facet_formulas_are_quoted(cell, expected):
+    from plot3.masking import rewrite_facet_formulas
+
+    assert rewrite_facet_formulas(cell) == expected
+
+
+def test_facet_formulas_build():
+    df = pd.DataFrame({"a": [1, 2], "cyl": [4, 6], "gear": [3, 4]})
+    ns = {"df": df}
+    exec("from plot3 import *", ns)
+    exec(apply_masking("p = ggplot(df, aes(x=a, y=a)) + geom_point() + facet_wrap(~cyl)"), ns)
+    assert ns["p"].facet.variable == "cyl"
+    exec(apply_masking("p = ggplot(df, aes(x=a, y=a)) + geom_point() + facet_grid(cyl ~ gear)"), ns)
+    assert (ns["p"].facet.rows, ns["p"].facet.cols) == ("cyl", "gear")
+    with pytest.raises(ValueError, match="single facet column"):
+        exec(apply_masking("facet_wrap(~ cyl + gear)"), ns)
+
+
+def _shell(*cleanup):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        user_ns={}, input_transformers_cleanup=list(cleanup),
+        input_transformers_post=[], ast_transformers=[],
+    )
+
+
+def _fake_tidy3_transform(lines):
+    return lines
+
+
+_fake_tidy3_transform.__module__ = "tidy3.masking"
+_fake_tidy3_transform.__name__ = "tidy3_backtick_transform"
+
+
+def test_formula_rewrites_run_after_tidy3_preparser():
+    # tidy3 imported first: plot3 still rewrites ^ in geom_function and ~ in
+    # facets, after tidy3's backticks, and installs no second backtick pass.
+    from plot3.jupyter import enable_r_style
+    from plot3.masking import plot3_formula_transform
+
+    def other(lines):
+        return lines
+
+    ip = _shell(_fake_tidy3_transform, other)
+    enable_r_style(ip)
+    enable_r_style(ip)  # idempotent
+    assert ip.input_transformers_cleanup == [
+        _fake_tidy3_transform, plot3_formula_transform, other,
+    ]
+    out = "".join(plot3_formula_transform(["p = geom_function(y = x^3) + facet_wrap(~cyl)\n"]))
+    assert out == "p = geom_function(y = x**3) + facet_wrap('~cyl')\n"
+
+    alone = _shell(other)
+    enable_r_style(alone)
+    assert alone.input_transformers_cleanup == [plot3_backtick_transform, other]
+
+
+# ── Valid Python keeps its meaning outside plot3's calls ─────────────────────
+# ^ (XOR), ~x (bitwise not) and a "+ name()" line (unary plus) are valid
+# Python, so plot3 rewrites them only in its own calls.
+
+USER_GEOM_FUNCTION = "def geom_function(fun):\n    return fun(3)\n"
+
+
+@pytest.mark.parametrize(
+    "cell, expected",
+    [
+        (USER_GEOM_FUNCTION + "r = geom_function(lambda x: x ^ 2)", None),
+        ("from plot3 import *\n" + USER_GEOM_FUNCTION + "r = geom_function(lambda x: x ^ 2)", None),
+        ("def f(geom_function):\n    return geom_function(lambda x: x ^ 2)", None),
+        ("import numpy as p3\np3.geom_function(lambda x: x ^ 2)", None),
+        ("geom_function(lambda x: x ^ 2) + facet_wrap(~cyl)\n!broken", None),  # cannot read ownership
+        ("from plot3 import *\ngeom_function(lambda x: 2*x^3)", "from plot3 import *\ngeom_function(lambda x: 2*x**3)"),
+        ("import plot3 as p3\np3.geom_function(lambda x: x ^ 2)", "import plot3 as p3\np3.geom_function(lambda x: x ** 2)"),
+        ("geom_function(lambda x: np.sin(x^2))", "geom_function(lambda x: np.sin(x**2))"),
+        ("def facet_wrap(v):\n    return v\nf = facet_wrap(~5)", None),
+        ("def facet_wrap(v):\n    return v\nf = facet_wrap(drv ~ cyl)", "def facet_wrap(v):\n    return v\nf = facet_wrap('drv ~ cyl')"),
+    ],
+)
+def test_reinterpretations_only_in_plot3_calls(cell, expected):
+    assert rewrite_backticks(cell, namespace=None) == (cell if expected is None else expected)
+
+
+def test_session_values_decide_ownership():
+    from plot3 import geom_function
+    from plot3.masking import rewrite_formulas
+
+    def own(fun):
+        return fun(3)
+
+    cell = "p = geom_function(y = x^3) + facet_wrap(~cyl)"
+    assert rewrite_formulas(cell, {"geom_function": own, "facet_wrap": own}) == cell
+    assert rewrite_formulas(cell, {"geom_function": geom_function, "facet_wrap": facet_wrap}) == (
+        "p = geom_function(y = x**3) + facet_wrap('~cyl')"
+    )
+
+
+def test_plus_lines_join_only_onto_plot3():
+    from plot3.masking import join_layer_lines
+
+    def geom_point():
+        return 1
+
+    assert join_layer_lines("x = 2\n+ geom_point()", namespace=None) is None  # no plot3 head
+    assert join_layer_lines("p = ggplot(df)\n+ geom_point()", namespace={"geom_point": geom_point}) is None
+    assert join_layer_lines("def geom_point():\n    return 1\np = ggplot(df)\n+ geom_point()", namespace=None) is None
+    assert join_layer_lines("p = foo(df)\n+ geom_point()", namespace={"foo": len}) is None
+    assert join_layer_lines("p = n\n+ geom_point()", namespace={"n": 2}) is None
+    assert join_layer_lines("p = ggplot(df)\n+ geom_point()", namespace=None) == "p = (ggplot(df)\n+ geom_point())"
+    assert join_layer_lines("p = base\n+ geom_point()", namespace={"base": ggplot()}) == "p = (base\n+ geom_point())"
+    # An indented "+" line is not Python on its own, so it joins by name.
+    assert join_layer_lines("x = 2\n  + geom_point()", namespace=None) == "x = (2\n  + geom_point())"
+
+
+def _ipython():
+    IPython = pytest.importorskip("IPython")
+    from IPython.core.interactiveshell import InteractiveShell
+
+    InteractiveShell.clear_instance()
+    shell = InteractiveShell.instance()
+    shell.run_line_magic("load_ext", "plot3")
+    return shell, IPython
+
+
+@pytest.mark.parametrize(
+    "cell, name, value",
+    [
+        (USER_GEOM_FUNCTION + "r = geom_function(lambda x: x ^ 2)", "r", 1),
+        ("def facet_wrap(v):\n    return v\nf = facet_wrap(~5)", "f", -6),
+        ("def geom_point():\n    return 1\nx = 2\n+ geom_point()", "x", 2),
+    ],
+)
+def test_notebook_functions_named_like_plot3_keep_python_meaning(cell, name, value):
+    shell, _ = _ipython()
+    try:
+        result = shell.run_cell(cell)
+        assert result.success, result.error_before_exec or result.error_in_exec
+        assert shell.user_ns[name] == value
+        # Defined in an earlier cell, the session's value decides.
+        result = shell.run_cell(cell.rsplit("\n", 1)[-1] if name != "x" else "x = 2\n+ geom_point()")
+        assert result.success and shell.user_ns[name] == value
+    finally:
+        from IPython.core.interactiveshell import InteractiveShell
+
+        InteractiveShell.clear_instance()
+
+
+def test_plot3_calls_still_take_r_syntax_in_a_notebook():
+    shell, _ = _ipython()
+    try:
+        result = shell.run_cell(
+            "import pandas as pd\nfrom plot3 import *\ndf = pd.DataFrame({'a': [1, 2], 'b': [3, 4]})\n"
+            "f = geom_function(y = x^3)\np = ggplot(df, aes(x=a, y=b))\n+ geom_point()\n"
+        )
+        assert result.success, result.error_before_exec or result.error_in_exec
+        assert len(shell.user_ns["p"].layers) == 1  # the "+ geom_point()" line joined
+    finally:
+        from IPython.core.interactiveshell import InteractiveShell
+
+        InteractiveShell.clear_instance()

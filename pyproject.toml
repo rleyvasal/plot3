@@ -22,6 +22,9 @@ classifiers = [
 dependencies = [
   "numpy>=1.24",
   "pandas>=2.0",
+  # The notebook syntax tidy3, tidy3a, plot3 and stats3 share (facet
+  # formulas, ^ in geom_function, backtick names). Standard library only.
+  "tidysyntax>=0.1,<0.2",
 ]
 
 [project.optional-dependencies]

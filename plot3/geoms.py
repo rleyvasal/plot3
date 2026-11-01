@@ -1798,7 +1798,7 @@ class facet_wrap:
             # Accept "~cyl", ". ~ cyl", "cyl ~ ."
             parts = [p.strip() for p in name.split("~")]
             candidates = [p for p in parts if p and p != "."]
-            if len(candidates) != 1:
+            if len(candidates) != 1 or "+" in candidates[0]:
                 raise ValueError(
                     "facet_wrap() currently accepts a single facet column "
                     f"(got {facets!r})"
