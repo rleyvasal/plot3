@@ -494,6 +494,22 @@ class Plot3MaskTransformer(ast.NodeTransformer):
 
     def __init__(self, known: set[str] | None = None):
         self._known_static = known
+        self._owners: tidy3syntax.Owners | None = None
+
+    def visit_Module(self, node: ast.Module) -> ast.AST:
+        # Whose aes() or facet_wrap() each call is: a notebook's own function of that name keeps
+        # its arguments as written (tidy3syntax's rule, as for the source rewrites).
+        namespace = None if self._known_static is not None else _session_namespace(_SESSION)
+        self._owners = tidy3syntax.Owners(node, namespace, [DIALECT])
+        try:
+            return self.generic_visit(node)
+        finally:
+            self._owners = None
+
+    def _plot3s(self, func: ast.AST) -> bool:
+        if self._owners is None:
+            return True
+        return self._owners.owner(func, (func.lineno, func.col_offset)) == "plot3"
 
     def _known(self) -> set[str]:
         if self._known_static is not None:
@@ -542,6 +558,8 @@ class Plot3MaskTransformer(ast.NodeTransformer):
             return self.generic_visit(node)
 
         name = node.func.id
+        if (name in _FORMULA_CALLS or name in _SELECTOR_FUNCS) and not self._plot3s(node.func):
+            return self.generic_visit(node)
         if name in _FORMULA_CALLS:
             return self._visit_geom_function(node)
         if name not in _SELECTOR_FUNCS:

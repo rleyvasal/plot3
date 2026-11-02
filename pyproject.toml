@@ -24,12 +24,17 @@ dependencies = [
   "pandas>=2.0",
   # The notebook syntax tidy3, tidy3a, plot3 and stats3 share (facet
   # formulas, ^ in geom_function, backtick names). Standard library only.
-  "tidy3syntax>=0.1,<0.2",
+  "tidy3syntax>=0.1.2,<0.2",
 ]
 
 [project.optional-dependencies]
 pdf = ["cairosvg>=2.7"]
 dev = ["pytest>=7.0", "polars>=1.0", "contourpy>=1.0"]
+
+# A notebook cell that imports plot3 gets its syntax in that same cell
+# (tidy3syntax's coordinator calls this before rewriting the cell).
+[project.entry-points."tidy3syntax.dialects"]
+plot3 = "plot3.jupyter:load_ipython_extension"
 
 [project.urls]
 Homepage = "https://github.com/rleyvasal/plot3"

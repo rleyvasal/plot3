@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import shlex
+import dataclasses
 from typing import Any
 
 import numpy as np
 import pandas as pd
+import tidy3syntax.ipython
 
 try:
     from IPython import get_ipython
@@ -17,13 +19,11 @@ except Exception:  # pragma: no cover
 from plot3.io import ssh_bytes
 from plot3.masking import (
     BT_NAME,
+    DIALECT,
     Plot3MaskTransformer,
+    _plot3_names,
     is_backtick_transformer,
     is_mask_transformer,
-    is_tidy3_backtick_transformer,
-    plot3_backtick_transform,
-    plot3_formula_transform,
-    plot3_layer_transform,
 )
 
 # R-style bare-name / backtick masking for aes() / facet_wrap().
@@ -60,35 +60,39 @@ def enable_r_style(ipython: Any | None = None) -> bool:
     if ns is not None:
         # Escape hatch if AST missed a sentinel (still a valid column string).
         ns[BT_NAME] = _bt_fallback
-        ns.setdefault("__r_name__", _bt_fallback)
-        # When tidy3 is not loaded, leave tidy3 sentinel unset; plot3 AST
-        # still rewrites __tidy3_bt__ if tidy3's preparser ran first.
 
-    # Source preparser: when tidy3 already rewrites backticks, run only
-    # plot3's own formula rewrites (^ in geom_function, ~ in facets), after it.
+    # The source rewrites (backticks, facet formulas, ^ in geom_function,
+    # + layer lines) go through tidy3syntax's coordinator, one transformer
+    # shared with tidy3, tidy3a and stats3; the AST pass masks aes() names.
+    _remove_own(ipython)
+    tidy3syntax.ipython.register(ipython, _dialect(), ast_transformer=Plot3MaskTransformer())
+    return True
+
+
+def _dialect():
+    """plot3's dialect, with every public plot3 name as a layer a "+" line may add."""
+    return dataclasses.replace(DIALECT, layer_calls=frozenset(_plot3_names()))
+
+
+def _layers_only():
+    """Only the "+" layer lines, for R-style masking turned off."""
+    return dataclasses.replace(
+        _dialect(), formula_calls=(), formula_keywords=(), power_calls=(), unary_formula_calls=()
+    )
+
+
+def _remove_own(ipython: Any) -> None:
+    """An earlier plot3's own transformers, from before the coordinator."""
     for attr in ("input_transformers_cleanup", "input_transformers_post"):
         transformers = getattr(ipython, attr, None)
-        if not isinstance(transformers, list):
-            continue
-        transformers[:] = [
-            t for t in transformers if not is_backtick_transformer(t)
-        ]
-        tidy3_at = [
-            i for i, t in enumerate(transformers) if is_tidy3_backtick_transformer(t)
-        ]
-        if tidy3_at:
-            transformers.insert(tidy3_at[-1] + 1, plot3_formula_transform)
-        else:
-            transformers.insert(0, plot3_backtick_transform)
-
-    # AST pass for bare names inside aes / facet_wrap.
+        if isinstance(transformers, list):
+            transformers[:] = [
+                t for t in transformers
+                if not is_backtick_transformer(t) and getattr(t, "__name__", "") != "plot3_layer_transform"
+            ]
     ast_transformers = getattr(ipython, "ast_transformers", None)
     if isinstance(ast_transformers, list):
-        ast_transformers[:] = [
-            t for t in ast_transformers if not is_mask_transformer(t)
-        ]
-        ast_transformers.append(Plot3MaskTransformer())
-    return True
+        ast_transformers[:] = [t for t in ast_transformers if not is_mask_transformer(t)]
 
 
 def disable_r_style(ipython: Any | None = None) -> None:
@@ -102,17 +106,9 @@ def disable_r_style(ipython: Any | None = None) -> None:
             ipython = None
     if ipython is None:
         return
-    for attr in ("input_transformers_cleanup", "input_transformers_post"):
-        transformers = getattr(ipython, attr, None)
-        if isinstance(transformers, list):
-            transformers[:] = [
-                t for t in transformers if not is_backtick_transformer(t)
-            ]
-    ast_transformers = getattr(ipython, "ast_transformers", None)
-    if isinstance(ast_transformers, list):
-        ast_transformers[:] = [
-            t for t in ast_transformers if not is_mask_transformer(t)
-        ]
+    _remove_own(ipython)
+    # The "+" layer lines stay, as before: only the R-style masking goes.
+    tidy3syntax.ipython.register(ipython, _layers_only())
 
 
 def r_style_enabled() -> bool:
@@ -483,13 +479,11 @@ def enable_layer_lines(ipython: Any | None = None) -> bool:
             ipython = get_ipython() if get_ipython is not None else None
         except Exception:
             ipython = None
-    transformers = getattr(ipython, "input_transformers_cleanup", None)
-    if not isinstance(transformers, list):
+    if ipython is None or not isinstance(getattr(ipython, "input_transformers_cleanup", None), list):
         return False
-    transformers[:] = [
-        t for t in transformers if getattr(t, "__name__", "") != "plot3_layer_transform"
-    ]
-    transformers.append(plot3_layer_transform)
+    # The layer lines are part of plot3's dialect in tidy3syntax's coordinator.
+    if "plot3" not in tidy3syntax.ipython.registered(ipython):
+        tidy3syntax.ipython.register(ipython, _layers_only())
     return True
 
 

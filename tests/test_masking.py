@@ -309,11 +309,10 @@ _fake_tidy3_transform.__module__ = "tidy3.masking"
 _fake_tidy3_transform.__name__ = "tidy3_backtick_transform"
 
 
-def test_formula_rewrites_run_after_tidy3_preparser():
-    # tidy3 imported first: plot3 still rewrites ^ in geom_function and ~ in
-    # facets, after tidy3's backticks, and installs no second backtick pass.
+def test_one_coordinator_ahead_of_other_transformers():
+    # plot3's source rewrites run in tidy3syntax's coordinator, one transformer
+    # for every package, put first; other packages' transformers stay.
     from plot3.jupyter import enable_r_style
-    from plot3.masking import plot3_formula_transform
 
     def other(lines):
         return lines
@@ -321,15 +320,21 @@ def test_formula_rewrites_run_after_tidy3_preparser():
     ip = _shell(_fake_tidy3_transform, other)
     enable_r_style(ip)
     enable_r_style(ip)  # idempotent
-    assert ip.input_transformers_cleanup == [
-        _fake_tidy3_transform, plot3_formula_transform, other,
-    ]
-    out = "".join(plot3_formula_transform(["p = geom_function(y = x^3) + facet_wrap(~cyl)\n"]))
+    coordinator, *rest = ip.input_transformers_cleanup
+    assert getattr(coordinator, "tidy3syntax", False)
+    assert rest == [_fake_tidy3_transform, other]
+    out = "".join(coordinator(["p = geom_function(y = x^3) + facet_wrap(~cyl)\n"]))
     assert out == "p = geom_function(y = x**3) + facet_wrap('~cyl')\n"
+    assert out == "".join(coordinator([out]))  # a second pass changes nothing
 
-    alone = _shell(other)
-    enable_r_style(alone)
-    assert alone.input_transformers_cleanup == [plot3_backtick_transform, other]
+
+def test_a_notebooks_own_aes_keeps_its_arguments():
+    from plot3.masking import Plot3MaskTransformer
+
+    tree = ast.parse("def aes(**kw):\n    return kw\nr = aes(x=wt)")
+    assert "x=wt" in ast.unparse(Plot3MaskTransformer(known=default_known_names()).visit(tree))
+    tree = ast.parse("r = aes(x=wt)")
+    assert "x='wt'" in ast.unparse(Plot3MaskTransformer(known=default_known_names()).visit(tree))
 
 
 # ── Valid Python keeps its meaning outside plot3's calls ─────────────────────

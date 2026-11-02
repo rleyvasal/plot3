@@ -12,6 +12,20 @@ under **Changed**.
   `aes()` (`` aes(x=`First Name`) ``) is a column name: plot3 reads
   tidy3syntax's `__r_name__` placeholder as it reads tidy3's.
 
+### Changed
+
+- The notebook's source rewrites (backticks, facet formulas, `^` in
+  `geom_function`, `+` layer lines) go through tidy3syntax's coordinator
+  (`tidy3syntax>=0.1.2`), one input transformer shared with tidy3, tidy3a
+  and stats3, so the packages' load order no longer matters and plot3 no
+  longer looks for tidy3's preparser. plot3 declares a `tidy3syntax.dialects`
+  entry point: when another of those packages is already loaded, a cell
+  that imports plot3 can use `aes(x=wt)` at once.
+- `+` layer lines also join inside `for` and `if` blocks, as tidy3's pipes do.
+- A notebook's own function named `aes`, `facet_wrap` or `geom_function`
+  keeps its arguments as written: the bare-name masking checks whose call
+  it is, as the source rewrites already did.
+
 ## 0.8.1 — 2026-11-01
 
 ### Changed
