@@ -4,7 +4,9 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.9.0 — 2026-11-01
+
+plot3's notebook syntax registers with tidy3syntax's coordinator, shared with tidy3, tidy3a and stats3, and a notebook's own `aes()` keeps its arguments.
 
 ### Fixed
 
