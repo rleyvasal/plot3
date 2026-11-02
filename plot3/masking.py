@@ -36,9 +36,9 @@ import re
 import tokenize
 from typing import Any, Iterable
 
-import tidysyntax
-from tidysyntax import repairs
-from tidysyntax.scanner import Spans, apply
+import tidy3syntax
+from tidy3syntax import repairs
+from tidy3syntax.scanner import Spans, apply
 
 # Sentinels (plot3 own + tidy3 compatibility).
 BT_NAME = "__plot3_bt__"
@@ -116,11 +116,11 @@ _FORMULA_CALLS = frozenset({"geom_function", "geom_vector_field"})
 _FACETS = frozenset({"facet_wrap", "facet_grid"})
 
 # plot3's part of the notebook syntax tidy3, tidy3a, plot3 and stats3 share
-# (tidysyntax). ``drv ~ cyl`` and ``~`my col``` are not Python, so they are
+# (tidy3syntax). ``drv ~ cyl`` and ``~`my col``` are not Python, so they are
 # quoted in any facet call; ``^`` in geom_function (XOR in Python) and ``~cyl``
 # in a facet (bitwise not) are valid Python, so they are rewritten only where
 # the call is plot3's: a notebook's own geom_function keeps XOR.
-DIALECT = tidysyntax.Dialect(
+DIALECT = tidy3syntax.Dialect(
     "plot3",
     formula_calls=_FACETS,
     formula_keywords={"facets"},
@@ -147,13 +147,13 @@ def _session_namespace(namespace: Any) -> dict[str, Any] | None:
 
 
 def _plot3_bt(source: str) -> str:
-    """tidysyntax's ``__r_name__`` placeholder as plot3's ``__plot3_bt__``, outside strings and comments."""
-    if tidysyntax.NAME not in source:
+    """tidy3syntax's ``__r_name__`` placeholder as plot3's ``__plot3_bt__``, outside strings and comments."""
+    if tidy3syntax.NAME not in source:
         return source
     spans = Spans.of(source)
     edits = [
         (m.start(), m.end(), BT_NAME)
-        for m in re.finditer(re.escape(tidysyntax.NAME) + r"(?=\s*\()", source)
+        for m in re.finditer(re.escape(tidy3syntax.NAME) + r"(?=\s*\()", source)
         if m.start() in spans
     ]
     return apply(source, edits)
@@ -178,7 +178,7 @@ def rewrite_facet_formulas(source: str, *, unary: str = "owned", namespace: Any 
     source = repairs.quote_formulas(source, [DIALECT])
     if unary == "never":
         return source
-    return tidysyntax.reinterpret(source, [_FACETS_ONLY], _session_namespace(namespace))
+    return tidy3syntax.reinterpret(source, [_FACETS_ONLY], _session_namespace(namespace))
 
 
 def rewrite_formulas(source: str, namespace: Any = _SESSION) -> str:
@@ -188,7 +188,7 @@ def rewrite_formulas(source: str, namespace: Any = _SESSION) -> str:
     ``drv ~ cyl`` is quoted first, since the cell must parse before the
     ownership of ``geom_function`` and ``facet_wrap`` can be read."""
     source = repairs.quote_formulas(source, [DIALECT])
-    return tidysyntax.reinterpret(source, [DIALECT], _session_namespace(namespace))
+    return tidy3syntax.reinterpret(source, [DIALECT], _session_namespace(namespace))
 
 
 def rewrite_formula_carets(source: str, namespace: Any = _SESSION) -> str:
@@ -199,7 +199,7 @@ def rewrite_formula_carets(source: str, namespace: Any = _SESSION) -> str:
     ``geom_function`` is rewritten: in a notebook's own function of that
     name, ``^`` stays XOR.
     """
-    return tidysyntax.reinterpret(source, [_POWER_ONLY], _session_namespace(namespace))
+    return tidy3syntax.reinterpret(source, [_POWER_ONLY], _session_namespace(namespace))
 
 
 def rewrite_backticks(source: str, namespace: Any = _SESSION) -> str:
@@ -211,7 +211,7 @@ def rewrite_backticks(source: str, namespace: Any = _SESSION) -> str:
     not Python goes first, so the cell parses when the ownership of
     ``geom_function`` and ``facet_wrap`` is read.
     """
-    return tidysyntax.reinterpret(_repair(source), [DIALECT], _session_namespace(namespace))
+    return tidy3syntax.reinterpret(_repair(source), [DIALECT], _session_namespace(namespace))
 
 
 def _parse_dedented(source: str) -> tuple[ast.Module, list[int]] | None:
@@ -339,7 +339,7 @@ def join_layer_lines(source: str, namespace: Any = _SESSION) -> str | None:
     if not logical:
         return None
     parsed = _parse_dedented(_repair(source))
-    owners = tidysyntax.Owners(parsed[0], _session_namespace(namespace), [DIALECT]) if parsed is not None else None
+    owners = tidy3syntax.Owners(parsed[0], _session_namespace(namespace), [DIALECT]) if parsed is not None else None
 
     def plot3_name(name: str, row: int) -> bool:
         return owners is not None and DIALECT.owns_module(owners.module(name, (row, 0)))
@@ -359,7 +359,7 @@ def join_layer_lines(source: str, namespace: Any = _SESSION) -> str | None:
         if bound:
             return bound[-1] is None or DIALECT.owns_module(bound[-1])
         if owners.context is not None and name in owners.context:
-            return DIALECT.owns_module(tidysyntax.module_of(owners.context[name]))
+            return DIALECT.owns_module(tidy3syntax.module_of(owners.context[name]))
         return True
 
     def may_join(tokens: list[tokenize.TokenInfo], head: list[tokenize.TokenInfo]) -> bool:
