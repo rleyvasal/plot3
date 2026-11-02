@@ -11,7 +11,6 @@ from plot3 import aes, facet_wrap, geom_point, ggplot
 from plot3.build import build_spec
 from plot3.masking import (
     BT_NAME,
-    TIDY3_BT_NAME,
     apply_masking,
     default_known_names,
     plot3_backtick_transform,
@@ -58,14 +57,6 @@ def test_aes_backtick_spaced_names():
     assert "First Name" in out
     assert "Age (%)" in out
     assert BT_NAME not in out
-
-
-def test_aes_accepts_tidy3_bt_sentinel():
-    # tidy3 preparser may run first and emit __tidy3_bt__
-    src = f"aes(x={TIDY3_BT_NAME}('First Name'), y=mpg)"
-    out = apply_masking(src, backticks=False, known=default_known_names())
-    assert "First Name" in out
-    assert TIDY3_BT_NAME not in out
 
 
 def test_facet_wrap_bare_name():
@@ -262,7 +253,6 @@ def test_backticks_inside_strings_and_comments_stay():
         ("facet_wrap(~cyl)", "facet_wrap('~cyl')"),
         ("facet_wrap( ~ cyl , ncol=2)", "facet_wrap( '~ cyl' , ncol=2)"),
         ("facet_wrap(~`my col`)", "facet_wrap('~my col')"),
-        (f"facet_wrap(~{TIDY3_BT_NAME}('my col'))", "facet_wrap('~my col')"),
         ("facet_grid(drv ~ cyl)", "facet_grid('drv ~ cyl')"),
         ('facet_grid(. ~ cyl, scales="free")', "facet_grid('. ~ cyl', scales=\"free\")"),
         ("facet_grid(facets = drv ~ .)", "facet_grid(facets = 'drv ~ .')"),

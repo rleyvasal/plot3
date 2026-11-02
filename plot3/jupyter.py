@@ -18,7 +18,6 @@ except Exception:  # pragma: no cover
 
 from plot3.io import ssh_bytes
 from plot3.masking import (
-    BT_NAME,
     DIALECT,
     Plot3MaskTransformer,
     _plot3_names,
@@ -29,10 +28,6 @@ from plot3.masking import (
 # R-style bare-name / backtick masking for aes() / facet_wrap().
 _R_STYLE_ON = True
 
-
-def _bt_fallback(name: str) -> str:
-    """If a backtick sentinel escapes AST rewrite, treat it as a column name."""
-    return str(name)
 
 
 def enable_r_style(ipython: Any | None = None) -> bool:
@@ -55,11 +50,6 @@ def enable_r_style(ipython: Any | None = None) -> bool:
             ipython = None
     if ipython is None:
         return False
-
-    ns = getattr(ipython, "user_ns", None)
-    if ns is not None:
-        # Escape hatch if AST missed a sentinel (still a valid column string).
-        ns[BT_NAME] = _bt_fallback
 
     # The source rewrites (backticks, facet formulas, ^ in geom_function,
     # + layer lines) go through tidy3syntax's coordinator, one transformer

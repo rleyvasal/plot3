@@ -10,7 +10,7 @@ Two-phase design (SolveIt / IPython)::
 
 1. **Source preparser** turns backticks into a sentinel::
 
-       `First Name`  →  __plot3_bt__("First Name")
+       `First Name`  →  __r_name__("First Name")
 
 2. **AST transformer** resolves the sentinel (and bare names) inside
    :func:`aes` / :func:`facet_wrap` as **column-name strings**::
@@ -21,9 +21,9 @@ Two-phase design (SolveIt / IPython)::
 
 Plain ``.py`` files are unchanged — keep ``aes(x="wt", y="mpg")`` there.
 
-When tidy3 is also loaded, its backtick preparser may emit
-``__tidy3_bt__("name")``; this transformer treats that sentinel the same way
-inside ``aes`` / ``facet_wrap`` so dual-stack notebooks keep working.
+The backtick placeholder ``__r_name__`` is tidy3syntax's, shared with tidy3,
+tidy3a and stats3, so a backtick another package's rewrite reached first
+reads the same inside ``aes`` / ``facet_wrap``.
 """
 
 from __future__ import annotations
@@ -32,19 +32,16 @@ import ast
 import builtins
 import dataclasses
 import io
-import re
 import tokenize
 from typing import Any, Iterable
 
 import tidy3syntax
 from tidy3syntax import repairs
-from tidy3syntax.scanner import Spans, apply
 
 # Sentinels (plot3 own + tidy3 compatibility).
-BT_NAME = "__plot3_bt__"
-TIDY3_BT_NAME = "__tidy3_bt__"
+BT_NAME = tidy3syntax.NAME  # the backtick placeholder tidy3, tidy3a, plot3 and stats3 share
 # tidy3syntax's neutral name too: another package's pass (tidy3a's) may rewrite a backtick in aes() first.
-_BT_SENTINELS = frozenset({BT_NAME, TIDY3_BT_NAME, tidy3syntax.NAME})
+_BT_SENTINELS = frozenset({BT_NAME})
 
 # Calls whose arguments / keywords are column *selectors* (→ strings).
 _SELECTOR_FUNCS = frozenset(
@@ -147,22 +144,9 @@ def _session_namespace(namespace: Any) -> dict[str, Any] | None:
     return getattr(ip, "user_ns", None) if ip is not None else None
 
 
-def _plot3_bt(source: str) -> str:
-    """tidy3syntax's ``__r_name__`` placeholder as plot3's ``__plot3_bt__``, outside strings and comments."""
-    if tidy3syntax.NAME not in source:
-        return source
-    spans = Spans.of(source)
-    edits = [
-        (m.start(), m.end(), BT_NAME)
-        for m in re.finditer(re.escape(tidy3syntax.NAME) + r"(?=\s*\()", source)
-        if m.start() in spans
-    ]
-    return apply(source, edits)
-
-
 def _repair(source: str) -> str:
     """The rewrites of text that is not Python: ``drv ~ cyl``, ``~`my col``` and backticks."""
-    return _plot3_bt(repairs.backticks(repairs.quote_formulas(source, [DIALECT])))
+    return repairs.backticks(repairs.quote_formulas(source, [DIALECT]))
 
 
 def rewrite_facet_formulas(source: str, *, unary: str = "owned", namespace: Any = _SESSION) -> str:
@@ -206,7 +190,7 @@ def rewrite_formula_carets(source: str, namespace: Any = _SESSION) -> str:
 def rewrite_backticks(source: str, namespace: Any = _SESSION) -> str:
     """Preparse backticks, ``^`` inside ``geom_function``, and facet formulas.
 
-    `` `col name` `` → ``__plot3_bt__("col name")``. ``^`` → ``**`` only
+    `` `col name` `` → ``__r_name__("col name")``. ``^`` → ``**`` only
     inside plot3's ``geom_function(...)``, where it means power. Backticks
     inside string literals and comments stay as written. The text that is
     not Python goes first, so the cell parses when the ownership of
@@ -776,11 +760,3 @@ def is_backtick_transformer(obj: Any) -> bool:
         in {"plot3_backtick_transform", "plot3_formula_transform"}
     )
 
-
-def is_tidy3_backtick_transformer(obj: Any) -> bool:
-    """True if tidy3 already installed a backtick preparser (share it)."""
-    mod = getattr(obj, "__module__", "") or ""
-    name = getattr(obj, "__name__", "") or ""
-    return name.endswith("backtick_transform") and (
-        mod.startswith("tidy3") or name == "tidy3_backtick_transform"
-    )

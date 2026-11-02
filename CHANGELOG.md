@@ -4,6 +4,16 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- In notebooks, the backtick placeholder in a rewritten cell is
+  tidy3syntax's `__r_name__`, not `__plot3_bt__`, and plot3 no longer reads
+  tidy3's `__tidy3_bt__`; `is_tidy3_backtick_transformer`, which looked for
+  tidy3's old preparser, is gone. Requires tidy3syntax 0.2, whose
+  placeholders the four packages now share alone.
+
 ## 0.9.0 — 2026-11-01
 
 plot3's notebook syntax registers with tidy3syntax's coordinator, shared with tidy3, tidy3a and stats3, and a notebook's own `aes()` keeps its arguments.
