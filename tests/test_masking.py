@@ -435,3 +435,8 @@ def test_plot3_calls_still_take_r_syntax_in_a_notebook():
         from IPython.core.interactiveshell import InteractiveShell
 
         InteractiveShell.clear_instance()
+
+
+def test_the_shared_backtick_placeholder_is_a_column_name():
+    # tidy3a's notebook pass may rewrite `First Name` in aes() before plot3's runs.
+    assert _norm("aes(x=__r_name__('First Name'), y=mpg)") == "aes(x='First Name', y='mpg')"

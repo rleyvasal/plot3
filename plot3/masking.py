@@ -43,7 +43,8 @@ from tidy3syntax.scanner import Spans, apply
 # Sentinels (plot3 own + tidy3 compatibility).
 BT_NAME = "__plot3_bt__"
 TIDY3_BT_NAME = "__tidy3_bt__"
-_BT_SENTINELS = frozenset({BT_NAME, TIDY3_BT_NAME})
+# tidy3syntax's neutral name too: another package's pass (tidy3a's) may rewrite a backtick in aes() first.
+_BT_SENTINELS = frozenset({BT_NAME, TIDY3_BT_NAME, tidy3syntax.NAME})
 
 # Calls whose arguments / keywords are column *selectors* (→ strings).
 _SELECTOR_FUNCS = frozenset(

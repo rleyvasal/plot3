@@ -4,6 +4,14 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- In a notebook with tidy3a 0.17 or later loaded first, a backtick name in
+  `aes()` (`` aes(x=`First Name`) ``) is a column name: plot3 reads
+  tidy3syntax's `__r_name__` placeholder as it reads tidy3's.
+
 ## 0.8.1 — 2026-11-01
 
 ### Changed

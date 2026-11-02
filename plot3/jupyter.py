@@ -60,6 +60,7 @@ def enable_r_style(ipython: Any | None = None) -> bool:
     if ns is not None:
         # Escape hatch if AST missed a sentinel (still a valid column string).
         ns[BT_NAME] = _bt_fallback
+        ns.setdefault("__r_name__", _bt_fallback)
         # When tidy3 is not loaded, leave tidy3 sentinel unset; plot3 AST
         # still rewrites __tidy3_bt__ if tidy3's preparser ran first.
 
