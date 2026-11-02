@@ -4,7 +4,9 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.10.0 — 2026-11-02
+
+Only tidy3syntax's placeholders, shared with tidy3, tidy3a and stats3.
 
 ### Changed
 
