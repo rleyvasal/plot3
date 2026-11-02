@@ -487,10 +487,12 @@ def enable_layer_lines(ipython: Any | None = None) -> bool:
     return True
 
 
-def register_plot3(*, quiet=True, r_style: bool = True) -> bool:
-    if get_ipython is None:
-        return False
-    ip = get_ipython()
+def register_plot3(*, quiet=True, r_style: bool = True, ipython: Any | None = None) -> bool:
+    ip = ipython
+    if ip is None:
+        if get_ipython is None:
+            return False
+        ip = get_ipython()
     if ip is None:
         return False
     ok = False
@@ -541,4 +543,15 @@ def register_plot3(*, quiet=True, r_style: bool = True) -> bool:
 
 
 def load_ipython_extension(ip=None):
-    register_plot3(quiet=True)
+    register_plot3(quiet=True, ipython=ip)
+
+
+def dialect():
+    """plot3's dialect for tidy3syntax (its ``tidy3syntax.dialects`` entry point): the
+    notebook loader, and plot3's bare-name masking for exports."""
+    from plot3.masking import apply_masking, default_known_names
+
+    def mask(source: str, known: frozenset[str]) -> str:
+        return apply_masking(source, known=set(known) | default_known_names(), backticks=False)
+
+    return dataclasses.replace(_dialect(), extension="plot3.jupyter:load_ipython_extension", mask=mask)

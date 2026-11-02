@@ -25,6 +25,8 @@ under **Changed**.
 - A notebook's own function named `aes`, `facet_wrap` or `geom_function`
   keeps its arguments as written: the bare-name masking checks whose call
   it is, as the source rewrites already did.
+- `register_plot3(ipython=...)` sets up the shell it is given (the notebook
+  loader passes its shell), not only the running one.
 
 ## 0.8.1 — 2026-11-01
 

@@ -32,9 +32,9 @@ pdf = ["cairosvg>=2.7"]
 dev = ["pytest>=7.0", "polars>=1.0", "contourpy>=1.0"]
 
 # A notebook cell that imports plot3 gets its syntax in that same cell
-# (tidy3syntax's coordinator calls this before rewriting the cell).
+# (its dialect names the notebook loader tidy3syntax's coordinator calls).
 [project.entry-points."tidy3syntax.dialects"]
-plot3 = "plot3.jupyter:load_ipython_extension"
+plot3 = "plot3.jupyter:dialect"
 
 [project.urls]
 Homepage = "https://github.com/rleyvasal/plot3"
