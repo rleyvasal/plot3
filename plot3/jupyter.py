@@ -541,7 +541,7 @@ def dialect():
     notebook loader, and plot3's bare-name masking for exports."""
     from plot3.masking import apply_masking, default_known_names
 
-    def mask(source: str, known: frozenset[str]) -> str:
+    def mask(source: str, known: frozenset[str], context: Any = None) -> str:
         return apply_masking(source, known=set(known) | default_known_names(), backticks=False)
 
     return dataclasses.replace(_dialect(), extension="plot3.jupyter:load_ipython_extension", mask=mask)
