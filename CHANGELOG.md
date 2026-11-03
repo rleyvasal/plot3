@@ -4,6 +4,16 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.11.1 — 2026-11-03
+
+### Fixed
+
+- Passing a list or tuple of column names as a geom's first positional
+  argument (`geom_boxplot(["a", "b"])`) now raises a `TypeError` at once,
+  pointing to `aes(...)` for mappings or `columns=[...]` for several
+  columns, instead of failing later at render time with an unclear
+  dictionary conversion error.
+
 ## 0.11.0 — 2026-11-02
 
 Log scales transform the data before statistics, as in ggplot2, and a
