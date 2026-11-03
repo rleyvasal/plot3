@@ -224,11 +224,12 @@ def dt_ladder(lo_s: float, hi_s: float) -> list[list[list]]:
 class Scale:
     """Resolved positional scale: numeric, datetime or categorical.
 
-    ``trans`` is ``None`` or ``"log10"``. A log scale stores ``lo`` / ``hi``
-    and tick positions in log10 space. Labels stay in the original units.
+    ``trans`` is ``None`` or a :class:`plot3.transforms.Transform` (log10,
+    pseudo-log). Such a scale stores ``lo`` / ``hi`` and tick positions in
+    the transformed space. Labels stay in the original units.
     """
 
-    def __init__(self, kind: str, trans: str | None = None):
+    def __init__(self, kind: str, trans=None):
         self.kind = kind  # "num" | "dt" | "cat"
         self.trans = trans
         self.lo = math.inf
@@ -256,14 +257,14 @@ class Scale:
     def spec(self) -> dict:
         d = {"kind": self.kind, "lo": self.lo, "hi": self.hi}
         lo, hi = min(self.lo, self.hi), max(self.lo, self.hi)  # a reversed axis
-        if self.trans:
-            d["trans"] = self.trans
+        if self.trans is not None:
+            d.update(self.trans.spec())
         if self.kind == "cat":
             d["cats"] = self.cats
         elif self.kind == "dt":
             d["ladder"] = dt_ladder(lo, hi)
-        elif self.trans == "log10":
-            d["ticks"] = log_ticks(lo, hi)
+        elif self.trans is not None:
+            d["ticks"] = self.trans.ticks(lo, hi)
         else:
             ticks = nice_ticks(lo, hi)
             d["ticks"] = [list(pair) for pair in zip(ticks, fmt_ticks(ticks))]
@@ -371,15 +372,13 @@ def _apply_custom(d: dict, scale: "Scale", custom, lo: float, hi: float) -> None
                 for level in d.get("ladder") or []
             ]
         return
-    log = scale.trans == "log10"
+    trans = scale.trans
     if custom.breaks is not None:
         ticks = []
         for i, value in enumerate(custom.breaks):
             value = float(value)
-            if log and value <= 0:
-                continue
-            pos = math.log10(value) if log else value
-            if not lo - 1e-9 <= pos <= hi + 1e-9:
+            pos = value if trans is None else trans.value(value)
+            if pos is None or not lo - 1e-9 <= pos <= hi + 1e-9:
                 continue
             if isinstance(labels, (list, tuple)):
                 text = str(labels[i])
@@ -392,6 +391,7 @@ def _apply_custom(d: dict, scale: "Scale", custom, lo: float, hi: float) -> None
         d["fixed"] = True
     elif labels is not None and not isinstance(labels, (list, tuple)):
         d["ticks"] = [
-            [pos, format_label(10 ** pos if log else pos, labels)] for pos, _text in d.get("ticks") or []
+            [pos, format_label(pos if trans is None else float(trans.inverse([pos])[0]), labels)]
+            for pos, _text in d.get("ticks") or []
         ]
         d["fixed"] = True

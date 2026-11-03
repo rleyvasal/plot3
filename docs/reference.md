@@ -133,7 +133,7 @@ and `aes(colour=)` for points and lines.
 
 | Scale | Functions |
 |---|---|
-| Position | `scale_x_continuous(name, limits, breaks, labels, trans="log10"/"reverse")`, `scale_x_discrete(limits, labels)`, `scale_x_date(date_breaks, date_labels)`, `scale_x_log10`, `scale_x_reverse`, `xlim`, `ylim`, `lims` (and the `y` versions) |
+| Position | `scale_x_continuous(name, limits, breaks, labels, trans="log10"/"pseudo_log"/pseudo_log_trans(sigma, base)/"reverse")`, `scale_x_discrete(limits, labels)`, `scale_x_date(date_breaks, date_labels)`, `scale_x_log10`, `scale_x_reverse`, `xlim`, `ylim`, `lims` (and the `y` versions) |
 | Label formats | `"percent"`, `"comma"`, `"dollar"`, `"scientific"`, `"{:.1f} kg"`, a list, or a function |
 | Discrete colour / fill | `scale_colour_hue` (ggplot2's default colours), `scale_colour_manual`, `scale_colour_brewer(palette="Set2")`, `scale_colour_viridis_d`, `scale_colour_grey`, `scale_colour_okabe_ito` (colour-blind safe), `scale_colour_identity` (the column holds colours) |
 | Continuous colour / fill | `scale_colour_gradient(low, high)`, `scale_colour_gradient2(low, mid, high, midpoint)`, `scale_colour_gradientn(colours, values)`, `scale_colour_distiller(palette="RdBu")`, `scale_colour_viridis_c`, `scale_colour_continuous(trans="log10")` |
@@ -144,6 +144,23 @@ and `aes(colour=)` for points and lines.
 Every colour scale has `scale_fill_*` and `scale_color_*` names. Colours can
 be CSS names (`"steelblue"`), R greys (`"grey50"`), `"rgb(1,2,3)"`, or hex.
 Limits on a continuous axis drop the rows outside them and say how many.
+
+A scale transformation applies before statistics, as in ggplot2: under
+`scale_y_log10()` a boxplot's quartiles, whiskers and outliers are those of
+the log10 values, and under `scale_x_log10()` a histogram bins in log space.
+`coord_transform(y="log10")` (alias `coord_trans`) computes the statistics
+from the original values and draws them on a log axis. For costs or counts
+with zeros or negatives, `trans="pseudo_log"` keeps every row: it is linear
+within about `sigma` of zero and logarithmic beyond.
+
+```python
+costs = pd.DataFrame({"team": ["a"] * 6 + ["b"] * 6,
+                      "cost": [0, 3, 40, 120, 900, 15000, -20, 0, 5, 60, 800, 4000]})
+ggplot(costs, aes(x="team", y="cost")) + geom_boxplot() + scale_y_continuous(trans="pseudo_log")
+(ggplot(costs, aes(x="team", y="cost")) + geom_boxplot()
+ + scale_y_continuous(trans=pseudo_log_trans(sigma=10)))
+ggplot(costs.query("cost > 0"), aes(x="team", y="cost")) + geom_boxplot() + coord_transform(y="log10")
+```
 
 ## Themes and titles
 
@@ -184,6 +201,26 @@ cannot draw warns.
 `guides(colour=guide_legend(title="Arm", reverse=True))` retitles or
 reorders it. The `stat_*` spellings (`stat_smooth`, `stat_bin`,
 `stat_count`, `stat_density`, `stat_function(fun=, args=)`) work too.
+
+### Several measurement columns (wide form)
+
+`columns=` on any geom plots several columns without reshaping first. They
+are stacked into `name` and `value` (`names_to=`, `values_to=`) before the
+statistics run, in the order given, and each column gets its own colour.
+`columns` is a list, a `{column: label}` dict, or a pattern.
+
+```python
+wide = pd.DataFrame({"observation": [1, 2, 3, 4], "site": ["n", "s", "n", "s"],
+                     "measurement_a": [10, 15, 8, 12], "measurement_b": [12, 14, 10, 9],
+                     "measurement_c": [9, 11, 7, 10]})
+ggplot(wide) + geom_boxplot(columns="measurement_*")                       # one box per column
+ggplot(wide) + geom_density(columns=["measurement_a", "measurement_b"], alpha=0.4)
+ggplot(wide, aes(x="observation")) + geom_line(columns="measurement_*")    # one line per column
+ggplot(wide, aes(x="site")) + geom_col(columns="measurement_*")            # components of a total
+(ggplot(wide, aes(x="site"))
+ + geom_col(columns={"measurement_a": "A", "measurement_b": "B"}, position="dodge")
+ + labs(fill="Measurement", y="mm"))
+```
 
 Zoom without dropping data with `coord_cartesian`: a smoother or boxplot is
 still computed from every row, while `xlim()` and `scale_x_continuous(limits=)`
@@ -285,7 +322,7 @@ finite curves are not. Pass your own functions as keywords:
 | Positions | `position="stack"/"dodge"/"fill"/"identity"/"jitter"`, `position_dodge(width)`, `position_dodge2(padding)`, `position_stack()`, `position_fill()`, `position_jitter()`, `position_jitterdodge()`, `position_nudge()` |
 | Functions | `geom_function`, `geom_vector_field`, `area`, `tangent`, `derivative` |
 | Scales | see [Scales](#scales) |
-| Coordinates | `coord_cartesian`, `coord_flip`, `coord_equal` / `coord_fixed`, `coord_polar`, `coord_3d` |
+| Coordinates | `coord_cartesian`, `coord_transform` / `coord_trans`, `coord_flip`, `coord_equal` / `coord_fixed`, `coord_polar`, `coord_3d` |
 | Facets and layout | `facet_wrap`, `facet_grid`, `labeller="label_both"` / `labeller(var=dict)`, `p1 \| p2`, `p1 / p2`, `plot_layout(widths, heights, height)`, `plot_annotation` |
 | Labels and themes | `labs(title, subtitle, caption, tag, x, y, colour, fill, alpha)`, `ggtitle`, `xlab`, `ylab`, `guides`, `theme_*`, `theme()`, `element_text`, `element_line`, `element_rect`, `element_blank` |
 | Animation | `transition_time`, `transition_states`, `slider` |

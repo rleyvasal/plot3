@@ -2677,7 +2677,7 @@ def _window_ticks(scale: dict, u_lo: float, u_hi: float) -> dict:
     Breaks the user chose (``fixed``) are kept.
     """
     if (
-        scale.get("kind") != "num" or scale.get("fixed") or scale.get("trans") == "log10"
+        scale.get("kind") != "num" or scale.get("fixed") or scale.get("trans") in ("log10", "pseudo_log")
         or (u_hi - u_lo) <= 1.2 * (1 + 2 * _PAD)
     ):
         return scale

@@ -4,6 +4,36 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+Log scales transform the data before statistics, as in ggplot2, and a
+layer can plot several measurement columns without reshaping.
+
+### Added
+
+- `coord_transform(x=, y=)` (alias `coord_trans`) transforms the axes after
+  statistics run: a boxplot's quartiles, whiskers and outliers, a
+  histogram's bins, or a smoother's fit come from the original values.
+- A pseudo-log scale for data with zeros or negative values:
+  `scale_y_continuous(trans="pseudo_log")` or
+  `trans=pseudo_log_trans(sigma=, base=)`. It is linear within about
+  `sigma` of zero and logarithmic beyond; ticks stay in original units.
+  `transform=` is accepted as ggplot2 3.5's name for `trans=`.
+- Wide-form input: `geom_boxplot(columns=["a", "b"])` and every other geom
+  stack the named columns (a list, a `{column: label}` dict, or a pattern
+  such as `"measurement_*"`) into `name` / `value` before statistics: one
+  box or violin per column, overlaid histograms and densities, one line
+  per column on a shared x, stacked or (`position="dodge"`) grouped bars.
+  `names_to=` / `values_to=` rename the two columns.
+
+### Changed
+
+- `scale_x_log10()`, `scale_y_log10()` and `scale_*_continuous(trans=)`
+  transform the data before statistics run, as ggplot2 does, so a log-scale
+  boxplot's whiskers and outliers are those of the log10 values, and a
+  log-x histogram bins in log space. Use `coord_transform()` for the old
+  order.
+
 ## 0.10.0 — 2026-11-02
 
 Only tidy3syntax's placeholders, shared with tidy3, tidy3a and stats3.

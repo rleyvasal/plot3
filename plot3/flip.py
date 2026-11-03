@@ -70,8 +70,16 @@ def flip_layers(layers: list, g) -> list:
     out = []
     for geom in layers:
         for piece in _lower(geom, g):
+            if getattr(piece, "_pre_scaled", None) != getattr(geom, "_pre_scaled", None):
+                piece = copy.copy(piece)
+                piece._pre_scaled = getattr(geom, "_pre_scaled", frozenset())
             out.append(_swap(piece))
     return out
+
+
+def _swap_axes(axes) -> frozenset:
+    """Axes a layer's data hold scale-transformed, after the flip."""
+    return frozenset(_SWAP.get(a, a) for a in axes or ())
 
 
 def _merged(geom, g) -> dict:
@@ -227,6 +235,7 @@ def _swap(geom) -> _Geom:
     if getattr(geom, "_x_domain", None) is not None:
         out._x_domain = None
     out.sort_x = False
+    out._pre_scaled = _swap_axes(getattr(geom, "_pre_scaled", None))
     return out
 
 
@@ -241,5 +250,6 @@ def flip_rugs(rugs: list) -> list:
         clone.mapping = aes()
         clone.mapping.update(swap_mapping(rug.mapping))
         clone.sides = "".join(_SIDE_SWAP[side] for side in rug.sides)
+        clone._pre_scaled = _swap_axes(getattr(rug, "_pre_scaled", None))
         out.append(clone)
     return out

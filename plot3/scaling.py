@@ -95,14 +95,16 @@ class PositionScale:
         self.limits = limits
         self.breaks = None if breaks is None else list(breaks)
         self.labels = labels
+        from plot3.transforms import as_transform
+
         self.trans = trans
+        # log10 / pseudo-log: applied to the data before statistics run.
+        self.transform = as_transform(trans) if kind == "continuous" else None
         self.date_breaks = date_breaks
         self.date_labels = date_labels
         if kind == "continuous" and limits is not None:
             if len(limits) != 2:
                 raise ValueError(f"{axis} limits are (low, high); use None for an open end")
-        if trans not in {None, "log10", "reverse", "identity"}:
-            raise ValueError("trans is 'log10', 'reverse', or None")
         if isinstance(labels, (list, tuple)) and self.breaks is not None and len(labels) != len(self.breaks):
             raise ValueError("labels must have one entry per break")
         if date_breaks is not None:
@@ -113,14 +115,28 @@ def _scale(axis, kind, **kw):
     return PositionScale(axis, kind, **kw)
 
 
-def scale_x_continuous(name=None, *, limits=None, breaks=None, labels=None, trans=None):
-    """x axis title, ``limits=(lo, hi)``, ``breaks=[...]``, ``labels=``, ``trans=``."""
-    return _scale("x", "continuous", name=name, limits=limits, breaks=breaks, labels=labels, trans=trans)
+def _trans_arg(trans, transform):
+    if trans is not None and transform is not None:
+        raise ValueError("give trans= or transform=, not both")
+    return transform if trans is None else trans
 
 
-def scale_y_continuous(name=None, *, limits=None, breaks=None, labels=None, trans=None):
+def scale_x_continuous(name=None, *, limits=None, breaks=None, labels=None, trans=None, transform=None):
+    """x axis title, ``limits=(lo, hi)``, ``breaks=[...]``, ``labels=``, ``trans=``.
+
+    ``trans`` (or ``transform``, its ggplot2 3.5 name) is "log10",
+    "pseudo_log", ``pseudo_log_trans(sigma=, base=)``, or "reverse". A
+    transformation applies before statistics run, as in ggplot2; use
+    ``coord_transform()`` to transform after them.
+    """
+    return _scale("x", "continuous", name=name, limits=limits, breaks=breaks, labels=labels,
+                  trans=_trans_arg(trans, transform))
+
+
+def scale_y_continuous(name=None, *, limits=None, breaks=None, labels=None, trans=None, transform=None):
     """y axis: see :func:`scale_x_continuous`."""
-    return _scale("y", "continuous", name=name, limits=limits, breaks=breaks, labels=labels, trans=trans)
+    return _scale("y", "continuous", name=name, limits=limits, breaks=breaks, labels=labels,
+                  trans=_trans_arg(trans, transform))
 
 
 def scale_x_reverse(name=None, *, limits=None, breaks=None, labels=None):
