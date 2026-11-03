@@ -208,3 +208,26 @@ def test_notebook_bare_names_inside_columns_become_strings():
     src = "aes(x=column_names(), y=columns(measurement_a, measurement_b))"
     out = ast.unparse(ast.parse(apply_masking(src, known=default_known_names())))
     assert out == "aes(x=column_names(), y=columns('measurement_a', 'measurement_b'))"
+
+
+@pytest.mark.parametrize("geom", [geom_point, geom_line, geom_boxplot, geom_col])
+@pytest.mark.parametrize("bad", [
+    ["measurement_a", "measurement_b"],
+    ("measurement_a", "measurement_b"),
+])
+def test_positional_list_or_tuple_mapping_fails_at_construction(geom, bad):
+    with pytest.raises(TypeError) as err:
+        geom(bad)
+    assert str(err.value) == (
+        f"{geom.__name__}(): the first argument is an aesthetic mapping; "
+        "use aes(...) for mappings or columns=[...] for multiple columns."
+    )
+
+
+def test_aes_mapping_and_columns_keyword_still_accepted():
+    point = geom_point(aes(x="observation", y="measurement_a"))
+    assert point.mapping["y"] == "measurement_a"
+    assert geom_point().mapping is not None
+    cols = geom_point(aes(x="observation"), columns=["measurement_a", "measurement_b"])
+    assert cols.columns == ["measurement_a", "measurement_b"]
+    build_spec(ggplot(_wide()) + cols)

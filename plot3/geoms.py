@@ -165,6 +165,11 @@ class _Geom:
     def __init__(self, mapping: aes | None = None, *, color=None, colour=None,
                  alpha=None, data=None, columns=None, names_to="name",
                  values_to="value", **params):
+        if isinstance(mapping, (list, tuple)):
+            raise TypeError(
+                f"{type(self).__name__}(): the first argument is an aesthetic mapping; "
+                "use aes(...) for mappings or columns=[...] for multiple columns."
+            )
         self.mapping = mapping or aes()
         self.const_color = color if color is not None else colour
         self.alpha = alpha
