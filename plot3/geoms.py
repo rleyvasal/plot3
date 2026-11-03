@@ -22,6 +22,10 @@ def _as_column_name(value):
     """
     if value is None or isinstance(value, str):
         return value
+    from plot3.wide import _WideMarker
+
+    if isinstance(value, _WideMarker):
+        return value  # aes(y=columns("m_*")): stacked before the stats
     # Positional columns for ArrayTable / integer-named frames (not bool).
     if isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_)):
         return str(int(value))
@@ -159,12 +163,18 @@ class _Geom:
     _takes_any_keyword = False
 
     def __init__(self, mapping: aes | None = None, *, color=None, colour=None,
-                 alpha=None, data=None, **params):
+                 alpha=None, data=None, columns=None, names_to="name",
+                 values_to="value", **params):
         self.mapping = mapping or aes()
         self.const_color = color if color is not None else colour
         self.alpha = alpha
         # A layer's own rows (ggplot2's geom_rect(data = periods, ...)).
         self.layer_data = data
+        # Wide-form input: columns=["a", "b"] stacks these columns into
+        # names_to / values_to before statistics run (see plot3.wide).
+        self.columns = columns
+        self.names_to = str(names_to)
+        self.values_to = str(values_to)
         self.params = params
         if params and not self._takes_any_keyword and type(self).__name__ != "_Geom":
             _warn_unknown(self, params)
@@ -1571,6 +1581,31 @@ class coord_cartesian:
         self.xlim = None if xlim is None else tuple(xlim)
         self.ylim = None if ylim is None else tuple(ylim)
         self.expand = bool(expand)
+
+
+class coord_transform(coord_cartesian):
+    """Transform the axes after statistics run (ggplot2 ``coord_transform``).
+
+    ``coord_transform(y="log10")`` computes a boxplot's quartiles, whiskers
+    and outliers, a histogram's bins, or a smoother's fit on the original
+    values, then draws them on a log axis. ``scale_y_log10()`` transforms
+    the data first, so those statistics are computed on log10 values.
+
+    ``x`` and ``y`` are "log10", "pseudo_log", ``pseudo_log_trans()``, or
+    None. ``xlim`` / ``ylim`` zoom without dropping data, in original units.
+    """
+
+    kind = "transform"
+
+    def __init__(self, x=None, y=None, *, xlim=None, ylim=None, expand=True):
+        from plot3.transforms import as_transform
+
+        super().__init__(xlim=xlim, ylim=ylim, expand=expand)
+        self.x = as_transform(x)
+        self.y = as_transform(y)
+
+
+coord_trans = coord_transform
 
 
 class geom_rug(_Geom):

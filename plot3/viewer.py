@@ -564,6 +564,7 @@ function ticksFor(ax, lo, hi) {
     return thin(vis, 10);
   }
   if (sc.trans === 'log10') return logTicks(lo, hi);
+  if (sc.trans === 'pseudo_log') return pseudoTicks(sc, lo, hi);
   const vals = niceTicks(lo, hi, 5);
   return vals.map((v, i) => [v, fmtTicks(vals)[i]]);
 }
@@ -584,11 +585,42 @@ function logTicks(lo, hi) {
   if (!out.length) out.push([lo, fmt(Math.pow(10, lo))]);
   return out;
 }
+// pseudo-log (asinh): linear near zero, log far from it.
+function pseudoInv(sc, v) { return 2 * sc.sigma * Math.sinh(v * Math.log(sc.base)); }
+function pseudoFwd(sc, v) { return Math.asinh(v / (2 * sc.sigma)) / Math.log(sc.base); }
+// Mirrors plot3.transforms.pseudo_log_breaks.
+function pseudoTicks(sc, lo, hi) {
+  const a = pseudoInv(sc, lo), b = pseudoInv(sc, hi);
+  if (!(b > a)) return [[lo, fmt(a)]];
+  const reach = Math.max(Math.abs(a), Math.abs(b));
+  let vals;
+  if (reach <= 10 * sc.sigma) {
+    vals = niceTicks(a, b, 5).filter(v => v >= a - 1e-9 && v <= b + 1e-9);
+  } else {
+    const top = Math.ceil(Math.log10(reach));
+    const bottom = Math.max(Math.floor(Math.log10(sc.sigma)), top - 12);
+    const mults = top - bottom <= 2 ? [1, 2, 5] : [1];
+    const mags = [];
+    for (let e = bottom; e <= top; e++) for (const m of mults) mags.push(m * Math.pow(10, e));
+    const tol = 1e-9 * reach;
+    vals = [0, ...mags, ...mags.map(m => -m)]
+      .filter(v => v >= a - tol && v <= b + tol).sort((p, q) => p - q);
+    while (vals.length > 11) {
+      const pos = vals.filter(v => v > 0).filter((_, i) => i % 2 === 1);
+      const negAll = vals.filter(v => v < 0).reverse();
+      const neg = negAll.filter((_, i) => i % 2 === 1);
+      vals = [...neg, ...(vals.includes(0) ? [0] : []), ...pos].sort((p, q) => p - q);
+    }
+  }
+  if (!vals.length) return [[lo, fmt(a)]];
+  const labels = fmtTicks(vals);
+  return vals.map((v, i) => [pseudoFwd(sc, v), labels[i]]);
+}
 // hover value: enough digits to resolve ~1/300 of the visible span
 function fmtSpan(ax, v, spanData) {
   const sc = S.scales[ax];
   if (sc.kind !== 'num') return fmtAxis(ax, v);
-  if (sc.trans === 'log10') return fmt(v);
+  if (sc.trans === 'log10' || sc.trans === 'pseudo_log') return fmt(v);
   const d = Math.max(0, Math.min(6,
     Math.ceil(-Math.log10(Math.max(1e-12, spanData / 300)))));
   return v.toFixed(d);
@@ -599,6 +631,7 @@ function fromScale(ax, norm) {
   const sc = S.scales[ax];
   const v = sc.lo + norm * ((sc.hi - sc.lo) || 1);
   if (sc.trans === 'log10') return Math.pow(10, v);
+  if (sc.trans === 'pseudo_log') return pseudoInv(sc, v);
   return v;
 }
 

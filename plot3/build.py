@@ -20,6 +20,7 @@ from plot3.geoms import (
     coord_cartesian,
     coord_equal,
     coord_polar,
+    coord_transform,
     geom_col,
     scale_colour_continuous,
 )
@@ -28,6 +29,7 @@ from plot3.scales import ordered_levels, Scale, col_values, fmt_num, fmt_ticks, 
 from plot3.stats3d import isosurface_levels, regular_grid_mesh
 from plot3.table import (
     ColumnNotFound,
+    detect_backend,
     category_labels,
     count_by,
     filter_equal,
@@ -512,8 +514,9 @@ def _ref_scale_value(scale, value) -> float | None:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    if getattr(scale, "trans", None) == "log10":
-        return math.log10(number) if number > 0 else None
+    trans = getattr(scale, "trans", None)
+    if trans is not None:
+        return trans.value(number) if math.isfinite(number) else None
     return number if math.isfinite(number) else None
 
 
@@ -1186,14 +1189,218 @@ def _coord_spec(coord, is3d: bool, resolved, scales=None) -> dict | None:
     return None
 
 
-def _log10_values(values: np.ndarray) -> tuple[np.ndarray, int]:
-    """Map positive values to log10. Non-positive finites count as omitted."""
+def _transform_values(trans, values: np.ndarray) -> tuple[np.ndarray, int]:
+    """Values in the transformation's space; finites it has no place for
+    (non-positive on a log scale) become NaN and are counted."""
     v = np.asarray(values, dtype=np.float64)
-    out = np.full(v.shape, np.nan, dtype=np.float64)
-    ok = np.isfinite(v) & (v > 0)
-    out[ok] = np.log10(v[ok])
-    n_bad = int(np.count_nonzero(np.isfinite(v) & (v <= 0)))
-    return out, n_bad
+    return trans.transform(v), int(np.count_nonzero(trans.outside(v)))
+
+
+# Aesthetics that are positions on each axis: a scale transformation
+# applies to them before statistics run.
+_AXIS_AES = {
+    "x": ("x", "xmin", "xmax", "xend"),
+    "y": ("y", "ymin", "ymax", "yend", "lower", "middle", "upper"),
+}
+# Aesthetics that do not care which numbers a column holds, only which rows
+# share one, so they may read a transformed column.
+_GROUPING_AES = {"group"}
+
+
+def _raw_units(geom) -> bool:
+    """A layer whose positions do not come from the plot's data: a formula,
+    a vector field, or an annotation. Its positions are transformed after
+    its statistics, as they are drawn."""
+    return bool(
+        getattr(geom, "kind", None) in {"function", "vector"}
+        or getattr(geom, "_annotation", False)
+        or getattr(geom, "data_override", None) is not None
+    )
+
+
+def _numeric_column(frame, column: str) -> bool:
+    backend = detect_backend(frame)
+    if backend == "pandas":
+        dtype = frame[column].dtype
+        return pd.api.types.is_numeric_dtype(dtype) and not pd.api.types.is_bool_dtype(dtype)
+    if backend in {"polars", "tidy"}:
+        from plot3.table import _eager_polars
+
+        return _eager_polars(frame).schema[column].is_numeric()
+    return False
+
+
+def _with_columns(frame, columns: dict):
+    """``frame`` with these float columns set, or None for a backend that
+    cannot take new columns (its layers then transform after their stats)."""
+    backend = detect_backend(frame)
+    if backend == "pandas":
+        out = frame.copy()
+        for name, values in columns.items():
+            out[name] = values
+        return out
+    if backend in {"polars", "tidy"}:
+        import polars as pl
+        from plot3.table import _eager_polars
+
+        # NaN is not missing to polars; null is, so the stats drop it.
+        series = [pl.Series(name, values).fill_nan(None) for name, values in columns.items()]
+        return _eager_polars(frame).with_columns(series)
+    return None
+
+
+def _scale_transform(g, axis: str):
+    """The transformation ``scale_{axis}_*()`` applies before statistics."""
+    pscale = getattr(g, f"{axis}scale", None)
+    if pscale is not None:
+        return getattr(pscale, "transform", None)
+    if getattr(g, f"scale_{axis}", None) is not None:
+        from plot3.transforms import LOG10
+
+        return LOG10
+    return None
+
+
+def _position_axis(aes_name: str) -> str | None:
+    return next((a for a, names in _AXIS_AES.items() if aes_name in names), None)
+
+
+def _transform_before_stats(g, data, layers, rug_layers, axis_trans):
+    """Transform the data's position columns by the scale, as ggplot2 does
+    before statistics: a log-scale boxplot's quartiles, whiskers, and
+    outliers are those of the log10 values.
+
+    ``axis_trans(axis)`` is the scale's transformation for that axis, or
+    None. Each layer comes back as a copy whose ``_pre_scaled`` names the
+    axes its data now hold transformed; any other axis (a histogram's
+    count, a formula, an annotation) is transformed after its statistics.
+
+    Returns the figure (its data transformed), the data, the layers, the
+    rugs, the count of values the layers lost (non-positive on a log
+    scale), and, by frame id, the rows each transformed column lost, so
+    they are not also reported as missing.
+    """
+    trans_of = {axis: axis_trans(axis) for axis in ("x", "y")}
+    if all(t is None for t in trans_of.values()):
+        return g, data, layers, rug_layers, 0, {}
+
+    full = getattr(g, "data", None)
+
+    def frame_of(layer):
+        own = getattr(layer, "layer_data", None)
+        return own if own is not None else data
+
+    def uses(mapping):
+        """(aesthetic, column, representation) for each mapped column."""
+        for aes_name, column in mapping.items():
+            if not isinstance(column, str) or aes_name in _GROUPING_AES:
+                continue
+            axis = _position_axis(aes_name)
+            yield aes_name, column, (trans_of[axis] if axis is not None else None)
+
+    users = [
+        (layer, _layer_mapping(g.mapping, layer))
+        for layer in list(layers) + list(rug_layers)
+        if not _raw_units(layer) and frame_of(layer) is not None
+    ]
+    # Which representations each (frame, column) needs: a transformation,
+    # or None for the original values (a colour, a label).
+    needs: dict[int, dict[str, list]] = {}
+    frames: dict[int, object] = {}
+    for layer, mapping in users:
+        frame = frame_of(layer)
+        frames[id(frame)] = frame
+        wanted = needs.setdefault(id(frame), {})
+        for _aes, column, rep in uses(mapping):
+            if has_column(frame, column):
+                reps = wanted.setdefault(column, [])
+                if rep not in reps:
+                    reps.append(rep)
+    if full is not None and data is not None and full is not data and id(data) in needs:
+        # A subsampled figure: rugs and coord_flip read the full data.
+        needs[id(full)] = needs[id(data)]
+        frames[id(full)] = full
+
+    new_frames: dict[int, object] = {}
+    lost: dict[int, dict[str, np.ndarray]] = {}
+    names: dict[int, dict[tuple, str]] = {}
+    for key, wanted in needs.items():
+        frame = frames[key]
+        columns: dict[str, np.ndarray] = {}
+        renamed: dict[tuple, str] = {}
+        masks: dict[str, np.ndarray] = {}
+        for column, reps in wanted.items():
+            if all(r is None for r in reps) or not _numeric_column(frame, column):
+                continue
+            raw = numeric_array(frame, column, dropna=False)
+            # The first transformation takes the column's own name. Another
+            # use of the column (raw for a colour, or the other axis) reads
+            # a copy, so each aesthetic sees the values it expects.
+            primary = next(r for r in reps if r is not None)
+            for rep in reps:
+                if rep is None:
+                    values, name = raw, f".plot3.raw.{column}"
+                else:
+                    values = rep.transform(raw)
+                    name = column if rep == primary else f".plot3.{rep.name}.{column}"
+                    masks[name] = rep.outside(raw)
+                columns[name] = values
+                if name != column:
+                    renamed[(column, rep)] = name
+        out = _with_columns(frame, columns) if columns else None
+        if out is not None:
+            new_frames[key] = out
+            lost[id(out)] = masks
+            names[key] = renamed
+
+    labs = dict(getattr(g, "labs", None) or {})
+    dropped = 0
+
+    def moved(layer, mapping):
+        nonlocal dropped
+        frame = frame_of(layer)
+        out = copy.copy(layer)
+        out._pre_scaled = frozenset()
+        if id(frame) not in new_frames:
+            return out
+        new = new_frames[id(frame)]
+        renamed = names[id(frame)]
+        masks = lost[id(new)]
+        own = dict(getattr(layer, "mapping", None) or {})
+        changed = False
+        done = {axis: None for axis, t in trans_of.items() if t is not None}
+        bad = np.zeros(n_rows(new), dtype=bool)
+        for aes_name, column, rep in uses(mapping):
+            name = renamed.get((column, rep), column)
+            if name != column:
+                own[aes_name] = name
+                labs.setdefault(aes_name, column)
+                changed = True
+            axis = _position_axis(aes_name)
+            if axis in done and done[axis] is not False:
+                # The axis is done only if every position on it was moved.
+                done[axis] = name in masks
+                if name in masks:
+                    bad |= masks[name]
+        dropped += int(bad.sum())
+        out._pre_scaled = frozenset(axis for axis, ok in done.items() if ok)
+        if changed:
+            out.mapping = aes()
+            out.mapping.update(own)
+        if getattr(layer, "layer_data", None) is not None:
+            out.layer_data = new
+        return out
+
+    replaced = {id(layer): moved(layer, mapping) for layer, mapping in users}
+    layers = [replaced.get(id(layer), layer) for layer in layers]
+    rug_layers = [replaced.get(id(layer), layer) for layer in rug_layers]
+    g = copy.copy(g)
+    g.labs = labs
+    if full is not None and id(full) in new_frames:
+        g.data = new_frames[id(full)]
+    if data is not None and id(data) in new_frames:
+        data = new_frames[id(data)]
+    return g, data, layers, rug_layers, dropped, lost
 
 
 def _last_finite(mat: np.ndarray) -> np.ndarray:
@@ -1488,10 +1695,12 @@ def _limits_in_scale(pscale, sc) -> tuple[float | None, float | None]:
         if pscale.kind == "date" or (sc is not None and sc.kind == "dt"):
             return float(pd.Timestamp(value).timestamp())
         number = float(value)
-        if sc is not None and getattr(sc, "trans", None) == "log10":
-            if number <= 0:
+        trans = getattr(sc, "trans", None) if sc is not None else None
+        if trans is not None:
+            out = trans.value(number)
+            if out is None:
                 raise ValueError("log scale limits must be positive")
-            return math.log10(number)
+            return out
         return number
     a, b = conv(lo), conv(hi)
     if a is not None and b is not None and b < a:
@@ -1548,8 +1757,11 @@ def _remap_codes(codes, remap: dict, default) -> np.ndarray:
     return out
 
 
-def _rug_positions(scale, series) -> np.ndarray:
-    """Values in the scale's own units; NaN where they have no place."""
+def _rug_positions(scale, series, pre_scaled: bool = False) -> np.ndarray:
+    """Values in the scale's own units; NaN where they have no place.
+
+    ``pre_scaled``: the values are already in the scale's transformed space.
+    """
     kind, pos, cats = col_values(series)
     if scale.kind == "cat":
         index = {c: i for i, c in enumerate(scale.cats)}
@@ -1567,9 +1779,9 @@ def _rug_positions(scale, series) -> np.ndarray:
         return np.array([index.get(str(v), np.nan) for v in series], dtype=np.float64)
     if kind == "cat":
         return np.full(len(pos), np.nan)
-    if getattr(scale, "trans", None) == "log10":
-        with np.errstate(divide="ignore", invalid="ignore"):
-            return np.where(pos > 0, np.log10(pos), np.nan)
+    trans = getattr(scale, "trans", None)
+    if trans is not None and not pre_scaled:
+        return trans.transform(pos)
     return pos
 
 
@@ -1599,7 +1811,9 @@ def _rug_specs(rug_layers, g, scales, theme, cspec, cat_colours) -> list[dict]:
             axis = "x" if side in "bt" else "y"
             if axis not in series or axis not in scales:
                 continue
-            values = _rug_positions(scales[axis], series[axis])
+            values = _rug_positions(
+                scales[axis], series[axis], axis in getattr(rug, "_pre_scaled", ())
+            )
             keep = np.isfinite(values)
             item = {
                 "side": side,
@@ -1942,7 +2156,11 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         raise ValueError("add a geom: ggplot(df, aes(...)) + geom_point()")
     # aes(ymin="mean - se"), aes(colour="factor(cyl)"): computed columns.
     from plot3.aesexpr import add_expression_columns
+    from plot3.wide import melt_wide_layers, melt_wide_mapping
 
+    # aes(y=columns("m_*")) and geom_boxplot(columns=["a", "b"]): wide
+    # columns stacked to long form (a faceted panel arrives stacked).
+    g = melt_wide_layers(melt_wide_mapping(g))
     g = add_expression_columns(g)
     # Function layers and vector fields sample their own grid, so a figure
     # may have no data frame.
@@ -2015,6 +2233,13 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     addon_map: dict[int, list] = {}
     for index, addon in getattr(g, "_addons", None) or []:
         addon_map.setdefault(int(index), []).append(addon)
+    # scale_y_log10(): statistics see the transformed values (ggplot2).
+    # coord_transform() leaves them to the drawing, below.
+    upright = g
+    g, data, layers_in, rug_layers, dropped_pre, trans_lost = _transform_before_stats(
+        g, data, layers_in, rug_layers, lambda axis: _scale_transform(upright, axis)
+    )
+
     def expand_all() -> list:
         out = []
         for index, geom in enumerate(layers_in):
@@ -2033,10 +2258,12 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
                 coord,
                 addon_map.get(index),
             )
-            if isinstance(result, list):
-                out.extend(result)
-            else:
-                out.append(result)
+            pre_scaled = getattr(geom, "_pre_scaled", frozenset())
+            for piece in result if isinstance(result, list) else [result]:
+                if getattr(piece, "_pre_scaled", None) != pre_scaled:
+                    piece = copy.copy(piece)
+                    piece._pre_scaled = pre_scaled
+                out.append(piece)
         return out
 
     steps_before = getattr(slider, "steps", None)
@@ -2188,16 +2415,34 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         else None
     )
 
-    def _axis_trans(axis: str) -> str | None:
-        if axis == "x" and getattr(g, "scale_x", None) is not None:
-            return "log10"
-        if axis == "y" and getattr(g, "scale_y", None) is not None:
-            return "log10"
-        return None
+    # The layer being absorbed: which of its axes hold scale-transformed data.
+    current = {"pre_scaled": frozenset()}
+
+    def _axis_trans(axis: str):
+        """(transformation, "scale" | "coord"), or (None, None)."""
+        scaled = _scale_transform(g, axis) if axis in ("x", "y") else None
+        coord_t = getattr(coord, axis, None) if isinstance(coord, coord_transform) else None
+        if scaled is not None and coord_t is not None:
+            raise ValueError(
+                f"{axis} has a scale transformation and coord_transform({axis}=); use one"
+            )
+        if scaled is not None:
+            return scaled, "scale"
+        if coord_t is not None:
+            return coord_t, "coord"
+        return None, None
+
+    def _trans_call(axis: str) -> str:
+        trans, stage = _axis_trans(axis)
+        if stage == "coord":
+            return f'coord_transform({axis}="{trans.name}")'
+        if trans is not None and trans.name == "log10":
+            return f"scale_{axis}_log10()"
+        return f'scale_{axis}_continuous(trans="{getattr(trans, "name", "")}")'
 
     def _absorb_level_positions(v: np.ndarray, levels: list[str], axis: str = "x") -> np.ndarray:
-        if _axis_trans(axis) == "log10":
-            raise ValueError(f"scale_{axis}_log10() cannot be used with categorical {axis}")
+        if _axis_trans(axis)[0] is not None:
+            raise ValueError(f"{_trans_call(axis)} cannot be used with categorical {axis}")
         sc = scales.get(axis)
         if sc is None or (sc.kind == "num" and not math.isfinite(sc.lo)):
             sc = scales[axis] = Scale("cat")
@@ -2222,12 +2467,10 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
 
     def _absorb_position(axis: str, kind: str, v: np.ndarray, cats: list[str]):
         nonlocal dropped_log
-        trans = _axis_trans(axis)
+        trans, stage = _axis_trans(axis)
         sc = scales.get(axis)
-        if trans == "log10" and kind != "num":
-            raise ValueError(
-                f"scale_{axis}_log10() needs a numeric {axis} column"
-            )
+        if trans is not None and kind != "num":
+            raise ValueError(f"{_trans_call(axis)} needs a numeric {axis} column")
         if sc is None:
             sc = scales[axis] = Scale(kind, trans=trans if kind == "num" else None)
         elif sc.kind != kind:
@@ -2249,8 +2492,8 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             v = out.reshape(np.shape(v))
             sc.cats = merged
         else:
-            if trans == "log10":
-                v, n_bad = _log10_values(v)
+            if trans is not None and (stage == "coord" or axis not in current["pre_scaled"]):
+                v, n_bad = _transform_values(trans, v)
                 dropped_log += n_bad
             sc.widen(v)
         return v
@@ -2311,7 +2554,7 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
 
     def _drop_log_rows(vals: dict) -> None:
         log_on = any(
-            getattr(scales.get(a), "trans", None) == "log10" for a in axes
+            getattr(scales.get(a), "trans", None) is not None for a in axes
         )
         if not log_on or "frames" in vals:
             return
@@ -2387,7 +2630,9 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     # Pass 1 — per-layer values + global scale domains.
     # Only selected columns are materialised to pandas at this boundary.
     layer_vals = []
+    dropped_log += dropped_pre
     for geom, m in resolved:
+        current["pre_scaled"] = getattr(geom, "_pre_scaled", frozenset())
         anim = getattr(geom, "_anim", None)
         if anim is not None:
             layer_vals.append(_vals_from_function_anim(anim))
@@ -2514,6 +2759,14 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         if getattr(geom, "data_override", None) is None and frame is not None:
             # ggplot2 says when rows are dropped; plot3 used to do it silently.
             removed = n_rows(frame) - len(sub) - frame_rows_dropped
+            masks = trans_lost.get(id(frame))
+            if masks:
+                # Already counted as omitted by the log scale.
+                gone = np.zeros(n_rows(frame), dtype=bool)
+                for col in cols:
+                    if col in masks:
+                        gone |= masks[col]
+                removed -= int(gone.sum())
             if removed > 0:
                 word = "row" if removed == 1 else "rows"
                 missing_notes.append(
@@ -2617,8 +2870,9 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         x_domain = getattr(geom, "_x_domain", None)
         if x_domain is not None and "x" in scales and scales["x"].kind == "num":
             dom = np.asarray([x_domain[0], x_domain[1]], dtype=np.float64)
-            if getattr(scales["x"], "trans", None) == "log10":
-                dom, n_bad = _log10_values(dom)
+            x_trans, x_stage = _axis_trans("x")
+            if x_trans is not None and (x_stage == "coord" or "x" not in current["pre_scaled"]):
+                dom, n_bad = _transform_values(x_trans, dom)
                 dropped_log += n_bad
             scales["x"].widen(dom)
         # Bars / densities include the baseline at y=0 in the domain.
@@ -2627,8 +2881,10 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             geom.kind in {"col", "area"}
             or getattr(geom, "_baseline_zero", False)
         ) and "y" in scales and scales["y"].kind == "num":
-            if getattr(scales["y"], "trans", None) != "log10":
-                scales["y"].widen(np.asarray([0.0], dtype=np.float64))
+            y_trans = getattr(scales["y"], "trans", None)
+            zero = 0.0 if y_trans is None else y_trans.value(0.0)
+            if zero is not None:
+                scales["y"].widen(np.asarray([zero], dtype=np.float64))
         # Violin, dodged bars, error bars: numeric x positions on a
         # categorical axis were joined to the category list above.
         if "color" in m:
@@ -2701,7 +2957,9 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     for rug in rug_layers:
         for axis, series in _rug_series(rug, g):
             if axis in scales and scales[axis].kind in {"num", "dt"}:
-                values = _rug_positions(scales[axis], series)
+                values = _rug_positions(
+                    scales[axis], series, axis in getattr(rug, "_pre_scaled", ())
+                )
                 scales[axis].widen(values[np.isfinite(values)])
 
     for a in axes:
@@ -2712,10 +2970,12 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
     for ax, (lo, hi) in force.items():
         if ax in scales and scales[ax].kind == "num":
             lo_f, hi_f = float(lo), float(hi)
-            if getattr(scales[ax], "trans", None) == "log10":
-                if lo_f <= 0 or hi_f <= 0:
+            trans = getattr(scales[ax], "trans", None)
+            if trans is not None:
+                lo_t, hi_t = trans.value(lo_f), trans.value(hi_f)
+                if lo_t is None or hi_t is None:
                     raise ValueError(f"scale_{ax}_log10() limits must be positive")
-                lo_f, hi_f = math.log10(lo_f), math.log10(hi_f)
+                lo_f, hi_f = lo_t, hi_t
             scales[ax].lo = lo_f
             scales[ax].hi = hi_f
             if scales[ax].hi <= scales[ax].lo:
@@ -2753,12 +3013,14 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
             lo, hi = float(bounds[0]), float(bounds[1])
             if hi < lo:
                 lo, hi = hi, lo
-            if getattr(scales[axis_name], "trans", None) == "log10":
-                if lo <= 0 or hi <= 0:
+            trans = getattr(scales[axis_name], "trans", None)
+            if trans is not None:
+                lo_t, hi_t = trans.value(lo), trans.value(hi)
+                if lo_t is None or hi_t is None:
                     raise ValueError(
                         f"scale_{axis_name}_log10() limits must be positive"
                     )
-                lo, hi = math.log10(lo), math.log10(hi)
+                lo, hi = lo_t, hi_t
             if hi <= lo:
                 hi = lo + 1.0
             scales[axis_name].lo = lo
@@ -3833,10 +4095,43 @@ def facet_cells(g: ggplot) -> dict:
     ``row_strips`` to the right, as in ggplot2.
     """
     from plot3.geoms import facet_grid as _facet_grid
+    from plot3.wide import melt_wide_layers, melt_wide_mapping
 
+    # Stack aes(y=columns(...)) and columns= first, so facet_wrap("name")
+    # finds the column of stacked names.
+    g = melt_wide_layers(melt_wide_mapping(g))
     facet = g.facet
     if g.data is None:
         raise ValueError("ggplot has no data")
+
+    def facet_source(column):
+        """The plot's data, or else a layer's own data, holding ``column``."""
+        if has_column(g.data, column):
+            return g.data
+        for layer in g.layers:
+            own = getattr(layer, "layer_data", None)
+            if own is not None and has_column(own, column):
+                return own
+        raise ColumnNotFound([column], g.data)
+
+    def split(data, filters):
+        # ggplot2: data without the facet column appear in every panel.
+        for column, level in filters:
+            if column is not None and data is not None and has_column(data, column):
+                data = _subset(data, column, level)
+        return data
+
+    def panel_for(filters):
+        panel = _clone_ggplot_with_data(g, split(g.data, filters))
+        layers = []
+        for layer in g.layers:
+            own = getattr(layer, "layer_data", None)
+            if own is not None and any(c is not None and has_column(own, c) for c, _ in filters):
+                layer = copy.copy(layer)
+                layer.layer_data = split(own, filters)
+            layers.append(layer)
+        panel.layers = layers
+        return panel
     # ggplot2: "fixed" shares every axis, "free" none, "free_x" / "free_y"
     # all but that one.
     freed = {"fixed": set(), "free_x": {"x"}, "free_y": {"y"}}.get(facet.scales)
@@ -3863,15 +4158,13 @@ def facet_cells(g: ggplot) -> dict:
     cells: list[dict] = []
     if not isinstance(facet, _facet_grid):
         column = facet.variable
-        if not has_column(g.data, column):
-            raise ColumnNotFound([column], g.data)
-        levels = _facet_levels(g.data, column)
+        levels = _facet_levels(facet_source(column), column)
         if not levels:
             raise ValueError("facet_wrap() found no panel levels")
         ncol, nrow = _panel_grid(len(levels), facet.ncol, facet.nrow)
         for index, level in enumerate(levels):
             label = _strip_text(facet, column, level)
-            panel = child(_clone_ggplot_with_data(g, _subset(g.data, column, level)))
+            panel = child(panel_for([(column, level)]))
             panel.labs = {
                 k: v for k, v in panel.labs.items()
                 if k not in {"title", "subtitle", "caption", "tag"}
@@ -3882,20 +4175,21 @@ def facet_cells(g: ggplot) -> dict:
                 "row_strips": None, "header": header, "kind": "wrap",
                 "legend": legend}
 
-    for column in (facet.rows, facet.cols):
-        if column is not None and not has_column(g.data, column):
-            raise ColumnNotFound([column], g.data)
-    row_levels = _facet_levels(g.data, facet.rows) if facet.rows else [None]
-    col_levels = _facet_levels(g.data, facet.cols) if facet.cols else [None]
+    row_levels = _facet_levels(facet_source(facet.rows), facet.rows) if facet.rows else [None]
+    col_levels = _facet_levels(facet_source(facet.cols), facet.cols) if facet.cols else [None]
     nrow, ncol = len(row_levels), len(col_levels)
     for r, row_level in enumerate(row_levels):
-        rows_data = _subset(g.data, facet.rows, row_level)
         for c, col_level in enumerate(col_levels):
-            piece = _subset(rows_data, facet.cols, col_level)
-            if n_rows(piece) == 0:
+            filters = [(facet.rows, row_level), (facet.cols, col_level)]
+            panel = panel_for(filters)
+            frames = [panel.data] + [
+                layer.layer_data for layer in panel.layers
+                if getattr(layer, "layer_data", None) is not None
+            ]
+            if all(frame is None or n_rows(frame) == 0 for frame in frames):
                 cells.append({"row": r, "col": c, "fig": None, "strip": None})
                 continue
-            panel = child(_clone_ggplot_with_data(g, piece))
+            panel = child(panel)
             panel.labs = {
                 k: v for k, v in panel.labs.items()
                 if k not in {"title", "subtitle", "caption", "tag"}

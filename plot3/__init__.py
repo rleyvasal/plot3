@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from plot3.__version__ import __version__
+from plot3.transforms import pseudo_log_trans, transform_pseudo_log
+from plot3.wide import column_names, columns
 from plot3.geoms import (
     aes,
     annotate,
@@ -14,6 +16,8 @@ from plot3.geoms import (
     expand_limits,
     coord_cartesian,
     coord_flip,
+    coord_trans,
+    coord_transform,
     coord_polar,
     derivative,
     facet_grid,
@@ -195,6 +199,12 @@ __all__ = [
     "stat_qq_line",
     "stat_ecdf",
     "coord_flip",
+    "coord_trans",
+    "coord_transform",
+    "columns",
+    "column_names",
+    "pseudo_log_trans",
+    "transform_pseudo_log",
     "annotate",
     "arrow",
     "position_dodge",
