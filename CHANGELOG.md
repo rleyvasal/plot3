@@ -4,7 +4,7 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.11.0 — 2026-11-02
 
 Log scales transform the data before statistics, as in ggplot2, and a
 layer can plot several measurement columns without reshaping.
