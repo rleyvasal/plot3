@@ -22,6 +22,10 @@ def _as_column_name(value):
     """
     if value is None or isinstance(value, str):
         return value
+    from plot3.wide import _WideMarker
+
+    if isinstance(value, _WideMarker):
+        return value  # aes(y=columns("m_*")): stacked before the stats
     # Positional columns for ArrayTable / integer-named frames (not bool).
     if isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_)):
         return str(int(value))

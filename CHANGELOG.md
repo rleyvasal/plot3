@@ -25,6 +25,14 @@ layer can plot several measurement columns without reshaping.
   box or violin per column, overlaid histograms and densities, one line
   per column on a shared x, stacked or (`position="dodge"`) grouped bars.
   `names_to=` / `values_to=` rename the two columns.
+- The same stacking in `aes()`: `aes(x=column_names(),
+  y=columns("measurement_*"), fill=column_names())` stacks the plot's data
+  once, before facets, so every layer sees the long rows and
+  `facet_wrap("name")` gives one panel per column. `columns()` takes names,
+  a list, a `{column: label}` dict, or a pattern; in notebooks it takes bare
+  names.
+- Facets split a layer's own data (`data=` or `columns=`) when it holds
+  the facet column, as in ggplot2; other data appear in every panel.
 
 ### Changed
 

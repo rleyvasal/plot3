@@ -118,3 +118,93 @@ def test_errors():
         build_spec(ggplot(_wide()) + geom_boxplot(aes(y="measurement_a"), columns=["measurement_b"]))
     with pytest.raises(ValueError, match="names_to"):
         build_spec(ggplot(_wide().assign(name=1)) + geom_boxplot(columns=["measurement_a"]))
+
+
+# ── aes(y=columns(...)): the stacking written in the mapping ────────────────
+
+from plot3 import column_names, columns, facet_grid  # noqa: E402
+from plot3.build import facet_cells  # noqa: E402
+
+
+def test_aes_columns_matches_the_layer_form():
+    df = _wide()
+    cols = ["measurement_a", "measurement_b", "measurement_c"]
+    in_aes, _ = build_spec(
+        ggplot(df, aes(x=column_names(), y=columns(cols), fill=column_names())) + geom_boxplot()
+    )
+    in_layer, _ = build_spec(ggplot(df) + geom_boxplot(columns=cols))
+    assert in_aes["scales"] == in_layer["scales"]
+    assert in_aes["color"]["cats"] == cols
+    assert (in_aes["labs"]["x"], in_aes["labs"]["y"]) == ("name", "value")
+
+
+def test_aes_columns_reach_every_layer():
+    fig = (ggplot(_wide(), aes(x=column_names(), y=columns("measurement_*")))
+           + geom_boxplot() + geom_point())
+    spec, _ = build_spec(fig)
+    assert [layer["kind"] for layer in spec["layers"]] == ["box", "point"]
+    assert spec["layers"][1]["n"] == 9
+
+
+def test_aes_columns_takes_names_dicts_and_new_column_names():
+    spec, _ = build_spec(
+        ggplot(_wide(), aes(x="observation",
+                            y=columns("measurement_a", "measurement_c", names_to="m", values_to="mm"),
+                            colour=column_names()))
+        + geom_line()
+    )
+    assert spec["color"]["cats"] == ["measurement_a", "measurement_c"]
+    assert (spec["labs"]["y"], spec["labs"]["color"]) == ("mm", "m")
+    renamed, _ = build_spec(
+        ggplot(_wide(), aes(x="observation", y=columns({"measurement_a": "A"}), colour=column_names()))
+        + geom_point()
+    )
+    assert renamed["color"]["cats"] == ["A"]
+
+
+def test_lines_without_a_colour_are_still_one_per_column():
+    fig = ggplot(_wide(), aes(x="observation", y=columns("measurement_*"))) + geom_line()
+    spec, _ = build_spec(fig)
+    assert len(spec["layers"][0]["groups"]) == 3
+
+
+def test_facet_wrap_by_the_stacked_names():
+    fig = (ggplot(_wide(), aes(x="observation", y=columns("measurement_a", "measurement_b")))
+           + geom_line() + facet_wrap("name"))
+    cells = facet_cells(fig)["cells"]
+    assert [cell["strip"] for cell in cells] == ["measurement_a", "measurement_b"]
+    assert [list(cell["fig"].data["value"]) for cell in cells] == [[10.0, 15.0, 8.0], [12.0, 14.0, 10.0]]
+    assert "measurement_b" in build_doc(fig)
+
+
+def test_facet_grid_with_stacked_names_and_another_column():
+    fig = (ggplot(_wide(), aes(x="observation", y=columns("measurement_*")))
+           + geom_point() + facet_grid(rows="site", cols="name"))
+    layout = facet_cells(fig)
+    assert (layout["nrow"], layout["ncol"]) == (2, 3)
+
+
+def test_layer_columns_facet_by_name_splits_the_layer_data():
+    fig = ggplot(_wide()) + geom_boxplot(columns="measurement_*") + facet_wrap("name")
+    cells = facet_cells(fig)["cells"]
+    assert len(cells) == 3
+    assert [len(cell["fig"].layers[0].layer_data) for cell in cells] == [3, 3, 3]
+
+
+def test_aes_columns_errors():
+    with pytest.raises(ValueError, match="column_names"):
+        build_spec(ggplot(_wide(), aes(x="observation", y="measurement_a", colour=column_names())) + geom_point())
+    with pytest.raises(ValueError, match="one set"):
+        build_spec(ggplot(_wide(), aes(x=columns("measurement_a"), y=columns("measurement_b"))) + geom_point())
+    with pytest.raises(ValueError, match="not both"):
+        build_spec(ggplot(_wide()) + geom_boxplot(aes(y=columns("measurement_a")), columns=["measurement_b"]))
+
+
+def test_notebook_bare_names_inside_columns_become_strings():
+    import ast
+
+    from plot3.masking import apply_masking, default_known_names
+
+    src = "aes(x=column_names(), y=columns(measurement_a, measurement_b))"
+    out = ast.unparse(ast.parse(apply_masking(src, known=default_known_names())))
+    assert out == "aes(x=column_names(), y=columns('measurement_a', 'measurement_b'))"

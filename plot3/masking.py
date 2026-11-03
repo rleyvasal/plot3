@@ -110,6 +110,8 @@ _PASSTHROUGH_KW = frozenset(
 )
 
 _FORMULA_CALLS = frozenset({"geom_function", "geom_vector_field"})
+# aes(y=columns(a, b)): wide-form markers whose arguments are column names.
+_WIDE_CALLS = frozenset({"columns", "column_names"})
 
 _FACETS = frozenset({"facet_wrap", "facet_grid"})
 
@@ -521,6 +523,14 @@ class Plot3MaskTransformer(ast.NodeTransformer):
         Expressions over notebook variables or modules are left alone.
         """
         if isinstance(node, (ast.Name, ast.Constant)) or _is_bt_call(node):
+            return self._mask_selector(node)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in _WIDE_CALLS
+            and self._plot3s(node.func)
+        ):
+            # columns(measurement_a, measurement_b): each name is a column.
             return self._mask_selector(node)
         known = self._known()
         called = {

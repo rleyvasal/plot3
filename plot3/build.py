@@ -2156,12 +2156,12 @@ def build_spec(g: ggplot) -> tuple[dict, list[tuple[str, str]]]:
         raise ValueError("add a geom: ggplot(df, aes(...)) + geom_point()")
     # aes(ymin="mean - se"), aes(colour="factor(cyl)"): computed columns.
     from plot3.aesexpr import add_expression_columns
+    from plot3.wide import melt_wide_layers, melt_wide_mapping
 
+    # aes(y=columns("m_*")) and geom_boxplot(columns=["a", "b"]): wide
+    # columns stacked to long form (a faceted panel arrives stacked).
+    g = melt_wide_layers(melt_wide_mapping(g))
     g = add_expression_columns(g)
-    # geom_boxplot(columns=["a", "b"]): wide columns stacked to long form.
-    from plot3.wide import melt_wide_layers
-
-    g = melt_wide_layers(g)
     # Function layers and vector fields sample their own grid, so a figure
     # may have no data frame.
     needs_data = any(
@@ -4095,10 +4095,43 @@ def facet_cells(g: ggplot) -> dict:
     ``row_strips`` to the right, as in ggplot2.
     """
     from plot3.geoms import facet_grid as _facet_grid
+    from plot3.wide import melt_wide_layers, melt_wide_mapping
 
+    # Stack aes(y=columns(...)) and columns= first, so facet_wrap("name")
+    # finds the column of stacked names.
+    g = melt_wide_layers(melt_wide_mapping(g))
     facet = g.facet
     if g.data is None:
         raise ValueError("ggplot has no data")
+
+    def facet_source(column):
+        """The plot's data, or else a layer's own data, holding ``column``."""
+        if has_column(g.data, column):
+            return g.data
+        for layer in g.layers:
+            own = getattr(layer, "layer_data", None)
+            if own is not None and has_column(own, column):
+                return own
+        raise ColumnNotFound([column], g.data)
+
+    def split(data, filters):
+        # ggplot2: data without the facet column appear in every panel.
+        for column, level in filters:
+            if column is not None and data is not None and has_column(data, column):
+                data = _subset(data, column, level)
+        return data
+
+    def panel_for(filters):
+        panel = _clone_ggplot_with_data(g, split(g.data, filters))
+        layers = []
+        for layer in g.layers:
+            own = getattr(layer, "layer_data", None)
+            if own is not None and any(c is not None and has_column(own, c) for c, _ in filters):
+                layer = copy.copy(layer)
+                layer.layer_data = split(own, filters)
+            layers.append(layer)
+        panel.layers = layers
+        return panel
     # ggplot2: "fixed" shares every axis, "free" none, "free_x" / "free_y"
     # all but that one.
     freed = {"fixed": set(), "free_x": {"x"}, "free_y": {"y"}}.get(facet.scales)
@@ -4125,15 +4158,13 @@ def facet_cells(g: ggplot) -> dict:
     cells: list[dict] = []
     if not isinstance(facet, _facet_grid):
         column = facet.variable
-        if not has_column(g.data, column):
-            raise ColumnNotFound([column], g.data)
-        levels = _facet_levels(g.data, column)
+        levels = _facet_levels(facet_source(column), column)
         if not levels:
             raise ValueError("facet_wrap() found no panel levels")
         ncol, nrow = _panel_grid(len(levels), facet.ncol, facet.nrow)
         for index, level in enumerate(levels):
             label = _strip_text(facet, column, level)
-            panel = child(_clone_ggplot_with_data(g, _subset(g.data, column, level)))
+            panel = child(panel_for([(column, level)]))
             panel.labs = {
                 k: v for k, v in panel.labs.items()
                 if k not in {"title", "subtitle", "caption", "tag"}
@@ -4144,20 +4175,21 @@ def facet_cells(g: ggplot) -> dict:
                 "row_strips": None, "header": header, "kind": "wrap",
                 "legend": legend}
 
-    for column in (facet.rows, facet.cols):
-        if column is not None and not has_column(g.data, column):
-            raise ColumnNotFound([column], g.data)
-    row_levels = _facet_levels(g.data, facet.rows) if facet.rows else [None]
-    col_levels = _facet_levels(g.data, facet.cols) if facet.cols else [None]
+    row_levels = _facet_levels(facet_source(facet.rows), facet.rows) if facet.rows else [None]
+    col_levels = _facet_levels(facet_source(facet.cols), facet.cols) if facet.cols else [None]
     nrow, ncol = len(row_levels), len(col_levels)
     for r, row_level in enumerate(row_levels):
-        rows_data = _subset(g.data, facet.rows, row_level)
         for c, col_level in enumerate(col_levels):
-            piece = _subset(rows_data, facet.cols, col_level)
-            if n_rows(piece) == 0:
+            filters = [(facet.rows, row_level), (facet.cols, col_level)]
+            panel = panel_for(filters)
+            frames = [panel.data] + [
+                layer.layer_data for layer in panel.layers
+                if getattr(layer, "layer_data", None) is not None
+            ]
+            if all(frame is None or n_rows(frame) == 0 for frame in frames):
                 cells.append({"row": r, "col": c, "fig": None, "strip": None})
                 continue
-            panel = child(_clone_ggplot_with_data(g, piece))
+            panel = child(panel)
             panel.labs = {
                 k: v for k, v in panel.labs.items()
                 if k not in {"title", "subtitle", "caption", "tag"}

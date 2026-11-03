@@ -222,6 +222,26 @@ ggplot(wide, aes(x="site")) + geom_col(columns="measurement_*")            # com
  + labs(fill="Measurement", y="mm"))
 ```
 
+The same stacking can be written in `aes()`, where you say which aesthetic
+gets the values (`columns(...)`) and which the column names
+(`column_names()`). There the data are stacked once for the whole plot,
+before facets split them, so every layer sees the long rows and
+`facet_wrap("name")` gives one panel per column. Each column is its own
+series unless `group` is mapped. In notebooks, `columns(measurement_a,
+measurement_b)` takes bare names.
+
+```python
+(ggplot(wide, aes(x=column_names(), y=columns("measurement_*"), fill=column_names()))
+ + geom_boxplot() + geom_jitter(width=0.1, height=0))
+ggplot(wide, aes(x="observation", y=columns("measurement_*"))) + geom_line() + facet_wrap("name")
+(ggplot(wide, aes(x="observation", y=columns("measurement_a", "measurement_b", values_to="mm"),
+                  colour=column_names()))
+ + geom_point() + facet_wrap("site"))
+```
+
+Faceting also splits a layer's own data when it holds the facet column, as
+in ggplot2, so `geom_boxplot(columns=...) + facet_wrap("name")` works too.
+
 Zoom without dropping data with `coord_cartesian`: a smoother or boxplot is
 still computed from every row, while `xlim()` and `scale_x_continuous(limits=)`
 remove the rows outside first.

@@ -17,6 +17,16 @@ the measurements. The layer is then mapped by what the geom draws:
 ``columns`` is a list, a dict ``{column: label}`` to rename them, or a
 pattern such as ``"measurement_*"``. ``names_to`` and ``values_to`` name the
 two new columns (and so the legend and value-axis titles).
+
+The same stacking can be written in ``aes()``, where you say which
+aesthetic gets the values and which the column names, as for any mapping::
+
+    ggplot(df, aes(x=column_names(), y=columns("measurement_*"), fill=column_names()))
+        + geom_boxplot() + geom_jitter()
+
+In the plot's ``aes()`` the data are stacked once, before facets split
+them, so every layer sees the long rows and ``facet_wrap("name")`` works.
+Each column is its own group unless ``group`` is mapped.
 """
 
 from __future__ import annotations
@@ -30,6 +40,67 @@ _DISTRIBUTION_BY_NAME = {"boxplot", "violin"}
 _ONE_VARIABLE = {"histogram", "density", "freqpoly", "ecdf"}
 _SAMPLE = {"qq", "qq_line"}
 _COLOUR_AES = ("color", "fill")
+
+
+class _WideMarker:
+    """A placeholder in aes() that stacking replaces with a column name."""
+
+
+class columns(_WideMarker):
+    """The values of several columns, stacked: ``aes(y=columns("m_*"))``.
+
+    Takes column names (``columns("a", "b")``), a list, a ``{column:
+    label}`` dict, or a pattern. ``names_to`` / ``values_to`` name the two
+    stacked columns (default ``name`` and ``value``).
+    """
+
+    def __init__(self, *cols, names_to: str = "name", values_to: str = "value"):
+        if len(cols) == 1 and isinstance(cols[0], (str, list, tuple, dict)):
+            self.spec = cols[0]
+        else:
+            self.spec = [str(c) for c in cols]
+        self.names_to = str(names_to)
+        self.values_to = str(values_to)
+
+    def __repr__(self):
+        return f"columns({self.spec!r})"
+
+
+class column_names(_WideMarker):
+    """Which stacked column a row came from: ``aes(fill=column_names())``."""
+
+    def __repr__(self):
+        return "column_names()"
+
+
+def _markers(mapping) -> tuple[columns | None, list[str], list[str]]:
+    """The ``columns()`` in a mapping, the aesthetics holding it, and those
+    holding ``column_names()``."""
+    found, value_aes, name_aes = None, [], []
+    for aes_name, value in dict(mapping or {}).items():
+        if isinstance(value, columns):
+            if found is not None and (value.spec, value.names_to, value.values_to) != (
+                found.spec, found.names_to, found.values_to
+            ):
+                raise ValueError("one aes() can stack one set of columns()")
+            found = found or value
+            value_aes.append(aes_name)
+        elif isinstance(value, column_names):
+            name_aes.append(aes_name)
+    if name_aes and found is None:
+        raise ValueError("column_names() needs columns(...) in the same aes()")
+    return found, value_aes, name_aes
+
+
+def _resolved_mapping(mapping, marker: columns, value_aes, name_aes, *, add_group: bool) -> dict:
+    out = dict(mapping or {})
+    for aes_name in value_aes:
+        out[aes_name] = marker.values_to
+    for aes_name in name_aes:
+        out[aes_name] = marker.names_to
+    if add_group and "group" not in out:
+        out["group"] = marker.names_to
+    return out
 
 
 def _selected(spec, available: list[str]) -> dict[str, str]:
@@ -132,12 +203,41 @@ def _mapping_for(geom, base_mapping, names_to: str, values_to: str) -> dict:
     return own
 
 
+def _as_aes(mapping: dict):
+    from plot3.geoms import aes
+
+    out = aes()
+    out.update(mapping)
+    return out
+
+
+def melt_wide_mapping(g):
+    """The figure with ``aes(y=columns(...))`` in its own mapping stacked:
+    its data hold the long rows, before facets split them."""
+    from plot3.table import get_columns
+
+    marker, value_aes, name_aes = _markers(g.mapping)
+    if marker is None:
+        return g
+    if g.data is None:
+        raise ValueError("columns() needs data: ggplot(df, aes(...))")
+    chosen = _selected(marker.spec, [str(c) for c in get_columns(g.data)])
+    out = copy.copy(g)
+    out.data = _melt(g.data, chosen, marker.names_to, marker.values_to)
+    out.mapping = _as_aes(_resolved_mapping(g.mapping, marker, value_aes, name_aes, add_group=True))
+    return out
+
+
 def melt_wide_layers(g):
-    """The figure with each ``columns=`` layer stacked into long form."""
+    """The figure with each ``columns=`` layer, and each layer whose own
+    ``aes()`` holds ``columns()``, stacked into long form."""
     from plot3.geoms import aes
     from plot3.table import get_columns
 
-    if not any(getattr(layer, "columns", None) is not None for layer in g.layers):
+    if not any(
+        getattr(layer, "columns", None) is not None or _markers(getattr(layer, "mapping", None))[0]
+        for layer in g.layers
+    ):
         return g
     out = copy.copy(g)
     labs = dict(getattr(g, "labs", None) or {})
@@ -151,6 +251,23 @@ def melt_wide_layers(g):
     layers = []
     for layer in g.layers:
         spec = getattr(layer, "columns", None)
+        marker, value_aes, name_aes = _markers(getattr(layer, "mapping", None))
+        if marker is not None:
+            if spec is not None:
+                raise ValueError("give columns= or aes(...=columns()), not both")
+            data = layer.layer_data if layer.layer_data is not None else g.data
+            if data is None:
+                raise ValueError("columns() needs data: ggplot(df) or the layer's data=")
+            moved = copy.copy(layer)
+            moved.layer_data = _melt(
+                data, _selected(marker.spec, [str(c) for c in get_columns(data)]),
+                marker.names_to, marker.values_to,
+            )
+            moved.mapping = _as_aes(
+                _resolved_mapping(layer.mapping, marker, value_aes, name_aes, add_group=True)
+            )
+            layers.append(moved)
+            continue
         if spec is None:
             layers.append(layer)
             continue
