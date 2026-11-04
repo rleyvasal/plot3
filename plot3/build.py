@@ -173,10 +173,13 @@ def _density_scale(counts: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return np.asarray(counts, dtype=np.float64) / (total * widths)
 
 
-def _grouped_histogram(geom, data, xcol, group_col, edges, centers, closed, stat="count"):
+def _grouped_histogram(geom, data, xcol, group_col, edges, centers, closed, stat="count",
+                       role="color"):
     """One histogram per group on shared bins, stacked like ggplot2.
 
-    Returns None for a continuous colour, which is not a grouping.
+    ``role`` is the aesthetic that maps ``group_col``: ``"color"`` fills each
+    group in its own colour, ``"group"`` keeps one colour. Returns None for a
+    continuous column, which is not a grouping.
     """
     from plot3 import stat2d
 
@@ -201,7 +204,7 @@ def _grouped_histogram(geom, data, xcol, group_col, edges, centers, closed, stat
     proxy.kind = "col"
     proxy.width = 1.0  # bars touch, as in a histogram
     proxy.position = getattr(geom, "position", "stack")
-    out = stat2d.positioned_bars(proxy, {"x": "__x", "y": "__y", "color": group_col}, table)
+    out = stat2d.positioned_bars(proxy, {"x": "__x", "y": "__y", role: group_col}, table)
     out._axis_labels = {"x": xcol, "y": stat}
     return out
 
@@ -708,13 +711,16 @@ def expand_stat_geom(
                 float(np.median(np.diff(edges))) if len(edges) > 1 else 1.0
             )
             edge_lo, edge_hi = float(edges[0]), float(edges[-1])
-            group_col = mapping.get("color")
-            if group_col and group_col != xcol and has_column(data, group_col):
-                grouped = _grouped_histogram(
-                    geom, data, xcol, group_col, edges, centers, closed, stat
-                )
-                if grouped is not None:
-                    return grouped
+            # Split by the colour mapping, else by aes(group=) (which
+            # columns() sets), so the group column survives the stat.
+            for role in ("color", "group"):
+                group_col = mapping.get(role)
+                if group_col and group_col != xcol and has_column(data, group_col):
+                    grouped = _grouped_histogram(
+                        geom, data, xcol, group_col, edges, centers, closed, stat, role
+                    )
+                    if grouped is not None:
+                        return grouped
             if stat == "density":
                 counts = _density_scale(counts, edges)
             frame = pd.DataFrame(
@@ -840,12 +846,18 @@ def expand_stat_geom(
         xcol = mapping["x"]
         require_columns(data, [xcol])
         colour_col = mapping.get("color")
+        colour_col = colour_col if colour_col and has_column(data, colour_col) else None
+        # Without a colour, aes(group=) (which columns() sets) still gives one
+        # curve per group, drawn in one colour, as in ggplot2.
+        group_col = None if colour_col else mapping.get("group")
+        group_col = group_col if group_col and group_col != xcol and has_column(data, group_col) else None
+        split_col = colour_col or group_col
         n_grid = int(getattr(geom, "n", 512))
         adjust = float(getattr(geom, "adjust", 1.0))
         fill = bool(getattr(geom, "fill", True))
         pieces: list[pd.DataFrame] = []
-        if colour_col and has_column(data, colour_col):
-            for key_tuple, piece in group_pieces(data, [colour_col]):
+        if split_col:
+            for key_tuple, piece in group_pieces(data, [split_col]):
                 grid, dens = _kde_1d(
                     numeric_array(piece, xcol, dropna=False),
                     n=n_grid,
@@ -854,7 +866,7 @@ def expand_stat_geom(
                 if grid.size == 0:
                     continue
                 frame = pd.DataFrame(
-                    {"x": grid, "y": dens, colour_col: key_tuple[0]}
+                    {"x": grid, "y": dens, split_col: key_tuple[0]}
                 )
                 pieces.append(frame)
         else:
@@ -872,6 +884,8 @@ def expand_stat_geom(
         map_kwargs = {"x": "x", "y": "y"}
         if colour_col and colour_col in frame.columns:
             map_kwargs["colour"] = colour_col
+        elif group_col and group_col in frame.columns:
+            map_kwargs["group"] = group_col
         out = _Geom(
             aes(**map_kwargs),
             color=geom.const_color,

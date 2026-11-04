@@ -162,11 +162,16 @@ def positioned_bars(geom: _Geom, mapping: dict, data: Any) -> _Geom:
         raise ValueError(f"geom_{geom.kind}() requires aes(x=)")
     colour = mapping.get("color")
     colour = colour if colour and colour != xcol and has_column(data, colour) else None
+    # aes(group=) without a colour splits the bars the same way (stacked or
+    # dodged), drawn in one colour, as in ggplot2.
+    group = None if colour else mapping.get("group")
+    group = group if group and group != xcol and has_column(data, group) else None
+    split = colour or group
     kind, dodge_width = position_kind(getattr(geom, "position", None), "stack")
     rel = float(getattr(geom, "width", 0.9))
     if geom.kind == "bar":
-        frame = _frame(data, [xcol, colour])
-        keys = [xcol] + ([colour] if colour else [])
+        frame = _frame(data, [xcol, split])
+        keys = [xcol] + ([split] if split else [])
         counts = frame.groupby(keys, sort=False, dropna=False, observed=True).size()
         frame = counts.reset_index(name="__y")
         axis = _axis(frame[xcol], discrete=True)
@@ -174,10 +179,10 @@ def positioned_bars(geom: _Geom, mapping: dict, data: Any) -> _Geom:
         ycol = mapping.get("y")
         if not ycol:
             raise ValueError("geom_col() requires aes(x=, y=)")
-        frame = _frame(data, [xcol, ycol, colour])
+        frame = _frame(data, [xcol, ycol, split])
         frame = frame.rename(columns={ycol: "__y"}) if ycol != "__y" else frame
         axis = _axis(frame[xcol])
-    groups, levels = _colour_groups(frame, colour)
+    groups, levels = _colour_groups(frame, split)
     n_groups = len(levels)
     xs = axis.values
     ys = frame["__y"].to_numpy(np.float64)
@@ -220,7 +225,7 @@ def positioned_bars(geom: _Geom, mapping: dict, data: Any) -> _Geom:
     rows_y: list[float] = []
     rows_c: list[Any] = []
     starts: list[list[int]] = []
-    colour_values = frame[colour].tolist() if colour else None
+    colour_values = frame[split].tolist() if split else None
     for i in range(len(frame)):
         if not (math.isfinite(bottoms[i]) and math.isfinite(tops[i])):
             continue
@@ -233,9 +238,12 @@ def positioned_bars(geom: _Geom, mapping: dict, data: Any) -> _Geom:
         starts.append([start, 4])
     out_frame = pd.DataFrame({"x": axis.out(np.asarray(rows_x)), "y": rows_y})
     mapping_out = {"x": "x", "y": "y"}
+    if split:
+        out_frame[split] = rows_c
     if colour:
-        out_frame[colour] = rows_c
         mapping_out["colour"] = colour
+    elif group:
+        mapping_out["group"] = group
     out = _layer(
         "poly", out_frame, mapping_out, geom,
         _groups=starts, _baseline_zero=True, linewidth=0.0,

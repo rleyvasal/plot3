@@ -11,10 +11,12 @@ from plot3 import (
     facet_wrap,
     geom_boxplot,
     geom_col,
+    geom_density,
     geom_histogram,
     geom_line,
     geom_point,
     geom_violin,
+    geom_vline,
     ggplot,
     labs,
     scale_y_log10,
@@ -231,3 +233,37 @@ def test_aes_mapping_and_columns_keyword_still_accepted():
     cols = geom_point(aes(x="observation"), columns=["measurement_a", "measurement_b"])
     assert cols.columns == ["measurement_a", "measurement_b"]
     build_spec(ggplot(_wide()) + cols)
+
+
+# ── stats keep the stacked name without a colour ─────────────────────────────
+
+
+def _ratios():
+    return pd.DataFrame({
+        "c_ratio": [0.8, 0.9, 1.0, 1.1, 1.2, 1.0],
+        "d_ratio": [1.1, 1.2, 1.3, 1.4, 1.2, 1.5],
+    })
+
+
+def test_histogram_of_x_columns_without_fill_builds_one_colour_stack():
+    fig = ggplot(_ratios(), aes(x=columns("c_ratio", "d_ratio"))) + geom_histogram(bins=4)
+    spec, _ = build_spec(fig)
+    layer = spec["layers"][0]
+    assert layer["kind"] == "poly"
+    assert layer["n"] == 4 * 2 * 4  # four corners per bar, one bar per bin per column
+    assert "constColor" in layer and not spec["legend"]
+
+
+def test_histogram_of_x_columns_faceted_by_name_with_a_reference_line():
+    fig = (ggplot(_ratios(), aes(x=columns("c_ratio", "d_ratio")))
+           + geom_histogram(bins=4) + facet_wrap("name") + geom_vline(xintercept=1))
+    assert "d_ratio" in build_doc(fig)
+
+
+def test_histogram_and_density_honour_aes_group_without_a_colour():
+    long = _long_equivalent(_ratios(), ["c_ratio", "d_ratio"])
+    hist, _ = build_spec(ggplot(long, aes(x="value", group="name")) + geom_histogram(bins=4))
+    assert hist["layers"][0]["n"] == 4 * 2 * 4
+    dens, _ = build_spec(ggplot(_ratios(), aes(x=columns("c_ratio", "d_ratio"))) + geom_density())
+    assert len(dens["layers"][0]["groups"]) == 2
+    assert not dens["legend"]
