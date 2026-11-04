@@ -4,6 +4,16 @@ All notable changes to plot3. Versions follow [semantic versioning](https://semv
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.11.2 — 2026-11-03
+
+### Fixed
+
+- `geom_histogram()` and `geom_density()` honour `aes(group=)` when no
+  fill or colour is mapped: one stacked histogram or one curve per group,
+  drawn in one colour. In particular `aes(x=columns("a", "b"))` with a
+  histogram or density no longer fails with "No column 'name' in the
+  data. The columns are: x, y." (also under `facet_wrap("name")`).
+
 ## 0.11.1 — 2026-11-03
 
 ### Fixed
